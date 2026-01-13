@@ -14,15 +14,29 @@ if [[ "$uname_s" != "darwin" ]]; then
   exit 1
 fi
 
-arch="unknown"
-case "$uname_m" in
-  arm64) arch="arm64" ;;
-  x86_64) arch="amd64" ;;
-  *)
-    echo "错误: 不支持的架构: ${uname_m}"
-    exit 1
-    ;;
-esac
+arch="${ARCH:-}"
+if [[ -z "${arch}" ]]; then
+  case "$uname_m" in
+    arm64) arch="arm64" ;;
+    x86_64) arch="amd64" ;;
+    *)
+      echo "错误: 不支持的架构: ${uname_m}"
+      exit 1
+      ;;
+  esac
+fi
+
+target_triple="${TARGET_TRIPLE:-}"
+if [[ -z "${target_triple}" ]]; then
+  case "${arch}" in
+    arm64) target_triple="aarch64-apple-darwin" ;;
+    amd64) target_triple="x86_64-apple-darwin" ;;
+    *)
+      echo "错误: 不支持的 ARCH: ${arch}（期望 arm64/amd64）"
+      exit 1
+      ;;
+  esac
+fi
 
 dist_dir="${HB_DIR}/dist"
 mkdir -p "$dist_dir"
@@ -36,6 +50,7 @@ echo "Homebrew tarball packaging (macOS)"
 echo "=========================================="
 echo "VERSION: ${VERSION}"
 echo "ARCH:    ${arch}"
+echo "TARGET:  ${target_triple}"
 echo "OUTPUT:  ${tarball}"
 echo "=========================================="
 echo ""
@@ -58,9 +73,11 @@ cargo xtask build \
   --profile release \
   ${xtask_without_ui_arg} \
   -- \
+  --target "${target_triple}" \
   --features ng-gateway-bin/ui-embedded
 
-bin_path="${REPO_ROOT}/target/release/ng-gateway-bin"
+target_dir="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
+bin_path="${target_dir}/${target_triple}/release/ng-gateway-bin"
 if [[ ! -f "$bin_path" ]]; then
   echo "错误: 未找到二进制: ${bin_path}"
   exit 1

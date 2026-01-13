@@ -79,10 +79,10 @@ jobs:
         include:
           - runner: macos-14
             arch: arm64
-          # macos-13 (Intel) is retired; use Intel large runner instead.
-          # Note: `macos-14-large` requires larger runners support on the repository/org.
-          - runner: macos-14-large
+            target: aarch64-apple-darwin
+          - runner: macos-14
             arch: amd64
+            target: x86_64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -101,6 +101,8 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Install Protoc
         run: brew install protobuf
@@ -109,6 +111,9 @@ jobs:
         env:
           VERSION: ${{ env.RELEASE_TAG }}
           WITHOUT_UI: "1"
+          # Cross-arch packaging support (also works for native arch).
+          ARCH: ${{ matrix.arch }}
+          TARGET_TRIPLE: ${{ matrix.target }}
         run: bash deploy/homebrew/scripts/package-tarball.sh
 
       - name: Upload tarball + sha256
@@ -246,17 +251,6 @@ jobs:
         with:
           tool: cross
 
-      - name: Setup cross toolchain env
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          set -euo pipefail
-          echo "CC=aarch64-linux-gnu-gcc" >> "${GITHUB_ENV}"
-          echo "CXX=aarch64-linux-gnu-g++" >> "${GITHUB_ENV}"
-          echo "AR=aarch64-linux-gnu-ar" >> "${GITHUB_ENV}"
-          echo "RANLIB=aarch64-linux-gnu-ranlib" >> "${GITHUB_ENV}"
-          # Some build scripts consult pkg-config; allow it to run in cross mode.
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "${GITHUB_ENV}"
-
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -279,6 +273,9 @@ jobs:
           DEB_ARCH: ${{ matrix.deb_arch }}
           # Let xtask use cross for the actual build.
           XTASK_CARGO: cross
+          # Do NOT export cross compiler vars globally (it breaks `go install nfpm` via cgo).
+          # If any build script consults pkg-config in cross mode, allow it here (scoped).
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
@@ -336,17 +333,6 @@ jobs:
         with:
           tool: cross
 
-      - name: Setup cross toolchain env
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          set -euo pipefail
-          echo "CC=aarch64-linux-gnu-gcc" >> "${GITHUB_ENV}"
-          echo "CXX=aarch64-linux-gnu-g++" >> "${GITHUB_ENV}"
-          echo "AR=aarch64-linux-gnu-ar" >> "${GITHUB_ENV}"
-          echo "RANLIB=aarch64-linux-gnu-ranlib" >> "${GITHUB_ENV}"
-          # Some build scripts consult pkg-config; allow it to run in cross mode.
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "${GITHUB_ENV}"
-
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -366,6 +352,7 @@ jobs:
           TARGET_TRIPLE: ${{ matrix.target }}
           RPM_ARCH: ${{ matrix.rpm_arch }}
           XTASK_CARGO: cross
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
