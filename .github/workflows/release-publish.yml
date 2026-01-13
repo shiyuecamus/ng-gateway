@@ -205,11 +205,22 @@ jobs:
           repository: shiyuecamus/ng-gateway-homebrew
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
+          ref: main
+          fetch-depth: 0
+          # We'll set the authenticated remote explicitly in the next step.
+          persist-credentials: false
 
       - name: Update Formula/ng-gateway.rb and push
         working-directory: tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
+          test -n "${HOMEBREW_TAP_TOKEN}"
+
+          # Ensure the push uses the provided PAT (GITHUB_TOKEN can't push to another repo).
+          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/shiyuecamus/ng-gateway-homebrew.git"
+
           mkdir -p Formula
           cp -f "/tmp/ng-gateway-formula/ng-gateway.rb" "Formula/ng-gateway.rb"
 
@@ -221,7 +232,7 @@ jobs:
           git add Formula/ng-gateway.rb
           git -c user.name="ng-gateway-ci" -c user.email="ci@users.noreply.github.com" \
             commit -m "chore(homebrew): bump ng-gateway to ${RELEASE_TAG}"
-          git push
+          git push origin HEAD:main
 
   build_linux_deb:
     name: Build Linux .deb (${{ matrix.deb_arch }})
