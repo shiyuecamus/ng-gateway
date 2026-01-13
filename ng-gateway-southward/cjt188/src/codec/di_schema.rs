@@ -957,9 +957,6 @@ mod tests {
 
         let schema = schema.unwrap();
         assert_eq!(schema.di, 0x901F);
-        // Python script removed both di and ser from heat schema, but missed one
-        // Let's count: settlement_heat, current_heat, heat_power, flow_rate, cumulative_flow,
-        //              supply_temp, return_temp, working_hours, datetime, status = 10 fields
         assert_eq!(schema.fields.len(), 10); // Excluded di and ser
         assert_eq!(schema.total_length(), 40); // 5+5+4+4+5+2+2+4+7+2 = 40
 

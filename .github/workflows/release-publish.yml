@@ -18,16 +18,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # ng-gateway-ui is a git submodule; we must fetch it for pnpm build.
+          submodules: recursive
 
       - name: Setup Node.js (corepack + pnpm cache)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "pnpm"
-          cache-dependency-path: ng-gateway-ui/pnpm-lock.yaml
 
-      - name: Enable corepack
-        run: corepack enable
+      - name: Enable corepack and activate pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@10.22.0 --activate
 
       - name: Install UI dependencies (pnpm)
         working-directory: ng-gateway-ui
@@ -39,27 +43,20 @@ jobs:
 
       - name: Pack dist -> ng-gateway-web/ui-dist.zip
         run: |
-          python3 - <<'PY'
-          from __future__ import annotations
-          from pathlib import Path
-          import zipfile
-          
-          dist_dir = Path("ng-gateway-ui/apps/web-antd/dist")
-          out_zip = Path("ng-gateway-web/ui-dist.zip")
-          
-          if not dist_dir.exists() or not dist_dir.is_dir():
-              raise SystemExit(f"UI dist dir not found: {dist_dir}")
-          
-          out_zip.parent.mkdir(parents=True, exist_ok=True)
-          
-          files = sorted([p for p in dist_dir.rglob("*") if p.is_file()])
-          with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-              for p in files:
-                  arcname = p.relative_to(dist_dir).as_posix()
-                  zf.write(p, arcname)
-          
-          print(f"[ok] packed: {out_zip} ({len(files)} files)")
-          PY
+          set -euo pipefail
+          dist_dir="ng-gateway-ui/apps/web-antd/dist"
+          out_zip="ng-gateway-web/ui-dist.zip"
+
+          test -d "${dist_dir}"
+          mkdir -p "$(dirname "${out_zip}")"
+
+          # Create a zip that can be consumed by the Rust build (ui-embedded).
+          # -X: eXclude extra file attributes for better reproducibility across runners.
+          out_zip_abs="$(pwd)/${out_zip}"
+          (cd "${dist_dir}" && zip -X -r -q "${out_zip_abs}" .)
+
+          test -f "${out_zip}"
+          echo "[ok] packed: ${out_zip}"
 
       - name: Upload artifact (ui-dist.zip)
         uses: actions/upload-artifact@v4
