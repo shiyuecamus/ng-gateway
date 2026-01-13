@@ -441,6 +441,12 @@ impl BuiltinSynchronizer {
                     }
                 };
 
+                // Store the library path as a runtime-root-relative path in the DB.
+                //
+                // Why: runtime directories can be relocated (via `general.runtime_dir` + chdir),
+                // so DB rows must not hardcode absolute paths.
+                let db_path = normalize_runtime_relative_path(&path);
+
                 Some(NewDriver {
                     name: probe.name.clone(),
                     description: probe.description,
@@ -452,7 +458,7 @@ impl BuiltinSynchronizer {
                     os_type: probe.os_type.into(),
                     os_arch: probe.os_arch.into(),
                     size: probe.size,
-                    path: path.to_string_lossy().to_string(),
+                    path: db_path,
                     checksum: probe.checksum,
                     metadata,
                 })
@@ -545,6 +551,9 @@ impl BuiltinSynchronizer {
                     }
                 };
 
+                // Store the library path as a runtime-root-relative path in the DB.
+                let db_path = normalize_runtime_relative_path(&path);
+
                 Some(NewPlugin {
                     name: probe.name.clone(),
                     description: probe.description,
@@ -556,7 +565,7 @@ impl BuiltinSynchronizer {
                     os_type: probe.os_type.into(),
                     os_arch: probe.os_arch.into(),
                     size: probe.size,
-                    path: path.to_string_lossy().to_string(),
+                    path: db_path,
                     checksum: probe.checksum,
                     metadata,
                 })
@@ -572,6 +581,23 @@ impl BuiltinSynchronizer {
 
         Ok(records)
     }
+}
+
+/// Normalize an artifact path so it can be stored in the database safely.
+///
+/// # Design
+/// - Always prefer runtime-root-relative paths (e.g. `drivers/builtin/libng_driver_xxx.so`).
+/// - If an absolute path is provided, we try to strip the current working directory prefix.
+///   This makes the path stable when users relocate `general.runtime_dir`.
+fn normalize_runtime_relative_path(path: &Path) -> String {
+    if path.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = path.strip_prefix(&cwd) {
+                return rel.to_string_lossy().to_string();
+            }
+        }
+    }
+    path.to_string_lossy().to_string()
 }
 
 /// A context for storing initialization data between different initializers

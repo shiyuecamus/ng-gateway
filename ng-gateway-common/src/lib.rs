@@ -18,7 +18,9 @@ pub use ng_gateway_error::{NGError, NGResult};
 
 // Legacy app context (keeping for backward compatibility)
 use logger::Logger;
-use ng_gateway_models::constants::{BUILTIN_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR, PLUGIN_DIR};
+use ng_gateway_models::constants::{
+    BUILTIN_DIR, CERT_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR, PKI_DIR, PLUGIN_DIR,
+};
 use ng_gateway_models::initializer::BuiltinSynchronizer;
 use ng_gateway_models::{
     settings::Settings, CacheProvider, CasbinService, DbManager, EventBus, Gateway, PermChecker,
@@ -115,27 +117,30 @@ impl NGAppContext {
         C: PermChecker + 'static,
         S: CasbinService + 'static,
     {
-        let mut logger = Logger::new({
-            if cfg!(debug_assertions) {
-                Some(Level::DEBUG)
-            } else {
-                Some(Level::INFO)
-            }
+        let mut logger = Logger::new(if cfg!(debug_assertions) {
+            Some(Level::DEBUG)
+        } else {
+            Some(Level::INFO)
         });
 
-        // Initiates logger
+        // Load settings first so we can apply runtime directory before initializing the logger.
+        // This ensures file logs (./logs) and other relative paths resolve under the runtime root.
+        let settings = Settings::new(config)?;
+
+        apply_runtime_dir(&settings.general.runtime_dir)?;
+
+        // Initiates logger (after runtime_dir applied).
         logger.initialize()?;
 
         let span = span!(Level::INFO, "init-app");
         let _guard = span.enter();
 
-        let settings = Settings::new(config)?;
-
         if settings.metrics.enabled {
             Self::init_metrics(&settings);
         }
 
-        // Ensure required runtime directories exist before subsystems start
+        // Ensure required runtime directories exist before subsystems start.
+        // This must run after settings are loaded so paths can be configured.
         ensure_runtime_directories()?;
 
         let event_bus = E::init(&settings).await;
@@ -466,6 +471,31 @@ impl NGAppContext {
     }
 }
 
+/// Apply the configured runtime directory by switching the process working directory.
+///
+/// # Why this exists
+/// The gateway intentionally uses relative paths (`./data`, `./drivers`, `./plugins`, `./certs`...)
+/// to keep distributions simple and portable. By setting the process working directory at startup,
+/// we can relocate the whole runtime tree without rewriting many path fields.
+fn apply_runtime_dir(runtime_dir: &str) -> NGResult<()> {
+    let dir = runtime_dir.trim();
+    if dir.is_empty() || dir == "." {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| NGError::from(format!("Failed to create runtime_dir {}: {}", dir, e)))?;
+
+    std::env::set_current_dir(dir).map_err(|e| {
+        NGError::from(format!(
+            "Failed to set current_dir to runtime_dir {}: {}",
+            dir, e
+        ))
+    })?;
+
+    Ok(())
+}
+
 /// Ensure required runtime directories exist
 ///
 /// This function creates essential directories used by the gateway at runtime,
@@ -474,7 +504,13 @@ impl NGAppContext {
 fn ensure_runtime_directories() -> NGResult<()> {
     // Compose directory list
     let dirs = [
+        // SQLite data directory is always a relative path under the runtime root.
+        // `runtime_dir` is applied by `apply_runtime_dir()` before we reach here.
         Path::new(DATA_DIR).to_path_buf(),
+        Path::new(CERT_DIR).to_path_buf(),
+        Path::new(PKI_DIR).to_path_buf(),
+        Path::new(PKI_DIR).join("own"),
+        Path::new(PKI_DIR).join("private"),
         Path::new(DRIVER_DIR).to_path_buf(),
         Path::new(PLUGIN_DIR).to_path_buf(),
         Path::new(DRIVER_DIR).join(BUILTIN_DIR),

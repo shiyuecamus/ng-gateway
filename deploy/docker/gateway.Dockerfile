@@ -221,6 +221,10 @@ ENV NG__WEB__UI__ENABLED=true
 ENV NG__WEB__UI__MODE=filesystem
 ENV NG__WEB__UI__FILESYSTEM_ROOT=/app/ui
 
+# Runtime root directory for relative paths (./data, ./drivers, ./plugins, ./certs, ...).
+# Keep it aligned with WORKDIR so the runtime layout is stable.
+ENV NG__GENERAL__RUNTIME_DIR=/app
+
 # Expose default ports
 # Keep ports aligned with the default `gateway.toml` and offline compose packaging.
 EXPOSE 8080

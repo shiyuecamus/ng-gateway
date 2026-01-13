@@ -26,8 +26,11 @@ image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 # - ca-certificates: ensure TLS certs available
 # - tzdata: avoid tz related failures in some builds/tests
 pre-build = [
+    # Enable multiarch packages so we can install target-arch OpenSSL headers.
+    # Without this, `openssl-sys` may fail to find `opensslconf.h` for aarch64.
+    "dpkg --add-architecture arm64 || true",
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libssl-dev:arm64 libsasl2-dev:arm64 libsqlite3-0 ca-certificates tzdata clang libclang-dev",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -51,7 +54,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]

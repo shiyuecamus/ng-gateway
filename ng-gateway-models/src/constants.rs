@@ -35,6 +35,8 @@ pub const SYSTEM_ADMIN_ROLE_CODE: &str = "SYSTEM_ADMIN";
 pub const SYSTEM_ADMIN_ROLE_NAME: &str = "系统管理员";
 
 pub const DATA_DIR: &str = "./data";
+pub const CERT_DIR: &str = "./certs";
+pub const PKI_DIR: &str = "./pki";
 pub const DRIVER_DIR: &str = "./drivers";
 pub const PLUGIN_DIR: &str = "./plugins";
 pub const BUILTIN_DIR: &str = "builtin";

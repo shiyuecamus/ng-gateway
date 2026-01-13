@@ -20,9 +20,11 @@ if [[ ! -f "${config_dir}/gateway.toml" && -f "${opt_dir}/gateway.toml" ]]; then
   cp -f "${opt_dir}/gateway.toml" "${config_dir}/gateway.toml"
 fi
 
-# Copy initial database on first install (do not overwrite runtime data).
-if [[ ! -f "${runtime_dir}/data/ng-gateway.db" && -f "${opt_dir}/data/ng-gateway.db" ]]; then
-  cp -f "${opt_dir}/data/ng-gateway.db" "${runtime_dir}/data/ng-gateway.db"
+# Create an optional environment override file.
+# Users can put overrides like:
+# - NG__GENERAL__RUNTIME_DIR=/var/lib/ng-gateway
+if [[ ! -f "${config_dir}/env" ]]; then
+  printf "%s\n" "# NG Gateway environment overrides (optional)" > "${config_dir}/env"
 fi
 
 # Ensure builtin drivers/plugins are available under runtime working directory.

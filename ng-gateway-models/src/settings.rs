@@ -4,7 +4,7 @@ use serde::{self, Deserialize};
 use std::{ops::Deref, sync::Arc};
 use sysinfo::System;
 
-use crate::constants::DATA_DIR;
+use crate::constants::{CERT_DIR, DATA_DIR};
 
 #[derive(Debug, Clone)]
 pub struct Settings(Arc<Inner>);
@@ -52,6 +52,21 @@ pub struct Inner {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct General {
+    /// Runtime root directory for all relative paths.
+    ///
+    /// # What this controls
+    /// The gateway uses many relative paths by design (e.g. `./data`, `./drivers`, `./plugins`,
+    /// `./certs`, `./pki`). This field defines the directory that those relative paths are
+    /// resolved from by changing the process working directory at startup.
+    ///
+    /// # Best practice
+    /// - Linux packages (systemd): keep `runtime_dir="."` and rely on `WorkingDirectory=...`.
+    /// - Containers/K8s: set an absolute path (e.g. `/var/lib/ng-gateway`) via config or env.
+    ///
+    /// # Environment override
+    /// - `NG__GENERAL__RUNTIME_DIR=/var/lib/ng-gateway`
+    #[serde(default = "General::runtime_dir_default")]
+    pub runtime_dir: String,
     #[serde(default = "General::ca_cert_path_default")]
     pub ca_cert_path: String,
     #[serde(default = "General::ca_key_path_default")]
@@ -70,6 +85,7 @@ pub struct General {
 impl Default for General {
     fn default() -> Self {
         General {
+            runtime_dir: General::runtime_dir_default(),
             ca_cert_path: General::ca_cert_path_default(),
             ca_key_path: General::ca_key_path_default(),
             collector: CollectorConfig::default(),
@@ -80,13 +96,46 @@ impl Default for General {
 }
 
 impl General {
+    fn runtime_dir_default() -> String {
+        ".".into()
+    }
+
     fn ca_cert_path_default() -> String {
-        "./certs/ca.crt".into()
+        "ca.crt".into()
     }
 
     fn ca_key_path_default() -> String {
-        "./certs/ca.key".into()
+        "ca.key".into()
     }
+
+    /// Resolve CA certificate path under the runtime root.
+    ///
+    /// # Rules
+    /// - If the configured value looks like a path (contains `/` or starts with `.`),
+    ///   it is treated as an explicit path and returned as-is.
+    /// - Otherwise it is treated as a file name under `CERT_DIR` (default: `./certs`).
+    pub fn ca_cert_path_resolved(&self) -> String {
+        resolve_cert_path(&self.ca_cert_path)
+    }
+
+    /// Resolve CA private key path under the runtime root.
+    ///
+    /// See `ca_cert_path_resolved()` for the resolution rules.
+    pub fn ca_key_path_resolved(&self) -> String {
+        resolve_cert_path(&self.ca_key_path)
+    }
+}
+
+/// Resolve a certificate-related path under `CERT_DIR` when a bare file name is provided.
+fn resolve_cert_path(value: &str) -> String {
+    let v = value.trim();
+    if v.is_empty() {
+        return v.to_string();
+    }
+    if v.starts_with('.') || v.contains('/') {
+        return v.to_string();
+    }
+    format!("{}/{}", CERT_DIR, v)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -530,10 +579,7 @@ impl NGDbConfig for Sqlite {
     }
 
     fn db_dir(&self) -> String {
-        std::path::Path::new(&self.path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| ".".to_string())
+        DATA_DIR.into()
     }
 }
 

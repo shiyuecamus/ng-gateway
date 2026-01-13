@@ -118,8 +118,8 @@ gateway:
     
     # General configuration
     general:
-      caCertPath: "./certs/ca.crt"
-      caKeyPath: "./certs/ca.key"
+      caCertPath: "ca.crt"
+      caKeyPath: "ca.key"
       
       # Southward communication
       southward:

@@ -119,8 +119,15 @@ gateway:
     
     # General configuration
     general:
-      caCertPath: "./certs/ca.crt"
-      caKeyPath: "./certs/ca.key"
+      # Runtime root directory. All relative paths (./data, ./drivers, ./plugins, ./certs, ...)
+      # are resolved under this directory.
+      #
+      # Recommendation for this Helm chart:
+      # - Keep it as "." because the gateway container image uses WORKDIR=/app.
+      runtimeDir: "."
+      # CA cert/key file names under ./certs (resolved under runtime root).
+      caCertPath: "ca.crt"
+      caKeyPath: "ca.key"
       
       # Southward communication configuration
       southward:

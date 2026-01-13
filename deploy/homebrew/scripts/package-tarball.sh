@@ -84,9 +84,6 @@ chmod +x "${root}/bin/ng-gateway-bin"
 # Default config for Homebrew (embedded UI mode)
 cp -f "${HB_DIR}/resources/gateway.toml" "${root}/gateway.toml"
 
-# Initial database (contains relative paths to drivers/plugins)
-cp -f "${REPO_ROOT}/data/ng-gateway.db" "${root}/data/ng-gateway.db"
-
 # Builtin drivers/plugins for current platform (dylib)
 cp -f "${REPO_ROOT}/drivers/builtin/"*.dylib "${root}/drivers/builtin/" 2>/dev/null || true
 cp -f "${REPO_ROOT}/plugins/builtin/"*.dylib "${root}/plugins/builtin/" 2>/dev/null || true

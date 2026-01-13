@@ -180,7 +180,7 @@ impl OpcuaServerRuntime {
         // Build server
         // PKI directory is not user-configurable by design:
         // use a stable, per-installed-plugin layout.
-        let pki_dir = format!("pki/plugin/{plugin_id}");
+        let pki_dir = format!("./pki/plugin/{plugin_id}");
 
         // Materialize configured trusted client certificates into PKI trust store
         // so native `CertificateStore` validation can pick them up.

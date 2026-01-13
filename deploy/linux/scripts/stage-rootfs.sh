@@ -88,14 +88,6 @@ else
   exit 1
 fi
 
-echo "[stage] initial database"
-if [[ -f "${REPO_ROOT}/data/ng-gateway.db" ]]; then
-  cp -f "${REPO_ROOT}/data/ng-gateway.db" "${opt_dir}/data/ng-gateway.db"
-else
-  echo "error: initial db not found: ${REPO_ROOT}/data/ng-gateway.db"
-  exit 1
-fi
-
 # Builtin drivers/plugins (shared objects) were deployed by xtask into
 # `drivers/builtin` and `plugins/builtin`.
 echo "[stage] builtin drivers/plugins"

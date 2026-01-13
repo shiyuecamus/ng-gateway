@@ -119,6 +119,8 @@ impl NGWebServer {
         // Configure SSL if enabled
         if settings.web.ssl.enabled {
             let https_addr = format!("{}:{}", settings.web.host, settings.web.ssl.port);
+            let ca_cert_path = settings.general.ca_cert_path_resolved();
+            let ca_key_path = settings.general.ca_key_path_resolved();
             server = server
                 .bind_rustls_0_23(
                     &https_addr,
@@ -126,8 +128,8 @@ impl NGWebServer {
                         &settings.web.ssl.cert,
                         &settings.web.ssl.key,
                         matches!(settings.web.ssl.r#type, SSLType::Auto),
-                        Some(&settings.general.ca_cert_path),
-                        Some(&settings.general.ca_key_path),
+                        Some(&ca_cert_path),
+                        Some(&ca_key_path),
                     )?,
                 )
                 .map_err(|e| {

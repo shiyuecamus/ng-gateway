@@ -3,7 +3,7 @@
 本目录用于管理 NG Gateway 的 **Homebrew（macOS）发布** 相关资源，目标是实现：
 
 - **用户侧安装简单**：`brew install <tap>/ng-gateway`
-- **运行即用**：默认提供 `gateway.toml`、内置 drivers/plugins、初始 SQLite DB（含相对路径）
+- **运行即用**：默认提供 `gateway.toml`、内置 drivers/plugins；SQLite DB 在首次启动时自动创建与迁移
 - **单机分发友好**：支持 `ui-embedded`（将 `ui-dist.zip` 内嵌到二进制），避免用户装 Node/pnpm
 
 ---
@@ -78,7 +78,7 @@ brew install ng/tap/ng-gateway
 
 ## 运行时目录设计（重要）
 
-因为内置 SQLite（`data/ng-gateway.db`）里保存的 drivers/plugins 路径是相对路径：
+因为网关运行时会将 drivers/plugins 的路径以“运行根目录相对路径”的方式写入 SQLite：
 
 - `./drivers/builtin/libng_driver_*.dylib`
 - `./plugins/builtin/libng_plugin_*.dylib`
@@ -90,7 +90,7 @@ brew install ng/tap/ng-gateway
 并把如下文件/目录放到这个运行目录（或建立符号链接）：
 
 - `gateway.toml`
-- `data/ng-gateway.db`
+- `data/`（数据库文件会在首次启动时生成到 `./data/ng-gateway.db`）
 - `drivers/`、`plugins/`
 - `certs/`、`pki/`（运行时生成/写入）
 

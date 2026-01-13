@@ -1,9 +1,18 @@
 # General
 [general]
+# Runtime root directory for all relative paths (./data, ./drivers, ./plugins, ./certs, ...).
+#
+# Best practice:
+# - In Linux packages we rely on systemd `WorkingDirectory=/var/lib/ng-gateway`, so keep this as "."
+# - In containers/K8s you can set an absolute path here (or via env) to relocate runtime state.
+#
+# Environment override:
+# - NG__GENERAL__RUNTIME_DIR=/var/lib/ng-gateway
+runtime_dir = "."
 # ca cert path
-ca_cert_path = "./certs/ca.crt"
+ca_cert_path = "ca.crt"
 # ca key path
-ca_key_path = "./certs/ca.key"
+ca_key_path = "ca.key"
 
 # Southward communication configuration
 [general.southward]
@@ -130,8 +139,7 @@ delimiter = ":"
 
 # Database
 [db.sqlite]
-# SQLite database file path (will be created automatically if not exists)
-# Final path resolves under ./data
+# SQLite database file path (resolved under `./data` by default).
 path = "ng-gateway.db"
 # Connection timeout in milliseconds
 timeout = 5000
@@ -141,5 +149,6 @@ idle_timeout = 5000
 max_lifetime = 5000
 # Maximum number of connections
 max_connections = 100
-# Auto create database file and directory if not exists
+# Auto create database file if not exists.
+# Note: SQLite cannot create parent directories; the gateway will create the data directory at startup.
 auto_create = true

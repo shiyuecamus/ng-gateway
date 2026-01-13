@@ -20,6 +20,9 @@ data:
   {{- if $config.general.caCertPath }}
   NG__GENERAL__CA_CERT_PATH: {{ $config.general.caCertPath | quote }}
   {{- end }}
+  {{- if $config.general.runtimeDir }}
+  NG__GENERAL__RUNTIME_DIR: {{ $config.general.runtimeDir | quote }}
+  {{- end }}
   {{- if $config.general.caKeyPath }}
   NG__GENERAL__CA_KEY_PATH: {{ $config.general.caKeyPath | quote }}
   {{- end }}

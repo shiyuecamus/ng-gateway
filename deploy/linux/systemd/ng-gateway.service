@@ -10,6 +10,10 @@ Type=simple
 User=root
 Group=root
 
+# Optional env overrides (e.g. `NG__GENERAL__RUNTIME_DIR=`).
+# Note: for non-default runtime_dir you may need to adjust hardening settings (ReadWritePaths).
+EnvironmentFile=-/etc/ng-gateway/env
+
 # Keep the runtime working directory stable so relative paths in the bundled
 # SQLite database (drivers/plugins) work as-is.
 WorkingDirectory=/var/lib/ng-gateway

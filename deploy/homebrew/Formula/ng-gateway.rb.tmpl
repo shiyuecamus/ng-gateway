@@ -20,7 +20,7 @@ class NgGateway < Formula
 
   # Install layout notes:
   # - We keep a dedicated runtime directory under var/ so relative paths in the
-  #   bundled sqlite db (drivers/plugins) work as-is.
+  #   runtime artifacts (db/drivers/plugins/certs) work as-is.
   # - A wrapper script in bin/ `cd`s into the runtime dir before launching.
   def install
     pkg_root = "ng-gateway-#{version}-darwin-#{Hardware::CPU.arm? ? "arm64" : "amd64"}"
@@ -32,8 +32,11 @@ class NgGateway < Formula
     # Copy default config + bundled resources into runtime dir on first install.
     # Users can edit files under var/ without being overwritten by upgrades.
     (runtime_dir/"gateway.toml").write (libexec/"gateway.toml").read unless (runtime_dir/"gateway.toml").exist?
+
+    # SQLite database is created automatically on first start (auto_create + migrations).
+    # We only ensure the default data directory exists for the default config:
+    # - data dir is `./data` (relative to runtime_dir)
     (runtime_dir/"data").mkpath
-    (runtime_dir/"data/ng-gateway.db").write (libexec/"data/ng-gateway.db").read unless (runtime_dir/"data/ng-gateway.db").exist?
 
     # Always ensure builtin drivers/plugins exist under runtime dir (overwrite-safe by using rsync-like behavior).
     # We do a simple copy here; users' custom drivers/plugins live in ./drivers/custom and ./plugins/custom.

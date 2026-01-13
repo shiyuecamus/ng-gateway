@@ -9,8 +9,12 @@
 
 # General
 [general]
-ca_cert_path = "./certs/ca.crt"
-ca_key_path = "./certs/ca.key"
+#
+# Homebrew best practice:
+# - The wrapper will `cd` into `var/lib/ng-gateway` before launching, so keep this as "."
+runtime_dir = "."
+ca_cert_path = "ca.crt"
+ca_key_path = "ca.key"
 
 [general.southward]
 driver_sync_start_timeout_ms = 2000

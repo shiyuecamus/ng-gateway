@@ -6,10 +6,13 @@
   - `bin/ng-gateway-bin`
   - `drivers/builtin/*.so`
   - `plugins/builtin/*.so`
-  - `data/ng-gateway.db`
   - `gateway.toml`（默认配置，首次安装时由 postinstall 复制到 `/etc`）
 - 配置目录：`/etc/ng-gateway/gateway.toml`
 - 可写运行目录（WorkingDirectory）：`/var/lib/ng-gateway/`
+
+> 说明：SQLite 数据库文件会在网关首次启动时自动创建与迁移：
+> - 路径：`/var/lib/ng-gateway/data/ng-gateway.db`（由 WorkingDirectory + `./data` 决定）
+> - drivers/plugins 的 DB 存储路径为运行根目录相对路径（便于迁移 `runtime_dir`）
 
 systemd unit：
 
@@ -31,10 +34,10 @@ systemd unit：
 
 - `scripts/package-rpm.sh`
   - 调用 `stage-rootfs.sh`
-  - 渲染 nfpm 模板并生成 `.rpm`（按 `RPM_DIST=el7|el8` 拆分）
+  - 渲染 nfpm 模板并生成 `.rpm`（按 `RPM_DIST=el7|e.l8` 拆分）
 
 - `scripts/postinstall.sh` / `scripts/preremove.sh`
-  - nfpm 维护脚本（首次安装创建目录、复制默认配置/DB、停止服务等）
+  - nfpm 维护脚本（首次安装创建目录、复制默认配置、停止服务等）
 
 ## 依赖
 
