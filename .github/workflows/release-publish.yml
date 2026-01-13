@@ -99,7 +99,7 @@ jobs:
           name: ui-dist-zip
           path: ng-gateway-web
 
-      - name: Verify ui-dist.zip contract path
+      - name: Verify ui-dist.zip
         run: |
           set -euo pipefail
           test -f "ng-gateway-web/ui-dist.zip"
@@ -120,7 +120,7 @@ jobs:
       - name: Install Protoc
         run: brew install protobuf cyrus-sasl pkg-config
 
-      - name: Package Homebrew tarball
+      - name: Package tarball
         env:
           VERSION: ${{ env.RELEASE_TAG }}
           WITHOUT_UI: "1"
@@ -129,7 +129,7 @@ jobs:
           TARGET_TRIPLE: ${{ matrix.target }}
         run: bash deploy/homebrew/scripts/package-tarball.sh
 
-      - name: Upload tarball + sha256
+      - name: Upload tarball
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -267,7 +267,7 @@ jobs:
           name: ui-dist-zip
           path: ng-gateway-web
 
-      - name: Verify ui-dist.zip contract path
+      - name: Verify ui-dist.zip
         run: |
           set -euo pipefail
           test -f "ng-gateway-web/ui-dist.zip"
@@ -324,7 +324,7 @@ jobs:
           export PKG_VERSION
           bash deploy/linux/scripts/package-deb.sh
 
-      - name: Upload .deb to Release assets
+      - name: Upload .deb
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -356,7 +356,7 @@ jobs:
           name: ui-dist-zip
           path: ng-gateway-web
 
-      - name: Verify ui-dist.zip contract path
+      - name: Verify ui-dist.zip
         run: |
           set -euo pipefail
           test -f "ng-gateway-web/ui-dist.zip"
@@ -408,7 +408,7 @@ jobs:
           export PKG_VERSION
           bash deploy/linux/scripts/package-rpm.sh
 
-      - name: Upload .rpm to Release assets
+      - name: Upload .rpm
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
