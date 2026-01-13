@@ -10,6 +10,11 @@ passthrough = [
   # Autoconf cache variables used by krb5-src when cross-compiling.
   # See: krb5-src build.rs error message for `krb5_cv_attr_constructor_destructor`.
   "krb5_cv_attr_constructor_destructor",
+  # krb5-src configure checks libc regex functions; when cross compiling it can't run tests.
+  "ac_cv_func_regcomp",
+  "ac_cv_func_regexec",
+  "ac_cv_func_regerror",
+  "ac_cv_func_regfree",
   # C toolchain overrides (used by some vendored C builds like librdkafka)
   "CC",
   "CXX",

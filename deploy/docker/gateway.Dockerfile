@@ -182,14 +182,11 @@ ENV HTTP_PROXY="${HTTP_PROXY}" \
     no_proxy="${NO_PROXY}"
 
 # Install runtime dependencies
-# - ca-certificates, libsqlite3-0: core runtime deps
-# - openssl: optional (debug / tooling). Prefer removing if not needed by runtime workflows.
+# - ca-certificates: core runtime data (TLS roots)
 # - curl, telnet: convenient utilities for in-container debugging
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
-      libsqlite3-0 \
-      openssl \
       curl \
       telnet \
     && rm -rf /var/lib/apt/lists/*

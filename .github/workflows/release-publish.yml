@@ -86,7 +86,7 @@ jobs:
             arch: arm64
             target: aarch64-apple-darwin
           # Use an x86_64 runner to avoid cross-compiling krb5-src (configure cannot run tests).
-          - runner: macos-13
+          - runner: macos-15-intel
             arch: amd64
             target: x86_64-apple-darwin
     steps:
@@ -324,6 +324,11 @@ jobs:
           # krb5-src uses autoconf; when cross compiling it can't run certain feature tests.
           # Provide the cache answer to skip the test (matches krb5-src error hint).
           krb5_cv_attr_constructor_destructor: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          # Additional autoconf cache answers for cross builds (krb5-src).
+          ac_cv_func_regcomp: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          ac_cv_func_regexec: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          ac_cv_func_regerror: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          ac_cv_func_regfree: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
@@ -439,6 +444,10 @@ jobs:
           XTASK_CARGO: cross
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
           krb5_cv_attr_constructor_destructor: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          ac_cv_func_regcomp: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          ac_cv_func_regexec: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          ac_cv_func_regerror: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
+          ac_cv_func_regfree: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"

@@ -12,13 +12,6 @@ license: "Apache-2.0"
 # Runtime dependencies (best-effort baseline; validated in Phase 2 tests).
 depends:
   - ca-certificates
-  - libsqlite3-0
-  - libsasl2-2
-  - libzstd1
-  - libudev1
-  # `openssl` is the CLI package; runtime linking typically needs libssl.
-  # Keep a best-effort compatibility range across Ubuntu/Debian versions.
-  - libssl3 | libssl1.1 | libssl1.0.0
 
 contents:
   - src: {{ROOTFS_DIR}}/opt/ng-gateway
