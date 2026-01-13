@@ -157,14 +157,14 @@ gateway:
     # Web configuration
     web:
       routerPrefix: "/api"
-      port: 8080
+      port: 5678
       # 0 = use CPU count, >0 = exact number, <0 = CPU count / abs(workers)
       workers: 0
       
       # SSL configuration
       ssl:
         enabled: true
-        port: 8883
+        port: 5679
         # auto: generate or load from ca_cert_path and ca_key_path, local: load from cert and key
         type: "auto"
         cert: "./certs/cert.pem"

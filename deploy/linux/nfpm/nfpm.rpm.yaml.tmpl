@@ -2,23 +2,25 @@ name: ng-gateway
 arch: {{RPM_ARCH}}
 platform: linux
 version: {{PKG_VERSION}}
+# NOTE:
+# We publish a single RPM artifact (no el7/el8 split). Actual runtime compatibility
+# depends on the binary/plugin ABI (glibc/OpenSSL), not only on metadata.
 release: "1"
 maintainer: "NG Gateway CI <ci@users.noreply.github.com>"
 description: "High-throughput IoT gateway (NG Gateway)"
 homepage: "https://github.com/shiyuecamus/ng-gateway"
 license: "Apache-2.0"
 
-# Runtime dependencies (CentOS 7 baseline).
+# Runtime dependencies (RHEL-family best-effort baseline).
+#
+# We intentionally depend on *library* packages (e.g. sqlite-libs) rather than CLI tools.
 depends:
   - ca-certificates
-  - sqlite
+  - sqlite-libs
   - cyrus-sasl-lib
   - zstd
   - systemd
   - openssl-libs
-
-rpm:
-  dist: el7
 
 contents:
   - src: {{ROOTFS_DIR}}/opt/ng-gateway

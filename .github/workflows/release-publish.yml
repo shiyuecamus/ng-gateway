@@ -79,7 +79,9 @@ jobs:
         include:
           - runner: macos-14
             arch: arm64
-          - runner: macos-13
+          # macos-13 (Intel) is retired; use Intel large runner instead.
+          # Note: `macos-14-large` requires larger runners support on the repository/org.
+          - runner: macos-14-large
             arch: amd64
     steps:
       - name: Checkout
@@ -244,6 +246,17 @@ jobs:
         with:
           tool: cross
 
+      - name: Setup cross toolchain env
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          echo "CC=aarch64-linux-gnu-gcc" >> "${GITHUB_ENV}"
+          echo "CXX=aarch64-linux-gnu-g++" >> "${GITHUB_ENV}"
+          echo "AR=aarch64-linux-gnu-ar" >> "${GITHUB_ENV}"
+          echo "RANLIB=aarch64-linux-gnu-ranlib" >> "${GITHUB_ENV}"
+          # Some build scripts consult pkg-config; allow it to run in cross mode.
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "${GITHUB_ENV}"
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -283,7 +296,7 @@ jobs:
           gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber
 
   build_linux_rpm:
-    name: Build Linux .rpm (${{ matrix.rpm_dist }} ${{ matrix.rpm_arch }})
+    name: Build Linux .rpm (${{ matrix.rpm_arch }})
     needs: [build_ui_zip]
     runs-on: ubuntu-latest
     strategy:
@@ -292,16 +305,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             rpm_arch: x86_64
-            rpm_dist: el7
-          - target: x86_64-unknown-linux-gnu
-            rpm_arch: x86_64
-            rpm_dist: el8
           - target: aarch64-unknown-linux-gnu
             rpm_arch: aarch64
-            rpm_dist: el7
-          - target: aarch64-unknown-linux-gnu
-            rpm_arch: aarch64
-            rpm_dist: el8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -331,6 +336,17 @@ jobs:
         with:
           tool: cross
 
+      - name: Setup cross toolchain env
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          echo "CC=aarch64-linux-gnu-gcc" >> "${GITHUB_ENV}"
+          echo "CXX=aarch64-linux-gnu-g++" >> "${GITHUB_ENV}"
+          echo "AR=aarch64-linux-gnu-ar" >> "${GITHUB_ENV}"
+          echo "RANLIB=aarch64-linux-gnu-ranlib" >> "${GITHUB_ENV}"
+          # Some build scripts consult pkg-config; allow it to run in cross mode.
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "${GITHUB_ENV}"
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -349,7 +365,6 @@ jobs:
           PKG_VERSION: ${{ env.RELEASE_TAG }}
           TARGET_TRIPLE: ${{ matrix.target }}
           RPM_ARCH: ${{ matrix.rpm_arch }}
-          RPM_DIST: ${{ matrix.rpm_dist }}
           XTASK_CARGO: cross
         run: |
           set -euo pipefail
@@ -363,6 +378,6 @@ jobs:
         run: |
           set -euo pipefail
           pkg_version="${RELEASE_TAG#v}"
-          pkg="deploy/linux/dist/ng-gateway-${pkg_version}-1.${{ matrix.rpm_dist }}.${{ matrix.rpm_arch }}.rpm"
+          pkg="deploy/linux/dist/ng-gateway-${pkg_version}-1.${{ matrix.rpm_arch }}.rpm"
           test -f "${pkg}"
           gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber

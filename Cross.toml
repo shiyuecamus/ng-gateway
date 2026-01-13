@@ -7,6 +7,17 @@ passthrough = [
     "RUST_LOG",
     "RUST_BACKTRACE",
     "RUSTFLAGS",
+    # C toolchain overrides (used by some vendored C builds like librdkafka)
+    "CC",
+    "CXX",
+    "AR",
+    "RANLIB",
+    "STRIP",
+    # pkg-config cross compilation knobs
+    "PKG_CONFIG",
+    "PKG_CONFIG_ALLOW_CROSS",
+    "PKG_CONFIG_PATH",
+    "PKG_CONFIG_SYSROOT_DIR",
     # Allow tuning release profile via env without editing Cargo.toml
     "CARGO_PROFILE_RELEASE_LTO",
     "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
@@ -30,7 +41,7 @@ pre-build = [
     # Without this, `openssl-sys` may fail to find `opensslconf.h` for aarch64.
     "dpkg --add-architecture arm64 || true",
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libssl-dev:arm64 libsasl2-dev:arm64 libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libssl-dev:arm64 libsasl2-dev:arm64 libkrb5-dev:arm64 libzstd-dev:arm64 libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]

@@ -34,7 +34,7 @@ systemd unit：
 
 - `scripts/package-rpm.sh`
   - 调用 `stage-rootfs.sh`
-  - 渲染 nfpm 模板并生成 `.rpm`（按 `RPM_DIST=el7|e.l8` 拆分）
+  - 渲染 nfpm 模板并生成 `.rpm`
 
 - `scripts/postinstall.sh` / `scripts/preremove.sh`
   - nfpm 维护脚本（首次安装创建目录、复制默认配置、停止服务等）
@@ -60,9 +60,9 @@ export DEB_ARCH="amd64"
 bash deploy/linux/scripts/package-deb.sh
 ```
 
-## 重要说明：rpm el7/el8 兼容性
+## 重要说明：rpm 兼容性（glibc/OpenSSL ABI）
 
-当前流程已经把 **rpm 产物命名与依赖**拆分为 `el7` 与 `el8`，但“真正能在 CentOS 7/8 上运行”的关键还取决于 **二进制/插件的构建环境（glibc/OpenSSL ABI）**。
+rpm 能否在目标发行版上运行，关键取决于 **二进制/插件的构建环境（glibc/OpenSSL ABI）**，而不仅是 nfpm 的元数据与 depends。
 
 Phase 2 的最终验收必须包含：
 

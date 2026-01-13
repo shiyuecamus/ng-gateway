@@ -227,8 +227,8 @@ ENV NG__GENERAL__RUNTIME_DIR=/app
 
 # Expose default ports
 # Keep ports aligned with the default `gateway.toml` and offline compose packaging.
-EXPOSE 8080
-EXPOSE 8443
+EXPOSE 5678
+EXPOSE 5679
 
 # Health check (optional - adjust endpoint as needed)
 # HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

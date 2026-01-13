@@ -244,7 +244,7 @@ impl Web {
     }
 
     fn port_default() -> u16 {
-        8080
+        5678
     }
 
     fn host_default() -> String {
@@ -377,7 +377,7 @@ impl SSLWithCert {
     }
 
     fn port_default() -> u16 {
-        8443
+        5679
     }
 }
 

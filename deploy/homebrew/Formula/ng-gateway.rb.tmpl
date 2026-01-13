@@ -6,6 +6,9 @@ class NgGateway < Formula
   # Release version (used in logs/service name only)
   version "{{VERSION}}"
 
+  # Runtime dependency:
+  depends_on "openssl@3"
+
   on_macos do
     on_arm do
       url "{{URL_ARM64}}"
