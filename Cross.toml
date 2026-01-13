@@ -27,7 +27,7 @@ image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
 # - tzdata: avoid tz related failures in some builds/tests
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -51,7 +51,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -60,7 +60,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/i686-unknown-linux-gnu:0.2.5"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -69,7 +69,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:0.2.5"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -78,7 +78,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/arm-unknown-linux-gnueabihf:0.2.5"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -87,7 +87,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu:0.2.5"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -96,7 +96,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/powerpc64le-unknown-linux-gnu:0.2.5"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]
@@ -105,7 +105,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu:0.2.5"
 pre-build = [
     "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata",
     "update-ca-certificates || true",
     "rm -rf /var/lib/apt/lists/*",
 ]

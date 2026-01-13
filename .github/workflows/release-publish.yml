@@ -13,7 +13,7 @@ env:
 
 jobs:
   build_ui_zip:
-    name: Build UI dist zip (once)
+    name: Build UI dist zip
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,7 +22,7 @@ jobs:
           # ng-gateway-ui is a git submodule; we must fetch it for pnpm build.
           submodules: recursive
 
-      - name: Setup Node.js (corepack + pnpm cache)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -33,11 +33,11 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.22.0 --activate
 
-      - name: Install UI dependencies (pnpm)
+      - name: Install UI dependencies
         working-directory: ng-gateway-ui
         run: pnpm install --frozen-lockfile
 
-      - name: Build UI app (web-antd)
+      - name: Build UI app
         working-directory: ng-gateway-ui
         run: pnpm run build --filter @vben/web-antd
 
@@ -85,7 +85,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download UI artifact (ui-dist.zip)
+      - name: Download UI artifact
         uses: actions/download-artifact@v4
         with:
           name: ui-dist-zip
@@ -109,7 +109,7 @@ jobs:
           WITHOUT_UI: "1"
         run: bash deploy/homebrew/scripts/package-tarball.sh
 
-      - name: Upload tarball + sha256 to Release assets (clobber)
+      - name: Upload tarball + sha256
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -128,7 +128,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download sha256 assets from Release
+      - name: Download sha256
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -154,7 +154,7 @@ jobs:
           URL_AMD64="${url_amd64}" SHA256_AMD64="${sha_amd64}" \
           bash deploy/homebrew/scripts/generate-formula.sh
 
-      - name: Upload formula to Release assets (clobber)
+      - name: Upload formula to Release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -219,7 +219,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download UI artifact (ui-dist.zip)
+      - name: Download UI artifact
         uses: actions/download-artifact@v4
         with:
           name: ui-dist-zip
@@ -244,12 +244,12 @@ jobs:
         with:
           tool: cross
 
-      - name: Setup Go (for installing nfpm)
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: stable
 
-      - name: Install nfpm (go install)
+      - name: Install nfpm
         run: |
           set -euo pipefail
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
@@ -265,14 +265,14 @@ jobs:
           TARGET_TRIPLE: ${{ matrix.target }}
           DEB_ARCH: ${{ matrix.deb_arch }}
           # Let xtask use cross for the actual build.
-          CARGO: cross
+          XTASK_CARGO: cross
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
           export PKG_VERSION
           bash deploy/linux/scripts/package-deb.sh
 
-      - name: Upload .deb to Release assets (clobber)
+      - name: Upload .deb to Release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -306,7 +306,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download UI artifact (ui-dist.zip)
+      - name: Download UI artifact
         uses: actions/download-artifact@v4
         with:
           name: ui-dist-zip
@@ -331,12 +331,12 @@ jobs:
         with:
           tool: cross
 
-      - name: Setup Go (for installing nfpm)
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: stable
 
-      - name: Install nfpm (go install)
+      - name: Install nfpm
         run: |
           set -euo pipefail
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
@@ -350,14 +350,14 @@ jobs:
           TARGET_TRIPLE: ${{ matrix.target }}
           RPM_ARCH: ${{ matrix.rpm_arch }}
           RPM_DIST: ${{ matrix.rpm_dist }}
-          CARGO: cross
+          XTASK_CARGO: cross
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
           export PKG_VERSION
           bash deploy/linux/scripts/package-rpm.sh
 
-      - name: Upload .rpm to Release assets (clobber)
+      - name: Upload .rpm to Release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

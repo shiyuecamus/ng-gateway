@@ -161,6 +161,11 @@ fn main() -> ExitCode {
 /// For multi-arch packaging, CI often uses `cross` as a drop-in replacement for `cargo`.
 /// This helper allows overriding the build command without changing xtask logic.
 fn cargo_build_program() -> String {
+    if let Ok(v) = env::var("XTASK_CARGO") {
+        if !v.trim().is_empty() {
+            return v;
+        }
+    }
     match env::var("CARGO") {
         Ok(v) if !v.trim().is_empty() => v,
         _ => "cargo".to_string(),
