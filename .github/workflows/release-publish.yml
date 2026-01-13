@@ -24,17 +24,19 @@ jobs:
           submodules: recursive
 
       - name: Setup Node.js
+        # NOTE: actions/setup-node "cache: pnpm" requires pnpm to be available
+        # on PATH at *setup-node step time*. Install pnpm first, then enable caching.
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.22.0
+          run_install: false
+
+      - name: Setup Node.js (with pnpm cache)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "pnpm"
           cache-dependency-path: ng-gateway-ui/pnpm-lock.yaml
-
-      - name: Enable corepack and activate pnpm
-        run: |
-          set -euo pipefail
-          corepack enable
-          corepack prepare pnpm@10.22.0 --activate
 
       - name: Install UI dependencies
         working-directory: ng-gateway-ui
