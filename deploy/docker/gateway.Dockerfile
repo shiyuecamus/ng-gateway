@@ -78,7 +78,8 @@ RUN apt-get update && \
       protobuf-compiler \
       clang \
       libclang-dev \
-      # OpenSSL/SASL are built vendored via rdkafka/openssl-sys/sasl2-sys, avoid system -dev deps.
+      libsasl2-dev \
+      # OpenSSL is built vendored via openssl-sys (ssl-vendored).
       # Keep perl available (commonly required by OpenSSL source build toolchain).
       perl \
       cmake && \

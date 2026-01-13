@@ -118,7 +118,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install Protoc
-        run: brew install protobuf
+        run: brew install protobuf cyrus-sasl pkg-config
 
       - name: Package Homebrew tarball
         env:
@@ -321,14 +321,6 @@ jobs:
           # Do NOT export cross compiler vars globally (it breaks `go install nfpm` via cgo).
           # If any build script consults pkg-config in cross mode, allow it here (scoped).
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
-          # krb5-src uses autoconf; when cross compiling it can't run certain feature tests.
-          # Provide the cache answer to skip the test (matches krb5-src error hint).
-          krb5_cv_attr_constructor_destructor: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          # Additional autoconf cache answers for cross builds (krb5-src).
-          ac_cv_func_regcomp: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          ac_cv_func_regexec: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          ac_cv_func_regerror: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          ac_cv_func_regfree: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
@@ -443,11 +435,6 @@ jobs:
           RPM_ARCH: ${{ matrix.rpm_arch }}
           XTASK_CARGO: cross
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
-          krb5_cv_attr_constructor_destructor: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          ac_cv_func_regcomp: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          ac_cv_func_regexec: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          ac_cv_func_regerror: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
-          ac_cv_func_regfree: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
