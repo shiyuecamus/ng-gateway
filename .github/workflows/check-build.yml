@@ -65,8 +65,5 @@ jobs:
       - name: Lint with clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Build in release mode
-        run: cargo build --release
-
       - name: Run tests
         run: cargo test --release

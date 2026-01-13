@@ -40,6 +40,10 @@ ng-gateway-offline-*.zip
 helm-package-*/
 ng-gateway-helm-offline-*.zip
 
+# Build artifacts
+ui-dist.zip
+dist/
+
 # By default, don't ignore .github directory!
 !.github/
 !.github/**
