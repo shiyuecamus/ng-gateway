@@ -88,11 +88,8 @@ jobs:
       - name: Download UI artifact (ui-dist.zip)
         uses: actions/download-artifact@v4
         with:
-          # Use pattern + merge-multiple to avoid the extra "artifact-name/" folder
-          # that can appear during extraction.
-          pattern: ui-dist-zip
+          name: ui-dist-zip
           path: ng-gateway-web
-          merge-multiple: true
 
       - name: Verify ui-dist.zip contract path
         run: |
@@ -103,11 +100,8 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          # Use authenticated GitHub API requests to avoid rate limit on shared runners.
-          repo-token: ${{ github.token }}
+      - name: Install Protoc
+        run: brew install protobuf
 
       - name: Package Homebrew tarball
         env:
@@ -228,9 +222,8 @@ jobs:
       - name: Download UI artifact (ui-dist.zip)
         uses: actions/download-artifact@v4
         with:
-          pattern: ui-dist-zip
+          name: ui-dist-zip
           path: ng-gateway-web
-          merge-multiple: true
 
       - name: Verify ui-dist.zip contract path
         run: |
@@ -241,11 +234,10 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          # Use authenticated GitHub API requests to avoid rate limit on shared runners.
-          repo-token: ${{ github.token }}
+      - name: Install Protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - name: Install cross
         uses: taiki-e/install-action@v2
@@ -317,9 +309,8 @@ jobs:
       - name: Download UI artifact (ui-dist.zip)
         uses: actions/download-artifact@v4
         with:
-          pattern: ui-dist-zip
+          name: ui-dist-zip
           path: ng-gateway-web
-          merge-multiple: true
 
       - name: Verify ui-dist.zip contract path
         run: |
@@ -330,11 +321,10 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          # Use authenticated GitHub API requests to avoid rate limit on shared runners.
-          repo-token: ${{ github.token }}
+      - name: Install Protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - name: Install cross
         uses: taiki-e/install-action@v2
