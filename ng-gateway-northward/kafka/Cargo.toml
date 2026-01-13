@@ -30,9 +30,12 @@ handlebars = "6.3.2"
 # Kafka client (librdkafka)
 rdkafka = { version = "0.38", default-features = false, features = [
   "tokio",
-  "ssl",
+  # Best practice for CI packaging/cross-compiling:
+  # - avoid relying on system OpenSSL on host/target by using vendored OpenSSL
+  "ssl-vendored",
+  # `sasl` pulls in `sasl2-sys` which defaults to `pkg-config` (system libs).
+  # Enable vendored GSSAPI stack to avoid requiring libsasl2/krb5 dev packages on CI runners.
+  "gssapi-vendored",
   "sasl",
   "zstd",
 ] }
-
-

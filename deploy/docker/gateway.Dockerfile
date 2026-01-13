@@ -76,10 +76,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       pkg-config \
       protobuf-compiler \
-      libssl-dev \
       clang \
       libclang-dev \
-      libsasl2-dev \
+      # OpenSSL/SASL are built vendored via rdkafka/openssl-sys/sasl2-sys, avoid system -dev deps.
+      # Keep perl available (commonly required by OpenSSL source build toolchain).
+      perl \
       cmake && \
     rm -rf /var/lib/apt/lists/*
 
@@ -182,14 +183,13 @@ ENV HTTP_PROXY="${HTTP_PROXY}" \
 
 # Install runtime dependencies
 # - ca-certificates, libsqlite3-0: core runtime deps
-# - openssl: required for OPC UA / TLS certificate handling
+# - openssl: optional (debug / tooling). Prefer removing if not needed by runtime workflows.
 # - curl, telnet: convenient utilities for in-container debugging
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
       libsqlite3-0 \
       openssl \
-      libsasl2-2 \
       curl \
       telnet \
     && rm -rf /var/lib/apt/lists/*

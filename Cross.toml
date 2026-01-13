@@ -4,30 +4,30 @@
 # Global build-time environment passthrough (safe, non-secret)
 [build.env]
 passthrough = [
-    "RUST_LOG",
-    "RUST_BACKTRACE",
-    "RUSTFLAGS",
-    # C toolchain overrides (used by some vendored C builds like librdkafka)
-    "CC",
-    "CXX",
-    "AR",
-    "RANLIB",
-    "STRIP",
-    # pkg-config cross compilation knobs
-    "PKG_CONFIG",
-    "PKG_CONFIG_ALLOW_CROSS",
-    "PKG_CONFIG_PATH",
-    "PKG_CONFIG_SYSROOT_DIR",
-    # Allow tuning release profile via env without editing Cargo.toml
-    "CARGO_PROFILE_RELEASE_LTO",
-    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
-    "CARGO_PROFILE_RELEASE_PANIC",
+  "RUST_LOG",
+  "RUST_BACKTRACE",
+  "RUSTFLAGS",
+  # C toolchain overrides (used by some vendored C builds like librdkafka)
+  "CC",
+  "CXX",
+  "AR",
+  "RANLIB",
+  "STRIP",
+  # pkg-config cross compilation knobs
+  "PKG_CONFIG",
+  "PKG_CONFIG_ALLOW_CROSS",
+  "PKG_CONFIG_PATH",
+  "PKG_CONFIG_SYSROOT_DIR",
+  # Allow tuning release profile via env without editing Cargo.toml
+  "CARGO_PROFILE_RELEASE_LTO",
+  "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+  "CARGO_PROFILE_RELEASE_PANIC",
 ]
 
 # Target-specific configuration for aarch64 GNU
 [target.aarch64-unknown-linux-gnu]
 # Pin to a known-good base image version to ensure reproducible builds
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
 
 # Install system dependencies commonly required by IoT gateway builds
 # - pkg-config: for native builds using pkg-config discovery
@@ -37,13 +37,13 @@ image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 # - ca-certificates: ensure TLS certs available
 # - tzdata: avoid tz related failures in some builds/tests
 pre-build = [
-    # Enable multiarch packages so we can install target-arch OpenSSL headers.
-    # Without this, `openssl-sys` may fail to find `opensslconf.h` for aarch64.
-    "dpkg --add-architecture arm64 || true",
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libssl-dev:arm64 libsasl2-dev:arm64 libkrb5-dev:arm64 libzstd-dev:arm64 libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  # Enable multiarch packages so we can install target-arch OpenSSL headers.
+  # Without this, `openssl-sys` may fail to find `opensslconf.h` for aarch64.
+  "dpkg --add-architecture arm64 || true",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libzstd-dev:arm64 libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 # Example: If you need to run binaries/tests under QEMU with a custom runner
@@ -62,66 +62,66 @@ pre-build = [
 
 # Additional common Linux GNU targets
 [target.x86_64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
 pre-build = [
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.i686-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/i686-unknown-linux-gnu:0.2.5"
 pre-build = [
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.armv7-unknown-linux-gnueabihf]
 image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:0.2.5"
 pre-build = [
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.arm-unknown-linux-gnueabihf]
 image = "ghcr.io/cross-rs/arm-unknown-linux-gnueabihf:0.2.5"
 pre-build = [
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.riscv64gc-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu:0.2.5"
 pre-build = [
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.powerpc64le-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/powerpc64le-unknown-linux-gnu:0.2.5"
 pre-build = [
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.s390x-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu:0.2.5"
 pre-build = [
-    "apt-get update",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
-    "update-ca-certificates || true",
-    "rm -rf /var/lib/apt/lists/*",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "update-ca-certificates || true",
+  "rm -rf /var/lib/apt/lists/*",
 ]
 
 # Optional MUSL targets (uncomment as needed)
