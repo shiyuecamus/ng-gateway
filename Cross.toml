@@ -27,7 +27,9 @@ passthrough = [
 # Target-specific configuration for aarch64 GNU
 [target.aarch64-unknown-linux-gnu]
 # Pin to a known-good base image version to ensure reproducible builds
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+# NOTE: 0.2.5 images ship very old libclang (3.8.x) which breaks clang-sys>=1.8.
+# For now we use :main to unblock CI; once stable, pin to a fixed tag/digest.
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 
 # Install system dependencies commonly required by IoT gateway builds
 # - pkg-config: for native builds using pkg-config discovery
@@ -62,7 +64,9 @@ pre-build = [
 
 # Additional common Linux GNU targets
 [target.x86_64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
+# NOTE: 0.2.5 images ship very old libclang (3.8.x) which breaks clang-sys>=1.8.
+# For now we use :main to unblock CI; once stable, pin to a fixed tag/digest.
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 pre-build = [
   "apt-get update",
   "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
