@@ -407,6 +407,26 @@ fn build_command(args: BuildCommandArgs<'_>) -> Result<()> {
         cmd.arg(arg);
     }
 
+    // When cross-compiling with `cross`, some C build systems (notably autotools
+    // configure scripts used by `rdkafka-sys`) may not automatically pick the
+    // target compiler and will fall back to host `gcc`, causing link errors like:
+    //   "skipping incompatible ... libcrypto.a" / "cannot find -lcrypto"
+    //
+    // We therefore set toolchain env vars only for the `cross` process (NOT for
+    // building/running xtask itself), and rely on `Cross.toml` passthrough to
+    // forward them into the container.
+    if cargo_program == "cross" {
+        if let Some(triple) = extract_target_triple(args.cargo_args) {
+            if triple == "aarch64-unknown-linux-gnu" {
+                cmd.env("CC", "aarch64-linux-gnu-gcc");
+                cmd.env("CXX", "aarch64-linux-gnu-g++");
+                cmd.env("AR", "aarch64-linux-gnu-ar");
+                cmd.env("RANLIB", "aarch64-linux-gnu-ranlib");
+                cmd.env("STRIP", "aarch64-linux-gnu-strip");
+            }
+        }
+    }
+
     let status = cmd.status().context("Failed to execute cargo build")?;
 
     if !status.success() {
