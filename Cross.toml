@@ -7,18 +7,6 @@ passthrough = [
   "RUST_LOG",
   "RUST_BACKTRACE",
   "RUSTFLAGS",
-  # C toolchain overrides (used by some vendored C builds like librdkafka)
-  "CC",
-  "CXX",
-  "AR",
-  "RANLIB",
-  "STRIP",
-  # pkg-config cross compilation knobs
-  "PKG_CONFIG",
-  "PKG_CONFIG_ALLOW_CROSS",
-  "PKG_CONFIG_PATH",
-  "PKG_CONFIG_SYSROOT_DIR",
-  # Allow tuning release profile via env without editing Cargo.toml
   "CARGO_PROFILE_RELEASE_LTO",
   "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
   "CARGO_PROFILE_RELEASE_PANIC",

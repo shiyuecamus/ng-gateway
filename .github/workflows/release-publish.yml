@@ -140,31 +140,6 @@ jobs:
           test -f "${sha}"
           gh release upload "${RELEASE_TAG}" "${tarball}" "${sha}" --repo "${REPO}" --clobber
 
-      - name: Audit dynamic deps (macOS)
-        run: |
-          set -euo pipefail
-          mkdir -p audit
-          bin="target/${{ matrix.target }}/release/ng-gateway-bin"
-          if [[ -f "${bin}" ]]; then
-            otool -L "${bin}" | tee "audit/otool-ng-gateway-bin.txt"
-          else
-            echo "warn: binary not found for audit: ${bin}"
-          fi
-          # plugins/drivers builtins may be produced as dylib in repo root dirs
-          for f in drivers/builtin/*.dylib plugins/builtin/*.dylib; do
-            if [[ -f "$f" ]]; then
-              echo "==== otool -L $f ===="
-              otool -L "$f" | tee -a "audit/otool-dylib.txt"
-            fi
-          done
-
-      - name: Upload audit artifact (macOS)
-        uses: actions/upload-artifact@v4
-        with:
-          name: audit-macos-${{ matrix.arch }}
-          path: audit
-          if-no-files-found: warn
-
   generate_homebrew_formula:
     name: Generate Homebrew formula
     needs: [build_macos_homebrew]
@@ -327,36 +302,6 @@ jobs:
           export PKG_VERSION
           bash deploy/linux/scripts/package-deb.sh
 
-      - name: Audit dynamic deps (Linux deb)
-        run: |
-          set -euo pipefail
-          mkdir -p audit
-          bin="target/${{ matrix.target }}/release/ng-gateway-bin"
-          if [[ -f "${bin}" ]]; then
-            echo "==== readelf -d (NEEDED) ====" | tee "audit/readelf-needed.txt"
-            readelf -d "${bin}" | grep NEEDED | tee -a "audit/readelf-needed.txt" || true
-            echo "==== ldd ====" | tee "audit/ldd.txt"
-            ldd "${bin}" | tee -a "audit/ldd.txt" || true
-          else
-            echo "warn: binary not found for audit: ${bin}"
-          fi
-          # shared objects may have been deployed into repo root dirs
-          for f in drivers/builtin/*.so plugins/builtin/*.so; do
-            if [[ -f "$f" ]]; then
-              echo "==== readelf -d $f (NEEDED) ====" | tee -a "audit/readelf-needed-so.txt"
-              readelf -d "$f" | grep NEEDED | tee -a "audit/readelf-needed-so.txt" || true
-              echo "==== ldd $f ====" | tee -a "audit/ldd-so.txt"
-              ldd "$f" | tee -a "audit/ldd-so.txt" || true
-            fi
-          done
-
-      - name: Upload audit artifact (Linux deb)
-        uses: actions/upload-artifact@v4
-        with:
-          name: audit-linux-deb-${{ matrix.deb_arch }}
-          path: audit
-          if-no-files-found: warn
-
       - name: Upload .deb to Release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -440,35 +385,6 @@ jobs:
           PKG_VERSION="${PKG_VERSION#v}"
           export PKG_VERSION
           bash deploy/linux/scripts/package-rpm.sh
-
-      - name: Audit dynamic deps (Linux rpm)
-        run: |
-          set -euo pipefail
-          mkdir -p audit
-          bin="target/${{ matrix.target }}/release/ng-gateway-bin"
-          if [[ -f "${bin}" ]]; then
-            echo "==== readelf -d (NEEDED) ====" | tee "audit/readelf-needed.txt"
-            readelf -d "${bin}" | grep NEEDED | tee -a "audit/readelf-needed.txt" || true
-            echo "==== ldd ====" | tee "audit/ldd.txt"
-            ldd "${bin}" | tee -a "audit/ldd.txt" || true
-          else
-            echo "warn: binary not found for audit: ${bin}"
-          fi
-          for f in drivers/builtin/*.so plugins/builtin/*.so; do
-            if [[ -f "$f" ]]; then
-              echo "==== readelf -d $f (NEEDED) ====" | tee -a "audit/readelf-needed-so.txt"
-              readelf -d "$f" | grep NEEDED | tee -a "audit/readelf-needed-so.txt" || true
-              echo "==== ldd $f ====" | tee -a "audit/ldd-so.txt"
-              ldd "$f" | tee -a "audit/ldd-so.txt" || true
-            fi
-          done
-
-      - name: Upload audit artifact (Linux rpm)
-        uses: actions/upload-artifact@v4
-        with:
-          name: audit-linux-rpm-${{ matrix.rpm_arch }}
-          path: audit
-          if-no-files-found: warn
 
       - name: Upload .rpm to Release assets
         env:
