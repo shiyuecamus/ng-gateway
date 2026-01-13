@@ -1,0 +1,44 @@
+1. Get the application URL (all-in-one: UI + API served by the gateway):
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}/
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}/api
+{{- end }}
+{{- else if contains "NodePort" .Values.gateway.service.type }}
+  export GATEWAY_NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "ng-gateway.fullname" . }}-gateway)
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$GATEWAY_NODE_PORT/
+  echo http://$NODE_IP:$GATEWAY_NODE_PORT/api
+{{- else if contains "LoadBalancer" .Values.gateway.service.type }}
+  export GATEWAY_SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "ng-gateway.fullname" . }}-gateway --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$GATEWAY_SERVICE_IP:{{ .Values.gateway.service.httpPort }}/
+  echo http://$GATEWAY_SERVICE_IP:{{ .Values.gateway.service.httpPort }}/api
+{{- else if contains "ClusterIP" .Values.gateway.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "ng-gateway.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=gateway" -o jsonpath="{.items[0].metadata.name}")
+  export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+  echo "Visit http://127.0.0.1:8080 to use UI and API"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
+{{- end }}
+
+2. Gateway API endpoint (same as above):
+{{- if contains "NodePort" .Values.gateway.service.type }}
+  export GATEWAY_NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "ng-gateway.fullname" . }}-gateway)
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$GATEWAY_NODE_PORT/api
+{{- else if contains "LoadBalancer" .Values.gateway.service.type }}
+  export GATEWAY_SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "ng-gateway.fullname" . }}-gateway --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$GATEWAY_SERVICE_IP:{{ .Values.gateway.service.httpPort }}/api
+{{- else if contains "ClusterIP" .Values.gateway.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "ng-gateway.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=gateway" -o jsonpath="{.items[0].metadata.name}")
+  export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+  echo "Visit http://127.0.0.1:8081 to use gateway API"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8081:$CONTAINER_PORT
+{{- end }}
+
+3. View logs:
+  kubectl logs --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/component=gateway" -f
+
+4. Check service status:
+  kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}"
+  kubectl get svc --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}"
+

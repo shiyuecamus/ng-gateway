@@ -1,0 +1,3 @@
+[submodule "ng-gateway-ui"]
+	path = ng-gateway-ui
+	url = https://github.com/shiyuecamus/ng-gateway-ui.git

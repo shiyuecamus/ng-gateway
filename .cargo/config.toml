@@ -1,0 +1,14 @@
+# Cargo configuration for ng-gateway workspace
+
+[alias]
+# XTask aliases for common build tasks
+xtask = "run --package xtask --"
+build-with-drivers = "xtask build --profile release"
+deploy-drivers = "xtask deploy --profile release"
+
+[build]
+# Shared build configuration
+
+# [target.x86_64-unknown-linux-gnu]
+# linker = "x86_64-unknown-linux-gnu-gcc"
+

@@ -1,0 +1,54 @@
+[package]
+name = "ng-gateway-storage"
+edition = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+
+# Local
+[dependencies.ng-gateway-error]
+workspace = true
+[dependencies.ng-gateway-models]
+workspace = true
+
+
+# ORM and Migrations
+[dependencies.sea-orm]
+workspace = true
+[dependencies.sea-orm-migration]
+workspace = true
+
+# Logging
+[dependencies.tracing]
+workspace = true
+
+# Async trait
+[dependencies.async-trait]
+workspace = true
+
+# Date and Time
+[dependencies.chrono]
+workspace = true
+
+# UUID
+[dependencies.uuid]
+workspace = true
+
+# Bytes
+[dependencies.bytes]
+workspace = true
+
+# Asynchronous Runtime
+[dependencies.tokio]
+workspace = true
+[dependencies.tokio-util]
+workspace = true
+
+[dependencies.sha2]
+workspace = true
+
+[dependencies.hex]
+workspace = true
+
+# In-memory cache
+[dependencies.moka]
+workspace = true

@@ -1,0 +1,144 @@
+{{- if .Values.gateway.enabled }}
+{{- $globalStorageClass := default "" .Values.global.storageClass }}
+{{- $gatewayDataHasSC := or (default "" .Values.persistence.gatewayData.storageClass) $globalStorageClass }}
+{{- $gatewayDriversHasSC := or (default "" .Values.persistence.gatewayDrivers.storageClass) $globalStorageClass }}
+{{- $gatewayPluginsHasSC := or (default "" .Values.persistence.gatewayPlugins.storageClass) $globalStorageClass }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-gateway
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.gateway.autoscaling.enabled }}
+  replicas: {{ .Values.gateway.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ng-gateway.gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if .Values.gateway.enabled }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.gateway.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ng-gateway.gateway.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "ng-gateway.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.gateway.podSecurityContext | nindent 8 }}
+      {{- $web := default (dict) .Values.gateway.config.web }}
+      {{- $ssl := default (dict) $web.ssl }}
+      {{- $httpPort := default .Values.gateway.service.httpPort $web.port }}
+      {{- $httpsPort := default .Values.gateway.service.httpsPort $ssl.port }}
+      {{- $sslEnabled := default false $ssl.enabled }}
+      containers:
+        - name: gateway
+          securityContext:
+            {{- toYaml .Values.gateway.securityContext | nindent 12 }}
+          image: "{{ include "ng-gateway.gateway.image" . }}"
+          imagePullPolicy: {{ include "ng-gateway.gateway.imagePullPolicy" . }}
+          ports:
+            - name: http
+              containerPort: {{ $httpPort }}
+              protocol: TCP
+            {{- if $sslEnabled }}
+            - name: https
+              containerPort: {{ $httpsPort }}
+              protocol: TCP
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "ng-gateway.fullname" . }}-gateway-config
+          {{- if .Values.gateway.envFromSecrets }}
+          {{- range .Values.gateway.envFromSecrets }}
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- if .Values.gateway.livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.gateway.livenessProbe.httpGet.path }}
+              port: {{ .Values.gateway.livenessProbe.httpGet.port }}
+            initialDelaySeconds: {{ .Values.gateway.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.gateway.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.gateway.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.gateway.livenessProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.gateway.readinessProbe.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.gateway.readinessProbe.httpGet.path }}
+              port: {{ .Values.gateway.readinessProbe.httpGet.port }}
+            initialDelaySeconds: {{ .Values.gateway.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.gateway.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.gateway.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.gateway.readinessProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.gateway.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.gateway.startupProbe.httpGet.path }}
+              port: {{ .Values.gateway.startupProbe.httpGet.port }}
+            initialDelaySeconds: {{ .Values.gateway.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.gateway.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.gateway.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.gateway.startupProbe.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: gateway-data
+              mountPath: /app/data
+            - name: gateway-drivers
+              mountPath: /app/drivers/custom
+            - name: gateway-plugins
+              mountPath: /app/plugins/custom
+      volumes:
+        {{- if and .Values.persistence.gatewayData.enabled $gatewayDataHasSC }}
+        - name: gateway-data
+          persistentVolumeClaim:
+            claimName: {{ include "ng-gateway.fullname" . }}-gateway-data
+        {{- else }}
+        - name: gateway-data
+          emptyDir: {}
+        {{- end }}
+        {{- if and .Values.persistence.gatewayDrivers.enabled $gatewayDriversHasSC }}
+        - name: gateway-drivers
+          persistentVolumeClaim:
+            claimName: {{ include "ng-gateway.fullname" . }}-gateway-drivers
+        {{- else }}
+        - name: gateway-drivers
+          emptyDir: {}
+        {{- end }}
+        {{- if and .Values.persistence.gatewayPlugins.enabled $gatewayPluginsHasSC }}
+        - name: gateway-plugins
+          persistentVolumeClaim:
+            claimName: {{ include "ng-gateway.fullname" . }}-gateway-plugins
+        {{- else }}
+        - name: gateway-plugins
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

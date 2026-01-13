@@ -1,0 +1,38 @@
+[package]
+name = "ng-plugin-kafka"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ng-gateway-sdk = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt", "io"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+backoff = { workspace = true }
+arc-swap = { workspace = true }
+dashmap = { workspace = true }
+once_cell = { workspace = true }
+handlebars = "6.3.2"
+
+# Kafka client (librdkafka)
+rdkafka = { version = "0.38", default-features = false, features = [
+  "tokio",
+  "ssl",
+  "sasl",
+  "zstd",
+] }
+
+

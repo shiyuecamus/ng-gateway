@@ -1,0 +1,38 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-gateway
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+  {{- with .Values.gateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- $web := default (dict) .Values.gateway.config.web }}
+{{- $ssl := default (dict) $web.ssl }}
+{{- $httpPort := default .Values.gateway.service.httpPort $web.port }}
+{{- $httpsPort := default .Values.gateway.service.httpsPort $ssl.port }}
+{{- $sslEnabled := default false $ssl.enabled }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  ports:
+    - port: {{ $httpPort }}
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if and (eq .Values.gateway.service.type "NodePort") .Values.gateway.service.nodePort.http }}
+      nodePort: {{ .Values.gateway.service.nodePort.http }}
+      {{- end }}
+    {{- if $sslEnabled }}
+    - port: {{ $httpsPort }}
+      targetPort: https
+      protocol: TCP
+      name: https
+      {{- if and (eq .Values.gateway.service.type "NodePort") .Values.gateway.service.nodePort.https }}
+      nodePort: {{ .Values.gateway.service.nodePort.https }}
+      {{- end }}
+    {{- end }}
+  selector:
+    {{- include "ng-gateway.gateway.selectorLabels" . | nindent 4 }}
+{{- end }}

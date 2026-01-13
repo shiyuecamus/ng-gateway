@@ -1,0 +1,400 @@
+[workspace]
+members = [
+  "ng-gateway-bin",
+  "ng-gateway-storage",
+  "ng-gateway-error",
+  "ng-gateway-macros",
+  "ng-gateway-models",
+  "ng-gateway-utils",
+  "ng-gateway-web",
+  "ng-gateway-common",
+  "ng-gateway-repository",
+  "ng-gateway-core",
+  "ng-gateway-sdk",
+  "ng-gateway-southward/dlt645",
+  "ng-gateway-southward/opcua",
+  "ng-gateway-southward/iec104",
+  "ng-gateway-southward/modbus",
+  "ng-gateway-southward/s7",
+  "ng-gateway-southward/mc",
+  "ng-gateway-southward/dnp3",
+  "ng-gateway-southward/cjt188",
+  "ng-gateway-southward/ethernet-ip",
+  "ng-gateway-northward/thingsboard",
+  "ng-gateway-northward/opcua-server",
+  "ng-gateway-northward/pulsar",
+  "ng-gateway-northward/kafka",
+  "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+authors = ["shiyuecamus <shiyuecamus@gmail.com>"]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/shiyuecamus/ng-gateway"
+version = "0.1.0"
+
+# External NG common api
+[workspace.dependencies.node-grove-common-api]
+version = "0.0.12"
+
+# Local
+[workspace.dependencies.ng-gateway-storage]
+path = "./ng-gateway-storage"
+[workspace.dependencies.ng-gateway-error]
+path = "./ng-gateway-error"
+[workspace.dependencies.ng-gateway-utils]
+path = "./ng-gateway-utils"
+[workspace.dependencies.ng-gateway-models]
+path = "./ng-gateway-models"
+[workspace.dependencies.ng-gateway-macros]
+path = "./ng-gateway-macros"
+[workspace.dependencies.ng-gateway-web]
+path = "./ng-gateway-web"
+[workspace.dependencies.ng-gateway-common]
+path = "./ng-gateway-common"
+[workspace.dependencies.ng-gateway-repository]
+path = "./ng-gateway-repository"
+[workspace.dependencies.ng-gateway-core]
+path = "./ng-gateway-core"
+[workspace.dependencies.ng-gateway-sdk]
+path = "./ng-gateway-sdk"
+
+# Tracing
+[workspace.dependencies.tracing]
+version = "0.1"
+[workspace.dependencies.tracing-subscriber]
+version = "0.3"
+[workspace.dependencies.tracing-appender]
+version = "0.2"
+
+# Metrics
+[workspace.dependencies.opentelemetry]
+version = "0.31"
+[workspace.dependencies.opentelemetry_sdk]
+version = "0.31"
+[workspace.dependencies.opentelemetry-otlp]
+features = ["grpc-tonic"]
+version = "0.31"
+
+# Command Line Argument Parsing
+[workspace.dependencies.clap]
+features = ["env"]
+version = "4.5"
+
+# Asynchronous Runtime
+[workspace.dependencies.tokio]
+features = ["full"]
+version = "1.47"
+[workspace.dependencies.tokio-util]
+features = ["rt", "io"]
+version = "0.7"
+[workspace.dependencies.tokio-test]
+version = "0.4"
+[workspace.dependencies.tokio-stream]
+version = "0.1"
+[workspace.dependencies.futures]
+version = "0.3"
+[workspace.dependencies.futures-util]
+version = "0.3"
+[workspace.dependencies.dashmap]
+version = "6.1"
+
+[workspace.dependencies.moka]
+version = "0.12"
+features = ["sync", "future"]
+
+# Lazy Initialization
+[workspace.dependencies.once_cell]
+version = "1.20"
+
+# Configuration Management
+[workspace.dependencies.config]
+default-features = false
+features = ["toml"]
+version = "0.15"
+
+# Serialization Support
+[workspace.dependencies.bytes]
+features = ["serde"]
+version = "1.9"
+[workspace.dependencies.bytestring]
+features = ["serde"]
+version = "1.4"
+[workspace.dependencies.bit-struct]
+version = "0.3"
+[workspace.dependencies.nom]
+version = "8"
+[workspace.dependencies.byteorder]
+version = "1.5"
+[workspace.dependencies.serde]
+features = ["derive"]
+version = "1.0"
+[workspace.dependencies.serde-aux]
+version = "4.7"
+[workspace.dependencies.serde_with]
+version = "3.15"
+[workspace.dependencies.serde_json]
+version = "1.0"
+[workspace.dependencies.serde_repr]
+version = "0.1"
+[workspace.dependencies.rmp-serde]
+version = "1.1"
+[workspace.dependencies.downcast-rs]
+version = "2.0"
+
+# System Information
+[workspace.dependencies.sysinfo]
+version = "0.37"
+
+# Error Handling
+[workspace.dependencies.thiserror]
+version = "2.0"
+[workspace.dependencies.anyhow]
+version = "1.0"
+
+# Actix
+[workspace.dependencies.actix]
+version = "0.13"
+[workspace.dependencies.actix-web]
+features = ["rustls-0_23"]
+version = "4.1"
+[workspace.dependencies.actix-files]
+version = "0.6"
+[workspace.dependencies.actix-service]
+version = "2.0"
+[workspace.dependencies.actix-rt]
+version = "2.10"
+[workspace.dependencies.actix-tls]
+version = "3.4"
+[workspace.dependencies.actix-cors]
+version = "0.7"
+[workspace.dependencies.actix-web-actors]
+version = "4.1"
+[workspace.dependencies.actix-web-validator]
+version = "6.0"
+[workspace.dependencies.actix-multipart]
+version = "0.7"
+[workspace.dependencies.actix-multipart-derive]
+version = "0.7"
+
+# Validation
+[workspace.dependencies.validator]
+features = ["derive"]
+version = "0.18.1"
+
+# URL
+[workspace.dependencies.url]
+features = ["serde"]
+version = "2.5"
+
+# JWT
+[workspace.dependencies.jsonwebtoken]
+version = "9.3"
+
+# Retry backoff
+[workspace.dependencies.backoff]
+version = "0.4"
+features = ["tokio"]
+
+# Casbin
+[workspace.dependencies.casbin]
+default-features = false
+features = ["incremental", "cached", "runtime-tokio", "explain", "logging"]
+version = "2.7.0"
+[workspace.dependencies.actix-casbin]
+default-features = false
+features = ["runtime-tokio"]
+version = "1.1"
+[workspace.dependencies.actix-casbin-auth]
+default-features = false
+features = ["runtime-tokio"]
+version = "1.1"
+
+# WebSockets over Actix (for HTTP upgrade handling in ng-gateway-web)
+[workspace.dependencies.actix-ws]
+version = "0.3"
+
+# WebSockets over Tokio
+[workspace.dependencies.tokio-tungstenite]
+version = "0.28"
+
+# gRPC Framework
+[workspace.dependencies.tonic]
+version = "0.14"
+[workspace.dependencies.prost]
+version = "0.14"
+
+# Tls
+[workspace.dependencies.rustls]
+features = ["default", "ring"]
+version = "0.23"
+[workspace.dependencies.rcgen]
+features = ["default", "pem", "x509-parser"]
+version = "0.14"
+[workspace.dependencies.rustls-pemfile]
+version = "2.2"
+
+# Database ORM and Migrations
+[workspace.dependencies.sea-orm]
+features = [
+  "runtime-tokio",
+  "sqlx-sqlite",
+  "with-chrono",
+  "with-json",
+  "with-uuid",
+  "debug-print",
+  "serde_json",
+  "sea-orm-internal",
+  "sqlite-use-returning-for-3_35",
+]
+version = "1.1"
+[workspace.dependencies.sea-orm-migration]
+features = ["runtime-tokio", "sqlx-sqlite", "with-chrono", "with-json"]
+version = "1.1"
+[workspace.dependencies.sea-query]
+version = "0.32"
+
+# UUID
+[workspace.dependencies.uuid]
+features = ["v4", "serde"]
+version = "1.11"
+
+# Dynamic Library Loading
+[workspace.dependencies.libloading]
+version = "0.9"
+
+# Asynchronous Traits
+[workspace.dependencies.async-trait]
+version = "0.1"
+
+# URL Encoding
+[workspace.dependencies.percent-encoding]
+version = "2.3"
+
+# Date and Time
+[workspace.dependencies.chrono]
+version = "0.4"
+[workspace.dependencies.time]
+version = "0.3"
+
+# macros
+[workspace.dependencies.proc-macro2]
+version = "1.0"
+[workspace.dependencies.syn]
+features = ["full"]
+version = "2.0"
+[workspace.dependencies.quote]
+version = "1.0"
+[workspace.dependencies.darling]
+version = "0.23"
+
+# string operations
+[workspace.dependencies.heck]
+version = "0.5"
+
+# hashing
+[workspace.dependencies.bcrypt]
+version = "0.17"
+[workspace.dependencies.md-5]
+version = "0.10"
+[workspace.dependencies.hex]
+version = "0.4"
+
+# Random
+[workspace.dependencies.rand]
+version = "0.9"
+
+# Lock
+[workspace.dependencies.parking_lot]
+version = "0.12"
+
+# Encoding and Decoding
+[workspace.dependencies.base64]
+version = "0.22"
+[workspace.dependencies.hmac]
+version = "0.12"
+[workspace.dependencies.sha2]
+version = "0.10"
+
+# Protocols
+[workspace.dependencies.rumqttc]
+features = ["use-rustls"]
+version = "0.25"
+[workspace.dependencies.tokio-modbus]
+default-features = false
+features = ["tcp", "rtu"]
+version = "0.17"
+[workspace.dependencies.tokio-serial]
+version = "5.4"
+[workspace.dependencies.async-opcua]
+features = ["client"]
+version = "0.17"
+
+# Atomic Arc swapping for lock-free hot-path reads of session handles
+[workspace.dependencies.arc-swap]
+version = "1.7"
+
+# File System
+[workspace.dependencies.fs2]
+version = "0.4"
+
+# Cron scheduler
+[workspace.dependencies.tokio-cron-scheduler]
+version = "0.15"
+
+# Webpki
+[workspace.dependencies.webpki-roots]
+version = "1.0"
+
+# Tempfile
+[workspace.dependencies.tempfile]
+version = "3.11"
+
+[profile.release]
+# 含义：设置代码生成单元的数量。
+# •	Rust 的默认编译方式是将代码拆分为多个单元并行生成，提高编译速度。
+# •	将 codegen-units 设置为 1，会强制编译器在一个单元内生成所有代码。
+# 作用：
+# •	优点：可以最大化跨函数优化（如内联、消除未使用代码等），提高运行时性能或减小二进制大小。
+# •	缺点：编译速度会变慢，因为无法并行生成代码。
+codegen-units = 1
+# 含义：是否包含调试信息（符号信息，如变量名和行号）。
+# •	false：不包含调试信息，生成的二进制更小。
+# •	true：包含调试信息，便于在 Release 模式下使用调试器进行调试。
+debug = false
+# 含义：启用 Link-Time Optimization（LTO，链接时优化）。LTO 是在链接阶段对所有代码进行全局优化。
+# •	false（默认）：不开启 LTO。
+# •	true：开启 LTO，对项目和依赖库都进行全局优化。
+# •	"thin"：使用 ThinLTO，是一种更高效的 LTO，平衡优化效果和编译时间。
+
+# •	作用：
+# •	优点：启用 LTO 后，编译器可以跨模块优化，进一步减小二进制体积或提升性能。
+# •	缺点：会显著增加编译时间。
+lto = true
+# 含义：优化级别。
+# •	0：不优化，编译速度最快（通常用于 Debug）。
+# •	1：部分优化，折中编译时间和运行性能。
+# •	2：中等优化，默认值。
+# •	3：最高优化，性能最大化（编译时间更长）。
+# •	"s"：优化大小，同时兼顾性能。
+# •	"z"：极限优化大小，可能对性能产生更大的影响。
+# 作用：
+# •	用于在资源受限的场景（如嵌入式设备）中，减小二进制体积。
+opt-level = "z" # Optimize for size.
+# 含义：指定程序遇到 panic（运行时错误）时的行为。
+# •	'abort'：直接终止程序，释放系统资源，不执行堆栈展开。
+# •	'unwind'（默认）：执行堆栈展开，用于捕获 panic 和恢复。
+# 作用：
+# •	优点：设置为 'abort' 可以减小二进制大小，因为堆栈展开代码和运行时支持可以省略。
+# •	缺点：一旦程序 panic，无法捕获和恢复，会直接退出。
+panic = 'abort'
+# 在编译完成后是否去掉二进制文件中的符号表（strip 操作）。
+# •	"none"（或 false）：保留所有符号信息，方便调试。
+# •	"symbols"（或 true）：去除所有符号表，只保留必要信息，减小二进制体积。
+# 作用：
+# •	优点：可以减小二进制文件的大小。
+# •	缺点：去掉符号后，调试和分析堆栈跟踪会变得困难。
+strip = "symbols" # none(false) debuginfo symbols(true).

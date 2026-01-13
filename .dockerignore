@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────
+# Ignore Rust build artifacts
+# ─────────────────────────────────────────────
+target
+debug
+release
+
+# ─────────────────────────────────────────────
+# Editor / IDE files
+# ─────────────────────────────────────────────
+*.swp
+*.rs.bk
+.vscode/
+.cursor/
+.idea/
+*.DS_Store
+
+# ─────────────────────────────────────────────
+# Git metadata
+# ─────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ─────────────────────────────────────────────
+# CI/CD configurations (optional)
+# ─────────────────────────────────────────────
+.github/
+.circleci/
+
+# ─────────────────────────────────────────────
+# Docker & cargo-chef related temporary files
+# ─────────────────────────────────────────────
+Dockerfile
+.dockerignore
+recipe.json
+cargo-chef.json
+
+# ─────────────────────────────────────────────
+# Local assets not required for gateway builds
+# ─────────────────────────────────────────────
+# Exclude node_modules (will be installed during Docker build)
+node_modules/
+ng-gateway-ui/**/node_modules/
+# Exclude prebuilt dist directories (will be built during Docker build)
+ng-gateway-ui/**/dist/
+ng-gateway-ui/**/dist.zip
+# Note: Frontend source code is included for ui.Dockerfile builds
+logs/
+data/
+tmp/
+drivers/builtin/**/*.dylib
+drivers/builtin/**/*.dll
+drivers/builtin/**/*.pdb
+plugins/builtin/**/*.dylib
+plugins/builtin/**/*.dll
+plugins/builtin/**/*.pdb
+
+# ─────────────────────────────────────────────
+# Logs and temporary outputs
+# ─────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+*.out
+
+# ─────────────────────────────────────────────
+# Code coverage / test output
+# ─────────────────────────────────────────────
+coverage/
+tests/output/
+
+# ─────────────────────────────────────────────
+# Optional: exclude Cargo.lock if building library crates
+# ─────────────────────────────────────────────
+# Cargo.lock

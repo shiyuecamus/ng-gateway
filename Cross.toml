@@ -1,0 +1,143 @@
+# Cross configuration for cross-rs
+# See: https://github.com/cross-rs/cross
+
+# Global build-time environment passthrough (safe, non-secret)
+[build.env]
+passthrough = [
+    "RUST_LOG",
+    "RUST_BACKTRACE",
+    "RUSTFLAGS",
+    # Allow tuning release profile via env without editing Cargo.toml
+    "CARGO_PROFILE_RELEASE_LTO",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+    "CARGO_PROFILE_RELEASE_PANIC",
+]
+
+# Target-specific configuration for aarch64 GNU
+[target.aarch64-unknown-linux-gnu]
+# Pin to a known-good base image version to ensure reproducible builds
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+
+# Install system dependencies commonly required by IoT gateway builds
+# - pkg-config: for native builds using pkg-config discovery
+# - libudev-dev: serial/USB (tokio-serial/serialport)
+# - libssl-dev: TLS (rustls native roots not always enough for some crates)
+# - libsqlite3-0: runtime for sqlite when linking dynamically
+# - ca-certificates: ensure TLS certs available
+# - tzdata: avoid tz related failures in some builds/tests
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+# Example: If you need to run binaries/tests under QEMU with a custom runner
+# runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
+
+# Optional: If you prefer MUSL (static) builds, use the section below instead
+# and ensure you don't rely on glibc-only features.
+# [target.aarch64-unknown-linux-musl]
+# image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5"
+# pre-build = [
+#     "apt-get update",
+#     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config ca-certificates tzdata",
+#     "update-ca-certificates || true",
+#     "rm -rf /var/lib/apt/lists/*",
+# ]
+
+# Additional common Linux GNU targets
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+[target.i686-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/i686-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:0.2.5"
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+[target.arm-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/arm-unknown-linux-gnueabihf:0.2.5"
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+[target.riscv64gc-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+[target.powerpc64le-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/powerpc64le-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+[target.s390x-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libssl-dev libsqlite3-0 ca-certificates tzdata",
+    "update-ca-certificates || true",
+    "rm -rf /var/lib/apt/lists/*",
+]
+
+# Optional MUSL targets (uncomment as needed)
+# [target.x86_64-unknown-linux-musl]
+# image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5"
+# pre-build = [
+#     "apt-get update",
+#     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config ca-certificates tzdata",
+#     "update-ca-certificates || true",
+#     "rm -rf /var/lib/apt/lists/*",
+# ]
+# [target.armv7-unknown-linux-musleabihf]
+# image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:0.2.5"
+# pre-build = [
+#     "apt-get update",
+#     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config ca-certificates tzdata",
+#     "update-ca-certificates || true",
+#     "rm -rf /var/lib/apt/lists/*",
+# ]
+
+# Windows (GNU) targets - built via mingw in Linux containers
+[target.x86_64-pc-windows-gnu]
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:0.2.5"
+
+[target.i686-pc-windows-gnu]
+image = "ghcr.io/cross-rs/i686-pc-windows-gnu:0.2.5"
+
+
+# macOS (Darwin) targets are not supported by cross (Docker-based) images.
+# For macOS, build natively on a macOS host with Xcode toolchain:
+#   rustup target add aarch64-apple-darwin x86_64-apple-darwin
+#   cargo build --target aarch64-apple-darwin --release
+#   cargo build --target x86_64-apple-darwin --release

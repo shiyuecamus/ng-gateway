@@ -1,0 +1,110 @@
+[package]
+name = "ng-gateway-common"
+edition = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+colored = "3.0.0"
+sys-locale = "0.3.2"
+term_size = "0.3.2"
+
+# Local
+[dependencies.ng-gateway-error]
+workspace = true
+[dependencies.ng-gateway-models]
+workspace = true
+[dependencies.ng-gateway-macros]
+workspace = true
+[dependencies.ng-gateway-utils]
+workspace = true
+
+# Logging
+[dependencies.tracing]
+workspace = true
+[dependencies.tracing-subscriber]
+workspace = true
+[dependencies.tracing-appender]
+workspace = true
+
+# Metrics
+[dependencies.opentelemetry]
+workspace = true
+[dependencies.opentelemetry_sdk]
+workspace = true
+[dependencies.opentelemetry-otlp]
+workspace = true
+
+# Json serialization
+[dependencies.serde]
+workspace = true
+[dependencies.serde_json]
+workspace = true
+
+
+# Actix
+[dependencies.actix-web]
+workspace = true
+
+# JWT
+[dependencies.jsonwebtoken]
+workspace = true
+
+# URL
+[dependencies.url]
+workspace = true
+
+# Asynchronous Runtime
+[dependencies.tokio]
+workspace = true
+[dependencies.tokio-util]
+workspace = true
+[dependencies.dashmap]
+workspace = true
+
+# ORM
+[dependencies.sea-orm]
+workspace = true
+
+# Casbin
+[dependencies.casbin]
+workspace = true
+
+# Lazy Initialization
+[dependencies.once_cell]
+workspace = true
+
+# Async trait
+[dependencies.async-trait]
+workspace = true
+
+# Random generator
+[dependencies.rand]
+workspace = true
+
+# Encoding and Decoding
+[dependencies.base64]
+workspace = true
+[dependencies.sha2]
+workspace = true
+
+# UUID
+[dependencies.uuid]
+workspace = true
+
+# Date and time
+[dependencies.chrono]
+workspace = true
+
+# Downcast
+[dependencies.downcast-rs]
+workspace = true
+
+# Cron scheduler
+[dependencies.tokio-cron-scheduler]
+workspace = true
+
+# System Information
+[dependencies.sysinfo]
+workspace = true

@@ -1,0 +1,106 @@
+[package]
+name = "ng-gateway-web"
+edition = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+
+# Local
+[dependencies.ng-gateway-storage]
+workspace = true
+[dependencies.ng-gateway-common]
+workspace = true
+[dependencies.ng-gateway-core]
+workspace = true
+[dependencies.ng-gateway-error]
+workspace = true
+[dependencies.ng-gateway-utils]
+workspace = true
+[dependencies.ng-gateway-models]
+workspace = true
+[dependencies.ng-gateway-repository]
+workspace = true
+[dependencies.ng-gateway-sdk]
+workspace = true
+
+# Actix
+[dependencies.actix-web]
+workspace = true
+[dependencies.actix-files]
+workspace = true
+[dependencies.actix-rt]
+workspace = true
+[dependencies.actix-cors]
+workspace = true
+[dependencies.actix-service]
+workspace = true
+[dependencies.actix-web-validator]
+workspace = true
+[dependencies.actix-multipart]
+workspace = true
+[dependencies.actix-multipart-derive]
+workspace = true
+
+[dependencies.actix-ws]
+workspace = true
+
+# Serialize
+[dependencies.serde]
+workspace = true
+[dependencies.serde_json]
+workspace = true
+[dependencies.bytes]
+workspace = true
+
+# Casbin
+[dependencies.casbin]
+workspace = true
+
+# ORM
+[dependencies.sea-orm]
+workspace = true
+
+# Async trait
+[dependencies.async-trait]
+workspace = true
+
+# Logging
+[dependencies.tracing]
+workspace = true
+
+# Lazy Initialization
+[dependencies.once_cell]
+workspace = true
+
+# Asynchronous Runtime
+[dependencies.tokio]
+workspace = true
+[dependencies.tokio-util]
+workspace = true
+[dependencies.futures]
+workspace = true
+
+# UUID
+[dependencies.uuid]
+workspace = true
+
+# JWT
+[dependencies.jsonwebtoken]
+workspace = true
+
+# Date and Time
+[dependencies.chrono]
+workspace = true
+
+# Tempfile
+[dependencies.tempfile]
+workspace = true
+
+[dependencies.zip]
+version = "6.0"
+optional = true
+
+[features]
+# Enable embedded UI (ui-dist.zip) support. This is intended for:
+# - Single-binary distribution (Homebrew philosophy)
+# - Offline single-file deployments
+ui-embedded = ["dep:zip"]

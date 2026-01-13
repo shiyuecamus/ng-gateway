@@ -1,0 +1,23 @@
+{{- if and .Values.gateway.enabled .Values.gateway.podDisruptionBudget.enabled }}
+{{- if .Capabilities.APIVersions.Has "policy/v1" }}
+apiVersion: policy/v1
+{{- else }}
+apiVersion: policy/v1beta1
+{{- end }}
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-gateway
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.gateway.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.gateway.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if .Values.gateway.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.gateway.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ng-gateway.gateway.selectorLabels" . | nindent 6 }}
+{{- end }}
+

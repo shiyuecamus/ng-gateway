@@ -1,0 +1,101 @@
+# Default gateway config for Homebrew single-machine distribution (macOS).
+#
+# Key differences vs repo root `gateway.toml`:
+# - UI uses `embedded_zip` so the Homebrew-installed binary can serve UI without filesystem dist.
+#
+# Note:
+# - Many file paths are relative to the current working directory.
+# - Homebrew wrapper will `cd` into `var/lib/ng-gateway` before launching.
+
+# General
+[general]
+ca_cert_path = "./certs/ca.crt"
+ca_key_path = "./certs/ca.key"
+
+[general.southward]
+driver_sync_start_timeout_ms = 2000
+
+[general.northward]
+queue_capacity = 10000
+app_sync_start_timeout_ms = 2000
+cache_ttl_ms = 3600000
+
+[general.collector]
+collection_timeout_ms = 30000
+metrics_interval_ms = 60000
+max_concurrent_collections = 200
+retry_attempts = 3
+retry_delay_ms = 1000
+outbound_queue_capacity = 10000
+
+# Metrics
+[metrics]
+enabled = false
+endpoint = "http://localhost:4317"
+export_interval = 60000
+service_name = "ng"
+
+# Web
+[web]
+router_prefix = "/api"
+host = "0.0.0.0"
+port = 8978
+workers = 0
+
+[web.ui]
+enabled = true
+# Mode: embedded_zip | filesystem | disabled
+mode = "embedded_zip"
+filesystem_root = "./ng-gateway-ui/apps/web-antd/dist"
+
+[web.ssl]
+enabled = true
+port = 8979
+type = "auto"
+cert = "./certs/cert.pem"
+key = "./certs/key.pem"
+
+[web.cors]
+mode = "allow_all"
+
+[web.cors.whitelist]
+origins = ["*"]
+methods = ["GET", "POST", "PUT", "DELETE"]
+headers = [
+  "Content-Type",
+  "AccessToken",
+  "X-CSRF-Token",
+  "Authorization",
+  "Token",
+  "X-Token",
+  "X-User-Id",
+]
+expose_headers = [
+  "Content-Length",
+  "Access-Control-Allow-Origin",
+  "Access-Control-Allow-Headers",
+  "Content-Type",
+]
+credentials = true
+
+[web.jwt]
+secret = "ng-gateway"
+expire = 3600000
+issuer = "ng-gateway"
+
+# Cache
+[cache]
+type = "moka"
+prefix = "ng-gateway"
+delimiter = ":"
+
+# Database
+[db.sqlite]
+path = "ng-gateway.db"
+timeout = 5000
+idle_timeout = 5000
+max_lifetime = 5000
+max_connections = 100
+auto_create = true
+
+

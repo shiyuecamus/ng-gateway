@@ -1,0 +1,20 @@
+apiVersion: v2
+name: ng-gateway-chart
+description: A Helm chart for NG Gateway - Industrial IoT Gateway Platform
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - iot
+  - gateway
+  - industrial
+  - edge-computing
+home: https://github.com/shiyuecamus/ng-gateway
+sources:
+  - https://github.com/shiyuecamus/ng-gateway
+maintainers:
+  - name: Shiyuecamus
+kubeVersion: ">=1.19.0-0"
+annotations:
+  category: Infrastructure
+

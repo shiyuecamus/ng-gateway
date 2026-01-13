@@ -1,0 +1,342 @@
+# Default values for ng-gateway
+# This is a YAML-formatted file.
+
+# Global settings
+global:
+  # Image registry (leave empty to use default)
+  imageRegistry: ""
+  # Image pull policy
+  imagePullPolicy: IfNotPresent
+  # Image pull secrets (optional)
+  imagePullSecrets: []
+  # Storage class for PVCs. Set to non-empty value to create PVCs,
+  # leave empty to fall back to emptyDir ephemeral storage.
+  storageClass: ""
+
+# Gateway service configuration
+gateway:
+  enabled: true
+  # Image configuration
+  image:
+    registry: ""
+    repository: ng-gateway
+    tag: "latest"
+    pullPolicy: ""
+  
+  # Replica count
+  replicaCount: 1
+  
+  # Service account
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+  
+  # Pod annotations
+  podAnnotations: {}
+  
+  # Pod security context
+  # Example:
+  # podSecurityContext:
+  #   fsGroup: 1000
+  #   runAsNonRoot: true
+  #   runAsUser: 1000
+  podSecurityContext: {}
+  
+  # Container security context
+  # Example:
+  # securityContext:
+  #   allowPrivilegeEscalation: false
+  #   capabilities:
+  #     drop:
+  #       - ALL
+  #   readOnlyRootFilesystem: false
+  #   runAsNonRoot: true
+  #   runAsUser: 1000
+  securityContext: {}
+  
+  # Resource limits and requests
+  # Example:
+  # resources:
+  #   limits:
+  #     cpu: 2000m
+  #     memory: 2Gi
+  #   requests:
+  #     cpu: 500m
+  #     memory: 512Mi
+  resources: {}
+  
+  # Liveness and readiness probes
+  livenessProbe:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  
+  readinessProbe:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  
+  # Startup probe
+  startupProbe:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 30
+  
+  # Service configuration
+  # Ports are automatically read from gateway.config.web.port and gateway.config.web.ssl.port
+  service:
+    type: ClusterIP
+    httpPort: 8080
+    httpsPort: 8883
+    annotations: {}
+    # For NodePort/LoadBalancer
+    nodePort:
+      http: 30080
+      https: 30443
+  
+  # Gateway configuration (will be converted to ConfigMap environment variables)
+  # All values are automatically converted to strings and prefixed with NG__ where applicable
+  config:
+    # Logging configuration
+    logLevel: "info"
+    timezone: "Asia/Shanghai"
+    
+    # General configuration
+    general:
+      caCertPath: "./certs/ca.crt"
+      caKeyPath: "./certs/ca.key"
+      
+      # Southward communication configuration
+      southward:
+        # milliseconds
+        driverSyncStartTimeout: 2000
+      
+      # Northward communication configuration
+      northward:
+        queueCapacity: 10000
+        # milliseconds
+        appSyncStartTimeout: 2000
+        # milliseconds
+        cacheTtl: 3600000
+      
+      # Collector configuration
+      collector:
+        # milliseconds
+        collectionTimeout: 30000
+        # milliseconds
+        metricsInterval: 60000
+        maxConcurrentCollections: 200
+        retryAttempts: 3
+        # milliseconds
+        retryDelay: 1000
+        outboundQueueCapacity: 10000
+    
+    # Web configuration
+    web:
+      routerPrefix: "/api"
+      port: 8080
+      # 0 = use CPU count, >0 = exact number, <0 = CPU count / abs(workers)
+      workers: 0
+      
+      # SSL configuration
+      ssl:
+        enabled: true
+        port: 8883
+        # auto: generate or load from ca_cert_path and ca_key_path, local: load from cert and key
+        type: "auto"
+        cert: "./certs/cert.pem"
+        key: "./certs/key.pem"
+      
+      # CORS configuration
+      cors:
+        # allow_all, whitelist
+        mode: "allow_all"
+      
+      # JWT configuration
+      jwt:
+        secret: "ng-gateway"
+        # milliseconds
+        expire: 3600000
+        issuer: "ng-gateway"
+    
+    # Cache configuration
+    cache:
+      # only moka is supported
+      type: "moka"
+      prefix: "ng-gateway"
+      delimiter: ":"
+    
+    # Database configuration
+    db:
+      sqlite:
+        # Final path resolves under ./data
+        path: "ng-gateway.db"
+        # milliseconds
+        timeout: 5000
+        # milliseconds
+        idleTimeout: 5000
+        # milliseconds
+        maxLifetime: 5000
+        # number of connections
+        maxConnections: 100
+        # auto create database file and directory if not exists
+        autoCreate: true
+    
+    # Metrics configuration
+    metrics:
+      enabled: false
+      endpoint: "http://localhost:4317"
+      # milliseconds
+      exportInterval: 60000
+      serviceName: "ng"
+  
+  # Additional environment variables from secrets (optional)
+  envFromSecrets: []
+  
+  # Node selector
+  # Example:
+  # nodeSelector:
+  #   kubernetes.io/os: linux
+  #   node-role.kubernetes.io/worker: "true"
+  nodeSelector: {}
+  
+  # Tolerations
+  # Example:
+  # tolerations:
+  #   - key: "key1"
+  #     operator: "Equal"
+  #     value: "value1"
+  #     effect: "NoSchedule"
+  #   - key: "key2"
+  #     operator: "Exists"
+  #     effect: "NoExecute"
+  tolerations: []
+  
+  # Affinity
+  # Example:
+  # affinity:
+  #   podAntiAffinity:
+  #     preferredDuringSchedulingIgnoredDuringExecution:
+  #       - weight: 100
+  #         podAffinityTerm:
+  #           labelSelector:
+  #             matchExpressions:
+  #               - key: app.kubernetes.io/component
+  #                 operator: In
+  #                 values:
+  #                   - gateway
+  #           topologyKey: kubernetes.io/hostname
+  affinity: {}
+  
+  # Pod disruption budget
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: ""
+  
+  # Horizontal Pod Autoscaler
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+# Persistent Volume Claims
+persistence:
+  # Gateway data persistence
+  gatewayData:
+    enabled: true
+    # Set storageClass (or global.storageClass) to provision a PVC.
+    # Leave empty to use emptyDir for temporary storage.
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    annotations: {}
+  
+  # Gateway drivers persistence
+  gatewayDrivers:
+    enabled: true
+    # Requires storageClass/global.storageClass to create a PVC.
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 2Gi
+    annotations: {}
+  
+  # Gateway plugins persistence
+  gatewayPlugins:
+    enabled: true
+    # Requires storageClass/global.storageClass to create a PVC.
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 2Gi
+    annotations: {}
+
+# Ingress configuration
+# All-in-one mode: gateway serves both UI and API, so Ingress routes `/` to gateway service.
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  # kubernetes.io/ingress.class: nginx
+  # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: gateway.example.com
+  tls: []
+  #  - secretName: gateway-tls
+  #    hosts:
+  #      - gateway.example.com
+
+# ServiceMonitor for Prometheus (requires Prometheus Operator)
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+  # Additional ServiceMonitor configuration
+  metricRelabelings: []
+  relabelings: []
+
+# NetworkPolicy
+networkPolicy:
+  enabled: false
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+
+# PodMonitor for Prometheus (requires Prometheus Operator)
+podMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+
+# Name of the Kubernetes secret containing image pull credentials
+imagePullSecrets: []
+
+# Name override for the chart
+nameOverride: ""
+
+# Full name override for the chart
+fullnameOverride: ""
+

@@ -1,0 +1,24 @@
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/gateway.Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    image: ${GATEWAY_IMAGE:-ng-gateway}:${GATEWAY_TAG:-local}
+    ports:
+      - "${GATEWAY_HTTP_PORT:-8978}:8978"
+      - "${GATEWAY_WS_PORT:-8979}:8979"
+    volumes:
+      - gateway-data:/app/data
+      - gateway-drivers:/app/drivers/custom
+      - gateway-plugins:/app/plugins/custom
+
+volumes:
+  gateway-data:
+  gateway-drivers:
+  gateway-plugins:
+
+

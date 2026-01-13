@@ -1,0 +1,40 @@
+[package]
+name = "ng-gateway-bin"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+publish = { workspace = true }
+repository = { workspace = true }
+default-run = "ng-gateway-bin"
+
+# Local
+[dependencies.ng-gateway-common]
+workspace = true
+[dependencies.ng-gateway-error]
+workspace = true
+[dependencies.ng-gateway-storage]
+workspace = true
+[dependencies.ng-gateway-web]
+workspace = true
+[dependencies.ng-gateway-models]
+workspace = true
+[dependencies.ng-gateway-core]
+workspace = true
+
+# Tokio
+[dependencies.tokio]
+workspace = true
+
+# Command Line Argument Parsing
+[dependencies.clap]
+workspace = true
+features = ["derive"]
+
+# Casbin
+[dependencies.casbin]
+workspace = true
+
+[features]
+# Forward feature for single-binary distribution: embed UI assets into the gateway binary.
+ui-embedded = ["ng-gateway-web/ui-embedded"]

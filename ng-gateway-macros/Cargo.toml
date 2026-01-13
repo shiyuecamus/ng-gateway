@@ -1,0 +1,20 @@
+[package]
+name = "ng-gateway-macros"
+edition = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+
+# macros
+[dependencies.proc-macro2]
+workspace = true
+[dependencies.syn]
+workspace = true
+[dependencies.quote]
+workspace = true
+[dependencies.darling]
+workspace = true
+[dependencies.heck]
+workspace = true
+
+[lib]
+proc-macro = true

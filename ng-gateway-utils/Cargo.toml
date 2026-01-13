@@ -1,0 +1,71 @@
+[package]
+name = "ng-gateway-utils"
+edition = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+
+# Local
+[dependencies.ng-gateway-error]
+workspace = true
+
+# URL Encoding
+[dependencies.percent-encoding]
+workspace = true
+
+# Hashing
+[dependencies.bcrypt]
+workspace = true
+[dependencies.md-5]
+workspace = true
+[dependencies.hex]
+workspace = true
+
+# JWT
+[dependencies.jsonwebtoken]
+workspace = true
+
+# Json serialization
+[dependencies.serde]
+workspace = true
+[dependencies.serde_json]
+workspace = true
+
+# Date and Time
+[dependencies.chrono]
+workspace = true
+[dependencies.time]
+workspace = true
+
+# UUID
+[dependencies.uuid]
+workspace = true
+
+# TLS
+[dependencies.rustls]
+workspace = true
+[dependencies.rcgen]
+workspace = true
+[dependencies.rustls-pemfile]
+workspace = true
+
+# Random
+[dependencies.rand]
+workspace = true
+
+# SHA2
+[dependencies.sha2]
+workspace = true
+
+# File System
+[dependencies.fs2]
+workspace = true
+
+# Async runtime and utilities
+[dependencies.tokio]
+workspace = true
+[dependencies.tokio-util]
+workspace = true
+
+# Logging and tracing
+[dependencies.tracing]
+workspace = true

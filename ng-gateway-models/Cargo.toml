@@ -1,0 +1,98 @@
+[package]
+edition = { workspace = true }
+name = "ng-gateway-models"
+publish = { workspace = true }
+version = { workspace = true }
+
+# Local
+[dependencies.ng-gateway-utils]
+workspace = true
+[dependencies.ng-gateway-macros]
+workspace = true
+[dependencies.ng-gateway-error]
+workspace = true
+[dependencies.ng-gateway-sdk]
+workspace = true
+
+# Date and Time
+[dependencies.chrono]
+workspace = true
+
+# Actix Web
+[dependencies.actix-web]
+workspace = true
+[dependencies.actix-multipart]
+workspace = true
+[dependencies.actix-multipart-derive]
+workspace = true
+[dependencies.validator]
+workspace = true
+
+# Asynchronous Runtime
+[dependencies.tokio]
+workspace = true
+[dependencies.tokio-util]
+workspace = true
+
+# ORM
+[dependencies.sea-orm]
+workspace = true
+[dependencies.sea-orm-migration]
+workspace = true
+[dependencies.sea-query]
+workspace = true
+
+# OpenTelemetry
+[dependencies.opentelemetry_sdk]
+workspace = true
+
+# Async trait
+[dependencies.async-trait]
+workspace = true
+
+# Casbin
+[dependencies.casbin]
+workspace = true
+
+# Downcast
+[dependencies.downcast-rs]
+workspace = true
+
+# System Information
+[dependencies.sysinfo]
+workspace = true
+
+# Once Cell
+[dependencies.once_cell]
+workspace = true
+
+# Serialization Support
+[dependencies.serde]
+workspace = true
+features = ["rc"]
+[dependencies.serde_json]
+workspace = true
+[dependencies.serde-aux]
+workspace = true
+[dependencies.serde_with]
+workspace = true
+[dependencies.serde_repr]
+workspace = true
+[dependencies.bytes]
+workspace = true
+
+# Configuration Management
+[dependencies.config]
+workspace = true
+
+# Metrics
+[dependencies.opentelemetry]
+workspace = true
+
+# UUID
+[dependencies.uuid]
+workspace = true
+
+# Tracing
+[dependencies.tracing]
+workspace = true

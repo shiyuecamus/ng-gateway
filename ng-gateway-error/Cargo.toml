@@ -1,0 +1,49 @@
+[package]
+name = "ng-gateway-error"
+edition = { workspace = true }
+publish = { workspace = true }
+version = { workspace = true }
+
+# Error Handling
+[dependencies.thiserror]
+workspace = true
+[dependencies.anyhow]
+workspace = true
+
+# ORM
+[dependencies.sea-orm]
+workspace = true
+
+# Asynchronous Runtime
+[dependencies.tokio]
+workspace = true
+
+# Configuration Management
+[dependencies.config]
+workspace = true
+
+# Serialization Support
+[dependencies.serde]
+workspace = true
+[dependencies.serde_json]
+workspace = true
+[dependencies.bytestring]
+workspace = true
+
+# Web
+[dependencies.actix-web]
+workspace = true
+[dependencies.actix-multipart]
+workspace = true
+
+# TLS
+[dependencies.rustls]
+workspace = true
+[dependencies.rcgen]
+workspace = true
+[dependencies.rustls-pemfile]
+workspace = true
+
+# Cache
+[dependencies.moka]
+workspace = true

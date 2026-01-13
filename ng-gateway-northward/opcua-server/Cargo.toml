@@ -1,0 +1,25 @@
+[package]
+name = "ng-plugin-opcua-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ng-gateway-sdk = { workspace = true }
+tokio = { version = "1.47", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+async-trait = { version = "0.1" }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3" }
+dashmap = { version = "6.1" }
+bytes = { version = "1.7" }
+chrono = { version = "0.4" }
+thiserror = { version = "2.0" }
+async-opcua = { version = "0.17", features = ["server"] }
+base64 = { version = "0.22" }
+uuid = { version = "1.11", features = ["v4"] }

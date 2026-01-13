@@ -1,0 +1,158 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-gateway-config
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+data:
+{{- $config := .Values.gateway.config -}}
+  {{- if $config.logLevel }}
+  RUST_LOG: {{ $config.logLevel | quote }}
+  {{- end }}
+  {{- if $config.timezone }}
+  TZ: {{ $config.timezone | quote }}
+  {{- end }}
+  {{- if $config.general }}
+  {{- if $config.general.name }}
+  NG__GENERAL__NAME: {{ $config.general.name | quote }}
+  {{- end }}
+  {{- if $config.general.caCertPath }}
+  NG__GENERAL__CA_CERT_PATH: {{ $config.general.caCertPath | quote }}
+  {{- end }}
+  {{- if $config.general.caKeyPath }}
+  NG__GENERAL__CA_KEY_PATH: {{ $config.general.caKeyPath | quote }}
+  {{- end }}
+  {{- if $config.general.southward }}
+  {{- if $config.general.southward.driverSyncStartTimeout }}
+  NG__GENERAL__SOUTHWARD__DRIVER_SYNC_START_TIMEOUT_MS: {{ $config.general.southward.driverSyncStartTimeout | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.general.northward }}
+  {{- if $config.general.northward.queueCapacity }}
+  NG__GENERAL__NORTHWARD__QUEUE_CAPACITY: {{ $config.general.northward.queueCapacity | quote }}
+  {{- end }}
+  {{- if $config.general.northward.appSyncStartTimeout }}
+  NG__GENERAL__NORTHWARD__APP_SYNC_START_TIMEOUT_MS: {{ $config.general.northward.appSyncStartTimeout | quote }}
+  {{- end }}
+  {{- if $config.general.northward.cacheTtl }}
+  NG__GENERAL__NORTHWARD__CACHE_TTL_MS: {{ $config.general.northward.cacheTtl | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.general.collector }}
+  {{- if $config.general.collector.collectionTimeout }}
+  NG__GENERAL__COLLECTOR__COLLECTION_TIMEOUT_MS: {{ $config.general.collector.collectionTimeout | quote }}
+  {{- end }}
+  {{- if $config.general.collector.metricsInterval }}
+  NG__GENERAL__COLLECTOR__METRICS_INTERVAL_MS: {{ $config.general.collector.metricsInterval | quote }}
+  {{- end }}
+  {{- if $config.general.collector.maxConcurrentCollections }}
+  NG__GENERAL__COLLECTOR__MAX_CONCURRENT_COLLECTIONS: {{ $config.general.collector.maxConcurrentCollections | quote }}
+  {{- end }}
+  {{- if $config.general.collector.retryAttempts }}
+  NG__GENERAL__COLLECTOR__RETRY_ATTEMPTS: {{ $config.general.collector.retryAttempts | quote }}
+  {{- end }}
+  {{- if $config.general.collector.retryDelay }}
+  NG__GENERAL__COLLECTOR__RETRY_DELAY_MS: {{ $config.general.collector.retryDelay | quote }}
+  {{- end }}
+  {{- if $config.general.collector.outboundQueueCapacity }}
+  NG__GENERAL__COLLECTOR__OUTBOUND_QUEUE_CAPACITY: {{ $config.general.collector.outboundQueueCapacity | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.web }}
+  {{- if $config.web.routerPrefix }}
+  NG__WEB__ROUTER_PREFIX: {{ $config.web.routerPrefix | quote }}
+  {{- end }}
+  {{- if $config.web.host }}
+  NG__WEB__HOST: {{ $config.web.host | quote }}
+  {{- end }}
+  {{- if $config.web.port }}
+  NG__WEB__PORT: {{ $config.web.port | quote }}
+  {{- end }}
+  {{- if hasKey $config.web "workers" }}
+  NG__WEB__WORKERS: {{ $config.web.workers | quote }}
+  {{- end }}
+  {{- if $config.web.ssl }}
+  {{- if hasKey $config.web.ssl "enabled" }}
+  NG__WEB__SSL__ENABLED: {{ $config.web.ssl.enabled | quote }}
+  {{- end }}
+  {{- if $config.web.ssl.port }}
+  NG__WEB__SSL__PORT: {{ $config.web.ssl.port | quote }}
+  {{- end }}
+  {{- if $config.web.ssl.type }}
+  NG__WEB__SSL__TYPE: {{ $config.web.ssl.type | quote }}
+  {{- end }}
+  {{- if $config.web.ssl.cert }}
+  NG__WEB__SSL__CERT: {{ $config.web.ssl.cert | quote }}
+  {{- end }}
+  {{- if $config.web.ssl.key }}
+  NG__WEB__SSL__KEY: {{ $config.web.ssl.key | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.web.cors }}
+  {{- if $config.web.cors.mode }}
+  NG__WEB__CORS__MODE: {{ $config.web.cors.mode | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.web.jwt }}
+  {{- if $config.web.jwt.secret }}
+  NG__WEB__JWT__SECRET: {{ $config.web.jwt.secret | quote }}
+  {{- end }}
+  {{- if $config.web.jwt.expire }}
+  NG__WEB__JWT__EXPIRE: {{ $config.web.jwt.expire | quote }}
+  {{- end }}
+  {{- if $config.web.jwt.issuer }}
+  NG__WEB__JWT__ISSUER: {{ $config.web.jwt.issuer | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.cache }}
+  {{- if $config.cache.type }}
+  NG__CACHE__TYPE: {{ $config.cache.type | quote }}
+  {{- end }}
+  {{- if $config.cache.prefix }}
+  NG__CACHE__PREFIX: {{ $config.cache.prefix | quote }}
+  {{- end }}
+  {{- if $config.cache.delimiter }}
+  NG__CACHE__DELIMITER: {{ $config.cache.delimiter | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.db }}
+  {{- if $config.db.sqlite }}
+  {{- if $config.db.sqlite.path }}
+  NG__DB__SQLITE__PATH: {{ $config.db.sqlite.path | quote }}
+  {{- end }}
+  {{- if $config.db.sqlite.timeout }}
+  NG__DB__SQLITE__TIMEOUT: {{ $config.db.sqlite.timeout | quote }}
+  {{- end }}
+  {{- if $config.db.sqlite.idleTimeout }}
+  NG__DB__SQLITE__IDLE_TIMEOUT: {{ $config.db.sqlite.idleTimeout | quote }}
+  {{- end }}
+  {{- if $config.db.sqlite.maxLifetime }}
+  NG__DB__SQLITE__MAX_LIFETIME: {{ $config.db.sqlite.maxLifetime | quote }}
+  {{- end }}
+  {{- if $config.db.sqlite.maxConnections }}
+  NG__DB__SQLITE__MAX_CONNECTIONS: {{ $config.db.sqlite.maxConnections | quote }}
+  {{- end }}
+  {{- if hasKey $config.db.sqlite "autoCreate" }}
+  NG__DB__SQLITE__AUTO_CREATE: {{ $config.db.sqlite.autoCreate | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.metrics }}
+  {{- if hasKey $config.metrics "enabled" }}
+  NG__METRICS__ENABLED: {{ $config.metrics.enabled | quote }}
+  {{- end }}
+  {{- if $config.metrics.endpoint }}
+  NG__METRICS__ENDPOINT: {{ $config.metrics.endpoint | quote }}
+  {{- end }}
+  {{- if $config.metrics.exportInterval }}
+  NG__METRICS__EXPORT_INTERVAL: {{ $config.metrics.exportInterval | quote }}
+  {{- end }}
+  {{- if $config.metrics.serviceName }}
+  NG__METRICS__SERVICE_NAME: {{ $config.metrics.serviceName | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+

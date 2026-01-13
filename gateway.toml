@@ -1,0 +1,145 @@
+# General
+[general]
+# ca cert path
+ca_cert_path = "./certs/ca.crt"
+# ca key path
+ca_key_path = "./certs/ca.key"
+
+# Southward communication configuration
+[general.southward]
+# API synchronous start wait timeout for driver connection (milliseconds)
+driver_sync_start_timeout_ms = 2000
+
+# Northward communication configuration
+[general.northward]
+# Internal bounded queue capacity for northward manager
+queue_capacity = 10000
+# API synchronous start wait timeout for northward app (milliseconds)
+app_sync_start_timeout_ms = 2000
+# Cache TTL for device change detection cache (in milliseconds)
+cache_ttl_ms = 3600000
+
+# Collector configuration
+[general.collector]
+# Collection timeout for each device (in milliseconds)
+collection_timeout_ms = 30000
+# Metrics collection interval (in milliseconds)
+metrics_interval_ms = 60000
+# Maximum concurrent collections per channel
+max_concurrent_collections = 200
+# Retry attempts for failed collections
+retry_attempts = 3
+# Retry delay in milliseconds
+retry_delay_ms = 1000
+# Outbound queue capacity from collector to gateway (bounded channel)
+outbound_queue_capacity = 10000
+
+# Metrics configuration
+[metrics]
+# Enable/disable metrics collection
+enabled = false
+# Metrics export endpoint
+endpoint = "http://localhost:4317"
+# Export interval in milliseconds
+export_interval = 60000
+# Service name for metrics
+service_name = "ng"
+
+# Web
+[web]
+# router prefix
+router_prefix = "/api"
+# host
+host = "0.0.0.0"
+# port
+port = 5678
+# gt 0 use exact number
+# 0 use CPU count
+# lt 0 use CPU count / abs(workers)
+workers = 0
+
+# Web UI (single-container, served by the gateway process)
+[web.ui]
+# Enable/disable UI serving.
+enabled = true
+# Mode: embedded_zip | filesystem | disabled
+#
+# - filesystem: serve from local directory (developer mode / Docker all-in-one)
+# - embedded_zip: serve from `ng-gateway-web/ui-dist.zip` compiled into the binary (Homebrew single-binary)
+mode = "filesystem"
+# Filesystem root directory containing `index.html` and assets (Vite dist output).
+filesystem_root = "./ng-gateway-ui/apps/web-antd/dist"
+
+[web.ssl]
+# enabled
+enabled = true
+# port
+port = 5679
+# type
+# auto: generate or load from ca_cert_path and ca_key_path
+# local: load from cert and key
+type = "auto"
+# cert path
+cert = "./certs/cert.pem"
+# key path
+key = "./certs/key.pem"
+
+[web.cors]
+# Cros mode
+# allow_all, whitelist
+mode = "allow_all"
+
+[web.cors.whitelist]
+origins = ["*"]
+methods = ["GET", "POST", "PUT", "DELETE"]
+headers = [
+  "Content-Type",
+  "AccessToken",
+  "X-CSRF-Token",
+  "Authorization",
+  "Token",
+  "X-Token",
+  "X-User-Id",
+]
+expose_headers = [
+  "Content-Length",
+  "Access-Control-Allow-Origin",
+  "Access-Control-Allow-Headers",
+  "Content-Type",
+]
+credentials = true
+
+# JWT
+[web.jwt]
+# secret
+secret = "ng-gateway"
+# expire
+expire = 3600000
+# issuer
+issuer = "ng-gateway"
+
+# Cache
+[cache]
+# type
+# only moka is supported
+type = "moka"
+# prefix
+prefix = "ng-gateway"
+# delimiter
+delimiter = ":"
+
+# Database
+[db.sqlite]
+# SQLite database file path (will be created automatically if not exists)
+# Final path resolves under ./data
+path = "ng-gateway.db"
+# Connection timeout in milliseconds
+timeout = 5000
+# Idle timeout in milliseconds
+idle_timeout = 5000
+# Maximum connection lifetime in milliseconds
+max_lifetime = 5000
+# Maximum number of connections
+max_connections = 100
+# Auto create database file and directory if not exists
+auto_create = true

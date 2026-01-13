@@ -1,0 +1,25 @@
+[package]
+name = "ng-driver-opcua"
+version = "0.1.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ng-gateway-sdk = { workspace = true }
+bytes = { version = "1.10" }
+tokio = { version = "1.47", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_repr = { version = "0.1" }
+serde_json = { version = "1.0" }
+async-trait = { version = "0.1" }
+chrono = { version = "0.4" }
+async-opcua = { version = "0.17", features = ["client"] }
+arc-swap = { version = "1.7" }
+backoff = { version = "0.4" }
+futures = { version = "0.3" }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+tracing = { version = "0.1" }
+url = { version = "2.5" }

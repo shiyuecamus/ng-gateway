@@ -1,0 +1,27 @@
+[package]
+name = "ng-driver-ethernet-ip"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rust-ethernet-ip = { version = "0.5" }
+tokio = { version = "1.47", features = ["full"] }
+tracing = { version = "0.1" }
+async-trait = { version = "0.1" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+anyhow = { version = "1.0" }
+thiserror = { version = "2.0" }
+arc-swap = { version = "1.7" }
+backoff = { version = "0.4" }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+dashmap = { version = "6.1" }
+chrono = { version = "0.4" }
+tracing-subscriber = { version = "0.3" }
+
+# Internal crates
+ng-gateway-sdk = { workspace = true }

@@ -1,0 +1,72 @@
+name: Rust CI
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore: ["README.md"]
+  pull_request:
+    branches: ["main"]
+    paths-ignore: ["README.md"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint-build-test:
+    name: Lint, Build and Test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: full
+      RUST_LIB_BACKTRACE: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 5
+          submodules: false
+
+      - name: Install Rust stable and components
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install protoc (protobuf compiler)
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsasl2-dev libssl-dev pkg-config
+
+      - name: Cache cargo registry
+        uses: cirruslabs/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Lint with clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build in release mode
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --release

@@ -1,0 +1,45 @@
+# Ignore local data directories
+/data/
+/docker/
+
+# Ignore drivers temporary files
+/drivers/
+# Ignore plugins
+/plugins/
+# Ignore PKI materials
+/pki/
+
+# macOS metadata
+.DS_Store
+
+target/
+logs/
+.idea/
+.cursor/
+.vscode/
+*/.idea/
+*/Cargo.lock
+*/target/
+*/*.iml
+*/*/.idea/
+*/*/target/
+*/*/Cargo.lock
+*/*/*.iml
+/Cargo.lock
+/readme.txt
+*/*.dylib
+*/*.so
+.DS_Store
+*/.DS_Store
+
+certs/
+
+# Offline deployment packages
+deploy-package-*/
+ng-gateway-offline-*.zip
+helm-package-*/
+ng-gateway-helm-offline-*.zip
+
+# By default, don't ignore .github directory!
+!.github/
+!.github/**

@@ -1,0 +1,30 @@
+[package]
+name = "ng-driver-iec104"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ng-gateway-sdk = { workspace = true }
+tokio = { version = "1.47", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+async-trait = { version = "0.1" }
+chrono = { version = "0.4" }
+arc-swap = { version = "1.7" }
+dashmap = { version = "6.1" }
+backoff = { version = "0.4" }
+futures = { version = "0.3" }
+tokio-util = { version = "0.7", features = ["rt", "io", "codec"] }
+tokio-test = { version = "0.4" }
+tracing = { version = "0.1" }
+anyhow = { version = "1.0" }
+bit-struct = { version = "0.3" }
+byteorder = { version = "1.4" }
+bytes = { version = "1.7" }
+thiserror = { version = "2.0" }
+futures-util = { version = "0.3" }
+tracing-subscriber = { version = "0.3" }

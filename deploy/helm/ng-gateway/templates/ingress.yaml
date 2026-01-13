@@ -1,0 +1,44 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "ng-gateway.fullname" . -}}
+{{- $web := default (dict) .Values.gateway.config.web -}}
+{{- $httpPort := default .Values.gateway.service.httpPort $web.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "ng-gateway.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          # All routes to gateway service (gateway serves both UI and API in all-in-one mode)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-gateway
+                port:
+                  number: {{ $httpPort }}
+    {{- end }}
+{{- end }}
+
