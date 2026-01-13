@@ -41,7 +41,7 @@ jobs:
         working-directory: ng-gateway-ui
         run: pnpm run build --filter @vben/web-antd
 
-      - name: Pack dist -> ui-dist.zip (artifact payload)
+      - name: Pack dist
         run: |
           set -euo pipefail
           dist_dir="ng-gateway-ui/apps/web-antd/dist"
@@ -62,7 +62,7 @@ jobs:
           test -f "${out_zip}"
           echo "[ok] packed: ${out_zip}"
 
-      - name: Upload artifact (ui-dist.zip)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ui-dist-zip
