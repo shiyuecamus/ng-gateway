@@ -254,9 +254,7 @@ pub fn generate_or_load_ca(
         params
             .distinguished_name
             .push(DnType::StateOrProvinceName, "Hubei");
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "NG CA"); // Common Name for the CA
+        params.distinguished_name.push(DnType::CommonName, "NG CA"); // Common Name for the CA
         params
             .distinguished_name
             .push(DnType::LocalityName, "Wuhan");
