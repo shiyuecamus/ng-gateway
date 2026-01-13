@@ -41,14 +41,18 @@ jobs:
         working-directory: ng-gateway-ui
         run: pnpm run build --filter @vben/web-antd
 
-      - name: Pack dist -> ng-gateway-web/ui-dist.zip
+      - name: Pack dist -> ui-dist.zip (artifact payload)
         run: |
           set -euo pipefail
           dist_dir="ng-gateway-ui/apps/web-antd/dist"
-          out_zip="ng-gateway-web/ui-dist.zip"
+          # Best practice:
+          # - Keep the artifact payload as a *single file at the root* to make
+          #   download/extract deterministic (no nested directories).
+          # - Consumer jobs will download it into `ng-gateway-web/ui-dist.zip`,
+          #   which matches the contract used by `ui-embedded` builds.
+          out_zip="ui-dist.zip"
 
           test -d "${dist_dir}"
-          mkdir -p "$(dirname "${out_zip}")"
 
           # Create a zip that can be consumed by the Rust build (ui-embedded).
           # -X: eXclude extra file attributes for better reproducibility across runners.
@@ -62,7 +66,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ui-dist-zip
-          path: ng-gateway-web/ui-dist.zip
+          path: ui-dist.zip
           if-no-files-found: error
 
   build_macos_homebrew:
@@ -84,14 +88,26 @@ jobs:
       - name: Download UI artifact (ui-dist.zip)
         uses: actions/download-artifact@v4
         with:
-          name: ui-dist-zip
-          path: .
+          # Use pattern + merge-multiple to avoid the extra "artifact-name/" folder
+          # that can appear during extraction.
+          pattern: ui-dist-zip
+          path: ng-gateway-web
+          merge-multiple: true
+
+      - name: Verify ui-dist.zip contract path
+        run: |
+          set -euo pipefail
+          test -f "ng-gateway-web/ui-dist.zip"
+          echo "[ok] ui-dist.zip ready: $(pwd)/ng-gateway-web/ui-dist.zip"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v3
+        with:
+          # Use authenticated GitHub API requests to avoid rate limit on shared runners.
+          repo-token: ${{ github.token }}
 
       - name: Package Homebrew tarball
         env:
@@ -139,7 +155,7 @@ jobs:
           sha_amd64="$(cat "/tmp/ng-gateway-release-assets/ng-gateway-${RELEASE_TAG}-darwin-amd64.tar.gz.sha256")"
           url_arm64="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/ng-gateway-${RELEASE_TAG}-darwin-arm64.tar.gz"
           url_amd64="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/ng-gateway-${RELEASE_TAG}-darwin-amd64.tar.gz"
-          
+
           URL_ARM64="${url_arm64}" SHA256_ARM64="${sha_arm64}" \
           URL_AMD64="${url_amd64}" SHA256_AMD64="${sha_amd64}" \
           bash deploy/homebrew/scripts/generate-formula.sh
@@ -182,12 +198,12 @@ jobs:
           set -euo pipefail
           mkdir -p Formula
           cp -f "/tmp/ng-gateway-formula/ng-gateway.rb" "Formula/ng-gateway.rb"
-          
+
           if git diff --quiet; then
             echo "[skip] no changes in formula"
             exit 0
           fi
-          
+
           git add Formula/ng-gateway.rb
           git -c user.name="ng-gateway-ci" -c user.email="ci@users.noreply.github.com" \
             commit -m "chore(homebrew): bump ng-gateway to ${RELEASE_TAG}"
@@ -212,14 +228,24 @@ jobs:
       - name: Download UI artifact (ui-dist.zip)
         uses: actions/download-artifact@v4
         with:
-          name: ui-dist-zip
-          path: .
+          pattern: ui-dist-zip
+          path: ng-gateway-web
+          merge-multiple: true
+
+      - name: Verify ui-dist.zip contract path
+        run: |
+          set -euo pipefail
+          test -f "ng-gateway-web/ui-dist.zip"
+          echo "[ok] ui-dist.zip ready: $(pwd)/ng-gateway-web/ui-dist.zip"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v3
+        with:
+          # Use authenticated GitHub API requests to avoid rate limit on shared runners.
+          repo-token: ${{ github.token }}
 
       - name: Install cross
         uses: taiki-e/install-action@v2
@@ -291,14 +317,24 @@ jobs:
       - name: Download UI artifact (ui-dist.zip)
         uses: actions/download-artifact@v4
         with:
-          name: ui-dist-zip
-          path: .
+          pattern: ui-dist-zip
+          path: ng-gateway-web
+          merge-multiple: true
+
+      - name: Verify ui-dist.zip contract path
+        run: |
+          set -euo pipefail
+          test -f "ng-gateway-web/ui-dist.zip"
+          echo "[ok] ui-dist.zip ready: $(pwd)/ng-gateway-web/ui-dist.zip"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v3
+        with:
+          # Use authenticated GitHub API requests to avoid rate limit on shared runners.
+          repo-token: ${{ github.token }}
 
       - name: Install cross
         uses: taiki-e/install-action@v2
@@ -340,4 +376,3 @@ jobs:
           pkg="deploy/linux/dist/ng-gateway-${pkg_version}-1.${{ matrix.rpm_dist }}.${{ matrix.rpm_arch }}.rpm"
           test -f "${pkg}"
           gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber
-
