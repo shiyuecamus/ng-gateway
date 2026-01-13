@@ -10,14 +10,29 @@ passthrough = [
   "CARGO_PROFILE_RELEASE_LTO",
   "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
   "CARGO_PROFILE_RELEASE_PANIC",
+  # Toolchain passthrough for cross-compiled C deps (e.g. librdkafka configure).
+  # Without these, some build systems may fall back to host `gcc` and then fail
+  # with "skipping incompatible ..." when linking target-arch static libs.
+  "CC",
+  "CXX",
+  "AR",
+  "RANLIB",
+  "STRIP",
+  "CFLAGS",
+  "CXXFLAGS",
+  "LDFLAGS",
+  # Some crates use pkg-config even in cross builds.
+  "PKG_CONFIG_ALLOW_CROSS",
 ]
 
 # Target-specific configuration for aarch64 GNU
 [target.aarch64-unknown-linux-gnu]
 # Pin to a known-good base image version to ensure reproducible builds
 # NOTE: 0.2.5 images ship very old libclang (3.8.x) which breaks clang-sys>=1.8.
-# For now we use :main to unblock CI; once stable, pin to a fixed tag/digest.
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+# Pin to an immutable digest (resolved from `:main`) for reproducible CI builds.
+# To update:
+#   docker buildx imagetools inspect ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu@sha256:0008916299d0f46a16aa72f4ecfccdc752bf1718d7a94e6473e3c42d9098ee12"
 
 # Install system dependencies commonly required by IoT gateway builds
 # - pkg-config: for native builds using pkg-config discovery
@@ -42,7 +57,7 @@ pre-build = [
 # Optional: If you prefer MUSL (static) builds, use the section below instead
 # and ensure you don't rely on glibc-only features.
 # [target.aarch64-unknown-linux-musl]
-# image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5"
+# image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4"
 # pre-build = [
 #     "apt-get update",
 #     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config ca-certificates tzdata",
@@ -53,8 +68,10 @@ pre-build = [
 # Additional common Linux GNU targets
 [target.x86_64-unknown-linux-gnu]
 # NOTE: 0.2.5 images ship very old libclang (3.8.x) which breaks clang-sys>=1.8.
-# For now we use :main to unblock CI; once stable, pin to a fixed tag/digest.
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+# Pin to an immutable digest (resolved from `:main`) for reproducible CI builds.
+# To update:
+#   docker buildx imagetools inspect ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu@sha256:11e1aa6377759a9104a5c4a601fa514004f4cff19abea9d334103792a7a10ab6"
 pre-build = [
   "apt-get update",
   "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
@@ -63,62 +80,62 @@ pre-build = [
 ]
 
 [target.i686-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/i686-unknown-linux-gnu:0.2.5"
+image = "ghcr.io/cross-rs/i686-unknown-linux-gnu@sha256:2647400f884dd399a3ce6f6d918fec0776d43e73f471f52e310cbe664ac1671f"
 pre-build = [
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.armv7-unknown-linux-gnueabihf]
-image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:0.2.5"
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf@sha256:4a08bebb60f08d52c1885b643a768f163c7318c05f91cf119f6c02855ea52699"
 pre-build = [
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.arm-unknown-linux-gnueabihf]
-image = "ghcr.io/cross-rs/arm-unknown-linux-gnueabihf:0.2.5"
+image = "ghcr.io/cross-rs/arm-unknown-linux-gnueabihf@sha256:2e3ba7a2284844975124febea982bda2586ae4910ef51294729284ff31b0aec5"
 pre-build = [
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.riscv64gc-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu:0.2.5"
+image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu@sha256:67ee97dd4719390d299edfcf39f226360ccfb1539e08b078ec187d4848415794"
 pre-build = [
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.powerpc64le-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/powerpc64le-unknown-linux-gnu:0.2.5"
+image = "ghcr.io/cross-rs/powerpc64le-unknown-linux-gnu@sha256:de5114adcd786f6a41eb07379459aaae94de73670303e202ea3603d250c19091"
 pre-build = [
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]
 
 [target.s390x-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu:0.2.5"
+image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu@sha256:0d8edc92c39158abe211fddfc9617bf5b7865c2ae0f58873f9cf0c58bb315271"
 pre-build = [
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]
 
 # Optional MUSL targets (uncomment as needed)
 # [target.x86_64-unknown-linux-musl]
-# image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5"
+# image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:77db671d8356a64ae72a3e1415e63f547f26d374fbe3c4762c1cd36c7eac7b99"
 # pre-build = [
 #     "apt-get update",
 #     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config ca-certificates tzdata",
@@ -126,7 +143,7 @@ pre-build = [
 #     "rm -rf /var/lib/apt/lists/*",
 # ]
 # [target.armv7-unknown-linux-musleabihf]
-# image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:0.2.5"
+# image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf@sha256:b4f481f30ceca34730a5723f717396d762d94f6eddd7e1cf7c7862d1377ff98c"
 # pre-build = [
 #     "apt-get update",
 #     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config ca-certificates tzdata",
@@ -136,10 +153,10 @@ pre-build = [
 
 # Windows (GNU) targets - built via mingw in Linux containers
 [target.x86_64-pc-windows-gnu]
-image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:0.2.5"
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu@sha256:8ba72a5491168af78e52f453f09d204cee330ff09a0323d4188a6efe1f59cfbd"
 
 [target.i686-pc-windows-gnu]
-image = "ghcr.io/cross-rs/i686-pc-windows-gnu:0.2.5"
+image = "ghcr.io/cross-rs/i686-pc-windows-gnu@sha256:c4b541d5baa76a1f13390850ad65ac5daa811c701842802b655edb3eb832c575"
 
 
 # macOS (Darwin) targets are not supported by cross (Docker-based) images.

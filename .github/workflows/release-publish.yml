@@ -213,7 +213,7 @@ jobs:
           mkdir -p Formula
           cp -f "/tmp/ng-gateway-formula/ng-gateway.rb" "Formula/ng-gateway.rb"
 
-          if git diff --quiet; then
+          if [[ -z "$(git status --porcelain)" ]]; then
             echo "[skip] no changes in formula"
             exit 0
           fi
@@ -293,6 +293,14 @@ jobs:
           DEB_ARCH: ${{ matrix.deb_arch }}
           # Let xtask use cross for the actual build.
           XTASK_CARGO: cross
+          # Ensure C build scripts (e.g. librdkafka configure via rdkafka-sys) use the
+          # correct target compiler, otherwise they may fall back to host `gcc` and
+          # fail with "skipping incompatible ..." when linking target-arch libs.
+          CC: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
+          CXX: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-g++' || 'g++' }}
+          AR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-ar' || 'ar' }}
+          RANLIB: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-ranlib' || 'ranlib' }}
+          STRIP: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-strip' || 'strip' }}
           # Do NOT export cross compiler vars globally (it breaks `go install nfpm` via cgo).
           # If any build script consults pkg-config in cross mode, allow it here (scoped).
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
@@ -379,6 +387,14 @@ jobs:
           TARGET_TRIPLE: ${{ matrix.target }}
           RPM_ARCH: ${{ matrix.rpm_arch }}
           XTASK_CARGO: cross
+          # Ensure C build scripts (e.g. librdkafka configure via rdkafka-sys) use the
+          # correct target compiler, otherwise they may fall back to host `gcc` and
+          # fail with "skipping incompatible ..." when linking target-arch libs.
+          CC: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
+          CXX: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-g++' || 'g++' }}
+          AR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-ar' || 'ar' }}
+          RANLIB: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-ranlib' || 'ranlib' }}
+          STRIP: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-strip' || 'strip' }}
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
         run: |
           set -euo pipefail
