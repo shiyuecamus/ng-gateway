@@ -142,7 +142,7 @@ fn main() -> ExitCode {
             no_deploy,
             cargo_args: &cargo_args,
         }),
-        Commands::Deploy { profile } => deploy_command(&profile),
+        Commands::Deploy { profile } => deploy_command(&profile, None),
         Commands::Clean { all } => clean_command(all),
     };
 
@@ -153,6 +153,38 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Return the cargo-like command to use for building workspace crates.
+///
+/// # Why this exists
+/// For multi-arch packaging, CI often uses `cross` as a drop-in replacement for `cargo`.
+/// This helper allows overriding the build command without changing xtask logic.
+fn cargo_build_program() -> String {
+    match env::var("CARGO") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => "cargo".to_string(),
+    }
+}
+
+/// Extract the `--target <triple>` (or `--target=<triple>`) value from cargo args.
+///
+/// This is needed because when `--target` is specified, Cargo places artifacts under:
+/// `target/<triple>/<profile>/...` instead of `target/<profile>/...`.
+fn extract_target_triple(cargo_args: &[String]) -> Option<String> {
+    let mut iter = cargo_args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--target" {
+            if let Some(val) = iter.next() {
+                return Some(val.to_string());
+            }
+        } else if let Some(rest) = arg.strip_prefix("--target=") {
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Build UI (optional) and pack dist as a zip for embedding.
@@ -348,7 +380,8 @@ fn build_command(args: BuildCommandArgs<'_>) -> Result<()> {
     println!("🔨 Building (profile: {})...", args.profile);
     println!();
 
-    let mut cmd = Command::new("cargo");
+    let cargo_program = cargo_build_program();
+    let mut cmd = Command::new(&cargo_program);
     cmd.current_dir(&workspace_root);
     cmd.arg("build");
 
@@ -382,14 +415,15 @@ fn build_command(args: BuildCommandArgs<'_>) -> Result<()> {
     // Deploy drivers and plugins
     // Deploy only makes sense when we built drivers/plugins.
     if !args.bin_only && !args.no_deploy {
-        deploy_command(args.profile)?;
+        let target = extract_target_triple(args.cargo_args);
+        deploy_command(args.profile, target.as_deref())?;
     }
 
     Ok(())
 }
 
 /// Deploy built drivers and plugins
-fn deploy_command(profile: &str) -> Result<()> {
+fn deploy_command(profile: &str, target: Option<&str>) -> Result<()> {
     println!("📦 Deploying drivers and plugins...");
     println!();
 
@@ -399,7 +433,10 @@ fn deploy_command(profile: &str) -> Result<()> {
     } else {
         workspace_root.join("target")
     };
-    let source_dir = target_dir.join(profile);
+    let source_dir = match target {
+        Some(triple) => target_dir.join(triple).join(profile),
+        None => target_dir.join(profile),
+    };
 
     println!("   Source: {}", source_dir.display());
     println!();
@@ -443,7 +480,7 @@ fn deploy_command(profile: &str) -> Result<()> {
 
     println!(
         "🚀 Ready to run: {}",
-        target_dir.join(profile).join("ng-gateway-bin").display()
+        source_dir.join("ng-gateway-bin").display()
     );
 
     Ok(())

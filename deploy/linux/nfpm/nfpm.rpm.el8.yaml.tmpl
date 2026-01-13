@@ -1,0 +1,39 @@
+name: ng-gateway
+arch: {{RPM_ARCH}}
+platform: linux
+version: {{PKG_VERSION}}
+release: "1"
+maintainer: "NG Gateway CI <ci@users.noreply.github.com>"
+description: "High-throughput IoT gateway (NG Gateway)"
+homepage: "https://github.com/shiyuecamus/ng-gateway"
+license: "Apache-2.0"
+
+# Runtime dependencies (CentOS 8 baseline).
+depends:
+  - ca-certificates
+  - sqlite
+  - cyrus-sasl-lib
+  - zstd
+  - systemd
+  - openssl-libs
+
+rpm:
+  dist: el8
+
+contents:
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway
+    dst: /opt/ng-gateway
+    type: dir
+  - src: {{SYSTEMD_UNIT}}
+    dst: /usr/lib/systemd/system/ng-gateway.service
+  - src: {{ROOTFS_DIR}}/etc/ng-gateway
+    dst: /etc/ng-gateway
+    type: dir
+  - src: {{ROOTFS_DIR}}/var/lib/ng-gateway
+    dst: /var/lib/ng-gateway
+    type: dir
+
+scripts:
+  postinstall: {{POSTINSTALL}}
+  preremove: {{PREREMOVE}}
+

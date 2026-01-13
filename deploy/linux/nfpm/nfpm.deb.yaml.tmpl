@@ -1,0 +1,37 @@
+name: ng-gateway
+arch: {{DEB_ARCH}}
+platform: linux
+version: {{PKG_VERSION}}
+section: default
+priority: optional
+maintainer: "NG Gateway CI <ci@users.noreply.github.com>"
+description: "High-throughput IoT gateway (NG Gateway)"
+homepage: "https://github.com/shiyuecamus/ng-gateway"
+license: "Apache-2.0"
+
+# Runtime dependencies (best-effort baseline; validated in Phase 2 tests).
+depends:
+  - ca-certificates
+  - libsqlite3-0
+  - libsasl2-2
+  - libzstd1
+  - libudev1
+  - openssl
+
+contents:
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway
+    dst: /opt/ng-gateway
+    type: dir
+  - src: {{SYSTEMD_UNIT}}
+    dst: /lib/systemd/system/ng-gateway.service
+  - src: {{ROOTFS_DIR}}/etc/ng-gateway
+    dst: /etc/ng-gateway
+    type: dir
+  - src: {{ROOTFS_DIR}}/var/lib/ng-gateway
+    dst: /var/lib/ng-gateway
+    type: dir
+
+scripts:
+  postinstall: {{POSTINSTALL}}
+  preremove: {{PREREMOVE}}
+

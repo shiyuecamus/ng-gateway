@@ -1,0 +1,30 @@
+[Unit]
+Description=NG Gateway (IoT Gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# We intentionally run as root (per project decision).
+User=root
+Group=root
+
+# Keep the runtime working directory stable so relative paths in the bundled
+# SQLite database (drivers/plugins) work as-is.
+WorkingDirectory=/var/lib/ng-gateway
+
+ExecStart=/opt/ng-gateway/bin/ng-gateway-bin --config /etc/ng-gateway/gateway.toml
+Restart=always
+RestartSec=2
+
+# Hardening defaults (must keep writable paths explicitly)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ng-gateway
+
+[Install]
+WantedBy=multi-user.target
+

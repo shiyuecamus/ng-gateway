@@ -1,0 +1,346 @@
+name: Release Publish Packaging
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+  REPO: ${{ github.repository }}
+
+jobs:
+  build_ui_zip:
+    name: Build UI dist zip (once)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (corepack + pnpm cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: ng-gateway-ui/pnpm-lock.yaml
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install UI dependencies (pnpm)
+        working-directory: ng-gateway-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build UI app (web-antd)
+        working-directory: ng-gateway-ui
+        run: pnpm run build --filter @vben/web-antd
+
+      - name: Pack dist -> ng-gateway-web/ui-dist.zip
+        run: |
+          python3 - <<'PY'
+          from __future__ import annotations
+          from pathlib import Path
+          import zipfile
+          
+          dist_dir = Path("ng-gateway-ui/apps/web-antd/dist")
+          out_zip = Path("ng-gateway-web/ui-dist.zip")
+          
+          if not dist_dir.exists() or not dist_dir.is_dir():
+              raise SystemExit(f"UI dist dir not found: {dist_dir}")
+          
+          out_zip.parent.mkdir(parents=True, exist_ok=True)
+          
+          files = sorted([p for p in dist_dir.rglob("*") if p.is_file()])
+          with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for p in files:
+                  arcname = p.relative_to(dist_dir).as_posix()
+                  zf.write(p, arcname)
+          
+          print(f"[ok] packed: {out_zip} ({len(files)} files)")
+          PY
+
+      - name: Upload artifact (ui-dist.zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist-zip
+          path: ng-gateway-web/ui-dist.zip
+          if-no-files-found: error
+
+  build_macos_homebrew:
+    name: Build macOS Homebrew tarball (${{ matrix.arch }})
+    needs: [build_ui_zip]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download UI artifact (ui-dist.zip)
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist-zip
+          path: .
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Package Homebrew tarball
+        env:
+          VERSION: ${{ env.RELEASE_TAG }}
+          WITHOUT_UI: "1"
+        run: bash deploy/homebrew/scripts/package-tarball.sh
+
+      - name: Upload tarball + sha256 to Release assets (clobber)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tarball="deploy/homebrew/dist/ng-gateway-${RELEASE_TAG}-darwin-${{ matrix.arch }}.tar.gz"
+          sha="${tarball}.sha256"
+          test -f "${tarball}"
+          test -f "${sha}"
+          gh release upload "${RELEASE_TAG}" "${tarball}" "${sha}" --repo "${REPO}" --clobber
+
+  generate_homebrew_formula:
+    name: Generate Homebrew formula
+    needs: [build_macos_homebrew]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download sha256 assets from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ng-gateway-release-assets
+          gh release download "${RELEASE_TAG}" \
+            --repo "${REPO}" \
+            --dir /tmp/ng-gateway-release-assets \
+            --pattern "ng-gateway-${RELEASE_TAG}-darwin-arm64.tar.gz.sha256" \
+            --pattern "ng-gateway-${RELEASE_TAG}-darwin-amd64.tar.gz.sha256"
+
+      - name: Generate ng-gateway.rb
+        env:
+          VERSION: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          sha_arm64="$(cat "/tmp/ng-gateway-release-assets/ng-gateway-${RELEASE_TAG}-darwin-arm64.tar.gz.sha256")"
+          sha_amd64="$(cat "/tmp/ng-gateway-release-assets/ng-gateway-${RELEASE_TAG}-darwin-amd64.tar.gz.sha256")"
+          url_arm64="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/ng-gateway-${RELEASE_TAG}-darwin-arm64.tar.gz"
+          url_amd64="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/ng-gateway-${RELEASE_TAG}-darwin-amd64.tar.gz"
+          
+          URL_ARM64="${url_arm64}" SHA256_ARM64="${sha_arm64}" \
+          URL_AMD64="${url_amd64}" SHA256_AMD64="${sha_amd64}" \
+          bash deploy/homebrew/scripts/generate-formula.sh
+
+      - name: Upload formula to Release assets (clobber)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          formula="deploy/homebrew/Formula/ng-gateway.rb"
+          test -f "${formula}"
+          gh release upload "${RELEASE_TAG}" "${formula}" --repo "${REPO}" --clobber
+
+  update_homebrew_tap_repo:
+    name: Update Homebrew tap repository
+    needs: [generate_homebrew_formula]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download formula from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ng-gateway-formula
+          gh release download "${RELEASE_TAG}" \
+            --repo "${REPO}" \
+            --dir /tmp/ng-gateway-formula \
+            --pattern "ng-gateway.rb"
+
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: shiyuecamus/ng-gateway-homebrew
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update Formula/ng-gateway.rb and push
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          cp -f "/tmp/ng-gateway-formula/ng-gateway.rb" "Formula/ng-gateway.rb"
+          
+          if git diff --quiet; then
+            echo "[skip] no changes in formula"
+            exit 0
+          fi
+          
+          git add Formula/ng-gateway.rb
+          git -c user.name="ng-gateway-ci" -c user.email="ci@users.noreply.github.com" \
+            commit -m "chore(homebrew): bump ng-gateway to ${RELEASE_TAG}"
+          git push
+
+  build_linux_deb:
+    name: Build Linux .deb (${{ matrix.deb_arch }})
+    needs: [build_ui_zip]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download UI artifact (ui-dist.zip)
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist-zip
+          path: .
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Setup Go (for installing nfpm)
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install nfpm (go install)
+        run: |
+          set -euo pipefail
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "${HOME}/go/bin" >> "${GITHUB_PATH}"
+          nfpm --version
+
+      - name: Build .deb
+        env:
+          # e.g. v1.2.3
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+          # e.g. 1.2.3
+          PKG_VERSION: ${{ env.RELEASE_TAG }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+          # Let xtask use cross for the actual build.
+          CARGO: cross
+        run: |
+          set -euo pipefail
+          PKG_VERSION="${PKG_VERSION#v}"
+          export PKG_VERSION
+          bash deploy/linux/scripts/package-deb.sh
+
+      - name: Upload .deb to Release assets (clobber)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pkg_version="${RELEASE_TAG#v}"
+          pkg="deploy/linux/dist/ng-gateway_${pkg_version}_${{ matrix.deb_arch }}.deb"
+          test -f "${pkg}"
+          gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber
+
+  build_linux_rpm:
+    name: Build Linux .rpm (${{ matrix.rpm_dist }} ${{ matrix.rpm_arch }})
+    needs: [build_ui_zip]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            rpm_arch: x86_64
+            rpm_dist: el7
+          - target: x86_64-unknown-linux-gnu
+            rpm_arch: x86_64
+            rpm_dist: el8
+          - target: aarch64-unknown-linux-gnu
+            rpm_arch: aarch64
+            rpm_dist: el7
+          - target: aarch64-unknown-linux-gnu
+            rpm_arch: aarch64
+            rpm_dist: el8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download UI artifact (ui-dist.zip)
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist-zip
+          path: .
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Setup Go (for installing nfpm)
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install nfpm (go install)
+        run: |
+          set -euo pipefail
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "${HOME}/go/bin" >> "${GITHUB_PATH}"
+          nfpm --version
+
+      - name: Build .rpm
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+          PKG_VERSION: ${{ env.RELEASE_TAG }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+          RPM_ARCH: ${{ matrix.rpm_arch }}
+          RPM_DIST: ${{ matrix.rpm_dist }}
+          CARGO: cross
+        run: |
+          set -euo pipefail
+          PKG_VERSION="${PKG_VERSION#v}"
+          export PKG_VERSION
+          bash deploy/linux/scripts/package-rpm.sh
+
+      - name: Upload .rpm to Release assets (clobber)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pkg_version="${RELEASE_TAG#v}"
+          pkg="deploy/linux/dist/ng-gateway-${pkg_version}-1.${{ matrix.rpm_dist }}.${{ matrix.rpm_arch }}.rpm"
+          test -f "${pkg}"
+          gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber
+

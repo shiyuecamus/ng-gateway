@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# postinstall.sh
+#
+# This script prepares runtime directories and default config/data for NG Gateway.
+# It is used by both `.deb` and `.rpm` packages via nfpm.
+
+runtime_dir="/var/lib/ng-gateway"
+config_dir="/etc/ng-gateway"
+opt_dir="/opt/ng-gateway"
+
+mkdir -p "${runtime_dir}" "${config_dir}"
+mkdir -p "${runtime_dir}/data" "${runtime_dir}/certs" "${runtime_dir}/pki/own" "${runtime_dir}/pki/private"
+mkdir -p "${runtime_dir}/drivers/builtin" "${runtime_dir}/drivers/custom"
+mkdir -p "${runtime_dir}/plugins/builtin" "${runtime_dir}/plugins/custom"
+
+# Copy default config on first install (do not overwrite users' config).
+if [[ ! -f "${config_dir}/gateway.toml" && -f "${opt_dir}/gateway.toml" ]]; then
+  cp -f "${opt_dir}/gateway.toml" "${config_dir}/gateway.toml"
+fi
+
+# Copy initial database on first install (do not overwrite runtime data).
+if [[ ! -f "${runtime_dir}/data/ng-gateway.db" && -f "${opt_dir}/data/ng-gateway.db" ]]; then
+  cp -f "${opt_dir}/data/ng-gateway.db" "${runtime_dir}/data/ng-gateway.db"
+fi
+
+# Ensure builtin drivers/plugins are available under runtime working directory.
+# We keep builtin copies in runtime dir to match the working directory layout.
+if [[ -d "${opt_dir}/drivers/builtin" ]]; then
+  cp -af "${opt_dir}/drivers/builtin/." "${runtime_dir}/drivers/builtin/" 2>/dev/null || true
+fi
+if [[ -d "${opt_dir}/plugins/builtin" ]]; then
+  cp -af "${opt_dir}/plugins/builtin/." "${runtime_dir}/plugins/builtin/" 2>/dev/null || true
+fi
+
+# Reload systemd unit files if systemd is present.
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+
+exit 0
+

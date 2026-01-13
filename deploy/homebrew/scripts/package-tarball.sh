@@ -40,10 +40,23 @@ echo "OUTPUT:  ${tarball}"
 echo "=========================================="
 echo ""
 
-echo "[build] cargo xtask build (release, ui-embedded)"
+without_ui="${WITHOUT_UI:-}"
+xtask_without_ui_arg=""
+if [[ "$without_ui" == "1" || "$without_ui" == "true" || "$without_ui" == "yes" ]]; then
+  if [[ ! -f "${REPO_ROOT}/ng-gateway-web/ui-dist.zip" ]]; then
+    echo "错误: 指定 WITHOUT_UI=${WITHOUT_UI} 但未找到预置 UI zip: ${REPO_ROOT}/ng-gateway-web/ui-dist.zip"
+    echo "提示: 请先在构建前写入 ui-dist.zip（例如 CI 先下载 artifact 到该路径）"
+    exit 1
+  fi
+  xtask_without_ui_arg="--without-ui"
+  echo "[build] cargo xtask build (release, ui-embedded, --without-ui)"
+else
+  echo "[build] cargo xtask build (release, ui-embedded)"
+fi
 cd "$REPO_ROOT"
 cargo xtask build \
   --profile release \
+  ${xtask_without_ui_arg} \
   -- \
   --features ng-gateway-bin/ui-embedded
 
