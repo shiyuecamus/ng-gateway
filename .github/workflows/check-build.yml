@@ -47,7 +47,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config
+          sudo apt-get install -y pkg-config libsasl2-dev
 
       - name: Cache cargo registry
         uses: cirruslabs/cache@v4

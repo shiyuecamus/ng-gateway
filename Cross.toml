@@ -7,6 +7,9 @@ passthrough = [
   "RUST_LOG",
   "RUST_BACKTRACE",
   "RUSTFLAGS",
+  # Autoconf cache variables used by krb5-src when cross-compiling.
+  # See: krb5-src build.rs error message for `krb5_cv_attr_constructor_destructor`.
+  "krb5_cv_attr_constructor_destructor",
   # C toolchain overrides (used by some vendored C builds like librdkafka)
   "CC",
   "CXX",
@@ -43,7 +46,7 @@ pre-build = [
   # Without this, `openssl-sys` may fail to find `opensslconf.h` for aarch64.
   "dpkg --add-architecture arm64 || true",
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libzstd-dev:arm64 libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev:arm64 libzstd-dev:arm64 libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]
@@ -69,7 +72,7 @@ pre-build = [
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 pre-build = [
   "apt-get update",
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsqlite3-0 ca-certificates tzdata clang libclang-dev",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config protobuf-compiler libudev-dev libsasl2-dev libsqlite3-0 ca-certificates tzdata python3 clang libclang-dev",
   "update-ca-certificates || true",
   "rm -rf /var/lib/apt/lists/*",
 ]

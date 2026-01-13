@@ -85,7 +85,8 @@ jobs:
           - runner: macos-14
             arch: arm64
             target: aarch64-apple-darwin
-          - runner: macos-14
+          # Use an x86_64 runner to avoid cross-compiling krb5-src (configure cannot run tests).
+          - runner: macos-13
             arch: amd64
             target: x86_64-apple-darwin
     steps:
@@ -320,6 +321,9 @@ jobs:
           # Do NOT export cross compiler vars globally (it breaks `go install nfpm` via cgo).
           # If any build script consults pkg-config in cross mode, allow it here (scoped).
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
+          # krb5-src uses autoconf; when cross compiling it can't run certain feature tests.
+          # Provide the cache answer to skip the test (matches krb5-src error hint).
+          krb5_cv_attr_constructor_destructor: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
@@ -434,6 +438,7 @@ jobs:
           RPM_ARCH: ${{ matrix.rpm_arch }}
           XTASK_CARGO: cross
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
+          krb5_cv_attr_constructor_destructor: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'yes' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
