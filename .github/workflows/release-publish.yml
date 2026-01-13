@@ -219,12 +219,18 @@ jobs:
           test -n "${HOMEBREW_TAP_TOKEN}"
 
           # Ensure the push uses the provided PAT (GITHUB_TOKEN can't push to another repo).
-          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/shiyuecamus/ng-gateway-homebrew.git"
+          # Use the same mechanism as actions/checkout: an HTTP Authorization header.
+          # This avoids relying on userinfo-in-URL parsing and tends to be the most reliable.
+          git remote set-url origin "https://github.com/shiyuecamus/ng-gateway-homebrew.git"
+          auth="$(printf 'x-access-token:%s' "${HOMEBREW_TAP_TOKEN}" | base64 -w0)"
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic ${auth}"
 
           echo "[debug] verifying tap token identity/permissions (no token will be printed)"
           GH_TOKEN="${HOMEBREW_TAP_TOKEN}" gh api /user --jq '"[debug] token user: \(.login) id=\(.id)"'
           # This should show push permission as true. If it's false or missing, the token is not granted write access.
           GH_TOKEN="${HOMEBREW_TAP_TOKEN}" gh api /repos/shiyuecamus/ng-gateway-homebrew --jq '"[debug] repo perms: admin=\(.permissions.admin) push=\(.permissions.push) pull=\(.permissions.pull)"'
+          echo "[debug] git credential preflight (ls-remote) ..."
+          git ls-remote origin HEAD >/dev/null
 
           mkdir -p Formula
           cp -f "/tmp/ng-gateway-formula/ng-gateway.rb" "Formula/ng-gateway.rb"
