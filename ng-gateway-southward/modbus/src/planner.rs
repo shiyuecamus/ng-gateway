@@ -135,6 +135,7 @@ impl ModbusPlanner {
                         mp.data_type,
                         byte_order,
                         word_order,
+                        1,
                     )?;
                     if regs.is_empty() {
                         return Err(DriverError::PlannerError(
@@ -155,6 +156,7 @@ impl ModbusPlanner {
                         mp.data_type,
                         byte_order,
                         word_order,
+                        mp.quantity.max(1),
                     )?;
                     plans.push(WritePlan {
                         function: mp.function_code,

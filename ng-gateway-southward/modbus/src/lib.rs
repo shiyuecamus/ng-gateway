@@ -1,10 +1,12 @@
 mod codec;
-mod driver;
+pub mod driver;
 mod factory;
 mod metadata;
 mod planner;
 mod supervisor;
-mod types;
+pub mod types;
+
+pub use driver::ModbusDriver;
 
 use factory::ModbusDriverFactory;
 use metadata::build_metadata;

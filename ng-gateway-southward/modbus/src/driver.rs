@@ -723,6 +723,7 @@ impl Driver for ModbusDriver {
                     point.data_type,
                     self.inner.config.byte_order,
                     self.inner.config.word_order,
+                    point.quantity.max(1),
                 )?;
 
                 match write_fc {
@@ -750,16 +751,6 @@ impl Driver for ModbusDriver {
                         .await?;
                     }
                     ModbusFunctionCode::WriteMultipleRegisters => {
-                        let expected = point.quantity.max(1) as usize;
-                        if regs.len() != expected {
-                            return Err(DriverError::ConfigurationError(format!(
-                                "encoded registers length mismatch: expected {}, got {} (data_type={:?}, quantity={})",
-                                expected,
-                                regs.len(),
-                                point.data_type,
-                                point.quantity
-                            )));
-                        }
                         let ctx = Arc::clone(&ctx_arc);
                         self.run_op(
                             ctx,
