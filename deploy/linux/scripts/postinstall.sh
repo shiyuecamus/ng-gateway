@@ -41,5 +41,61 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
 fi
 
+# User-friendly post-install hints (printed for both deb and rpm).
+#
+# Note:
+# - This runs on both fresh install and upgrade.
+# - We intentionally print operational hints to reduce time-to-first-run.
+cat <<EOF
+
+============================================================
+NG Gateway installed successfully
+============================================================
+
+Runtime directory (WorkingDirectory):
+  ${runtime_dir}
+
+Edit configuration:
+  ${config_dir}/gateway.toml
+
+Optional environment overrides:
+  ${config_dir}/env
+
+Runtime sub-directories (default layout):
+  - data:    ${runtime_dir}/data
+  - drivers: ${runtime_dir}/drivers (builtin/custom)
+  - plugins: ${runtime_dir}/plugins (builtin/custom)
+  - certs:   ${runtime_dir}/certs
+  - pki:     ${runtime_dir}/pki
+
+Logs (recommended):
+  - systemd journal: journalctl -u ng-gateway -f
+
+Service management (systemd):
+  - status:  systemctl status ng-gateway --no-pager
+  - start:   systemctl start ng-gateway
+  - stop:    systemctl stop ng-gateway
+  - restart: systemctl restart ng-gateway
+  - enable:  systemctl enable --now ng-gateway
+
+Health checks (defaults from ${config_dir}/gateway.toml):
+  - HTTP:  curl -fsS http://127.0.0.1:5678/health   # -> OK
+  - HTTPS: curl -kfsS https://127.0.0.1:5679/health # if enabled (self-signed: -k)
+
+Web access (depends on [web.ui] settings):
+  - UI:  http://127.0.0.1:5678/ (if UI enabled)
+  - API: http://127.0.0.1:5678/api
+
+Default UI credentials (initial):
+  - username: system_admin
+  - password: system_admin
+
+Manual run (without systemd):
+  cd ${runtime_dir} && ${opt_dir}/bin/ng-gateway-bin --config ${config_dir}/gateway.toml
+
+============================================================
+
+EOF
+
 exit 0
 

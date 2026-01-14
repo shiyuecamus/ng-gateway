@@ -202,7 +202,7 @@ jobs:
       - name: Checkout tap repo
         uses: actions/checkout@v4
         with:
-          repository: shiyuecamus/ng-gateway-homebrew
+          repository: shiyuecamus/homebrew-ng-gateway
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
           ref: main
@@ -216,7 +216,7 @@ jobs:
         run: |
           set -euo pipefail
           : "${HOMEBREW_TAP_TOKEN:?missing HOMEBREW_TAP_TOKEN}"
-          git remote set-url origin "https://github.com/shiyuecamus/ng-gateway-homebrew.git"
+          git remote set-url origin "https://github.com/shiyuecamus/homebrew-ng-gateway.git"
           git config --local http.https://github.com/.extraheader \
             "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${HOMEBREW_TAP_TOKEN}" | base64 -w0)"
 

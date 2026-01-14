@@ -109,6 +109,20 @@ echo "[pack] tar.gz"
 cd "$workdir"
 tar -czf "$tarball" "$pkg_name"
 
+echo "[verify] tarball layout (single top-level directory)"
+top_levels="$(tar -tzf "$tarball" | cut -d/ -f1 | sort -u)"
+top_level_count="$(printf "%s\n" "$top_levels" | sed '/^$/d' | wc -l | tr -d ' ')"
+if [[ "$top_level_count" != "1" ]]; then
+  echo "错误: tarball 顶层目录数量不为 1（方案A要求只有一个顶层目录）"
+  echo "top levels:"
+  printf "%s\n" "$top_levels"
+  exit 1
+fi
+if [[ "$top_levels" != "$pkg_name" ]]; then
+  echo "错误: tarball 顶层目录名不匹配（期望: ${pkg_name}，实际: ${top_levels}）"
+  exit 1
+fi
+
 echo "[sha256] ${sha_file}"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$tarball" | awk '{print $1}' > "$sha_file"

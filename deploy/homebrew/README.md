@@ -64,14 +64,18 @@ SHA256_AMD64="<sha256_amd64>" \
 
 ### 4) 发布到 Tap 仓库
 
-推荐新建一个 Tap 仓库，例如：
-- `ng/homebrew-tap`
+本项目的 Tap 仓库为：
+- `shiyuecamus/homebrew-ng-gateway`
 
 将 `ng-gateway.rb` 放到 Tap 仓库的 `Formula/` 目录并推送：
 
 ```bash
-brew tap ng/tap
-brew install ng/tap/ng-gateway
+# 推荐（隐式 tap）：Homebrew 会自动拉取 shiyuecamus/ng-gateway 这个 tap
+brew install shiyuecamus/ng-gateway/ng-gateway
+
+# 可选（显式 tap）：用于离线环境或调试
+brew tap shiyuecamus/ng-gateway
+brew install ng-gateway
 ```
 
 ---
@@ -95,5 +99,73 @@ brew install ng/tap/ng-gateway
 - `certs/`、`pki/`（运行时生成/写入）
 
 最终通过包装脚本（wrapper）保证网关进程的 **工作目录** 正确，从而 DB 中的相对路径可用。
+
+---
+
+## 用户侧验证（macOS + Homebrew）
+
+> 目标：验证 tap 安装、二进制可运行、并能通过 `brew services` 管理为后台服务。
+
+### 1) 安装
+
+```bash
+# 推荐（隐式 tap）：Homebrew 会自动拉取 shiyuecamus/ng-gateway 这个 tap
+brew install shiyuecamus/ng-gateway/ng-gateway
+
+# 可选（显式 tap）：用于离线环境或调试
+brew tap shiyuecamus/ng-gateway
+brew install ng-gateway
+```
+
+> 提示：安装完成后，Homebrew 会输出一段「caveats」说明，包含配置文件、日志路径、运行时目录与健康检查等常用信息。
+
+### 2) 基础运行验证
+
+```bash
+ng-gateway --help
+ng-gateway --version || true
+```
+
+默认运行目录与配置文件位置：
+- 运行目录：`$(brew --prefix)/var/lib/ng-gateway/`
+- 配置文件：`$(brew --prefix)/var/lib/ng-gateway/gateway.toml`
+
+默认 Web 端口（来自 Homebrew 默认 `gateway.toml`）：
+- HTTP：`8978`
+- HTTPS（auto TLS）：`8979`
+
+健康检查：
+
+```bash
+curl -fsS "http://127.0.0.1:8978/health"
+```
+
+### 3) brew services 管理
+
+如果你的环境里还没有 `brew services`：
+
+```bash
+brew tap homebrew/services
+```
+
+启动/查看/停止：
+
+```bash
+brew services start shiyuecamus/ng-gateway/ng-gateway
+brew services list
+brew services stop shiyuecamus/ng-gateway/ng-gateway
+```
+
+查看日志（Homebrew service 定义写入到 `$(brew --prefix)/var/log/`）：
+
+```bash
+tail -n 200 "$(brew --prefix)/var/log/ng-gateway.log"
+tail -n 200 "$(brew --prefix)/var/log/ng-gateway.error.log"
+```
+
+### 4) 常见排障
+
+- 端口被占用：编辑 `$(brew --prefix)/var/lib/ng-gateway/gateway.toml`（`[web].port` / `[web.ssl].port`），然后 `brew services restart ...`
+- 配置改坏导致启动失败：先看 `ng-gateway.error.log`，再用 `brew services restart ...` 重启验证
 
 
