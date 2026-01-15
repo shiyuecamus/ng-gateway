@@ -14,14 +14,31 @@ depends:
   - ca-certificates
 
 contents:
+  # Create install root directory explicitly.
   - src: {{ROOTFS_DIR}}/opt/ng-gateway
     dst: /opt/ng-gateway
+    type: dir
+
+  # Install binary + default config.
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway/bin/ng-gateway-bin
+    dst: /opt/ng-gateway/bin/ng-gateway-bin
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway/gateway.toml
+    dst: /opt/ng-gateway/gateway.toml
+
+  # Builtin drivers/plugins (may include a `.keep` placeholder).
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway/drivers/builtin/*
+    dst: /opt/ng-gateway/drivers/builtin/
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway/plugins/builtin/*
+    dst: /opt/ng-gateway/plugins/builtin/
+
   - src: {{SYSTEMD_UNIT}}
     dst: /lib/systemd/system/ng-gateway.service
   - src: {{ROOTFS_DIR}}/etc/ng-gateway
     dst: /etc/ng-gateway
+    type: dir
   - src: {{ROOTFS_DIR}}/var/lib/ng-gateway
     dst: /var/lib/ng-gateway
+    type: dir
 
 scripts:
   postinstall: {{POSTINSTALL}}
