@@ -438,8 +438,53 @@ jobs:
           ver="${RELEASE_TAG#v}"
           echo "release_version=${ver}" >> "${GITHUB_OUTPUT}"
 
+      - name: Detect proxy from runner / docker daemon
+        run: |
+          set -euo pipefail
+
+          # Prefer runner process env; fall back to docker daemon proxy (from systemd drop-in).
+          http_proxy="${HTTP_PROXY:-}"
+          https_proxy="${HTTPS_PROXY:-}"
+          no_proxy="${NO_PROXY:-}"
+
+          if [[ -z "${http_proxy}" ]]; then
+            http_proxy="$(docker info --format '{{.HTTPProxy}}' 2>/dev/null || true)"
+          fi
+          if [[ -z "${https_proxy}" ]]; then
+            https_proxy="$(docker info --format '{{.HTTPSProxy}}' 2>/dev/null || true)"
+          fi
+          if [[ -z "${no_proxy}" ]]; then
+            no_proxy="$(docker info --format '{{.NoProxy}}' 2>/dev/null || true)"
+          fi
+
+          # docker info prints "<nil>" when unset
+          [[ "${http_proxy}" == "<nil>" ]] && http_proxy=""
+          [[ "${https_proxy}" == "<nil>" ]] && https_proxy=""
+          [[ "${no_proxy}" == "<nil>" ]] && no_proxy=""
+
+          if [[ -n "${http_proxy}" ]]; then
+            echo "HTTP_PROXY=${http_proxy}" >> "${GITHUB_ENV}"
+            echo "http_proxy=${http_proxy}" >> "${GITHUB_ENV}"
+          fi
+          if [[ -n "${https_proxy}" ]]; then
+            echo "HTTPS_PROXY=${https_proxy}" >> "${GITHUB_ENV}"
+            echo "https_proxy=${https_proxy}" >> "${GITHUB_ENV}"
+          fi
+          if [[ -n "${no_proxy}" ]]; then
+            echo "NO_PROXY=${no_proxy}" >> "${GITHUB_ENV}"
+            echo "no_proxy=${no_proxy}" >> "${GITHUB_ENV}"
+          fi
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        run: |
+          set -euo pipefail
+          # Create a dedicated builder and inject proxy env into buildkitd container.
+          # This avoids hardcoding proxy values in YAML and works with runner-level configuration.
+          docker buildx create --name ng-gateway-builder --driver docker-container --use \
+            --driver-opt "env.http_proxy=${HTTP_PROXY:-}" \
+            --driver-opt "env.https_proxy=${HTTPS_PROXY:-}" \
+            --driver-opt "env.no_proxy=${NO_PROXY:-}" || true
+          docker buildx inspect --bootstrap
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -458,16 +503,38 @@ jobs:
             type=raw,value=latest-${{ matrix.arch_tag }},enable=${{ github.event.release.prerelease == false }}
 
       - name: Build & push (single-arch)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/gateway.Dockerfile
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+          META_LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          set -euo pipefail
+
+          # Buildx supports multiple tags; metadata-action outputs newline-separated tags.
+          tag_args=()
+          while IFS= read -r t; do
+            [[ -n "${t}" ]] && tag_args+=(--tag "${t}")
+          done <<< "${META_TAGS}"
+
+          label_args=()
+          while IFS= read -r l; do
+            [[ -n "${l}" ]] && label_args+=(--label "${l}")
+          done <<< "${META_LABELS}"
+
+          build_arg_args=()
+          [[ -n "${HTTP_PROXY:-}" ]] && build_arg_args+=(--build-arg "HTTP_PROXY=${HTTP_PROXY}")
+          [[ -n "${HTTPS_PROXY:-}" ]] && build_arg_args+=(--build-arg "HTTPS_PROXY=${HTTPS_PROXY}")
+          [[ -n "${NO_PROXY:-}" ]] && build_arg_args+=(--build-arg "NO_PROXY=${NO_PROXY}")
+
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --file deploy/docker/gateway.Dockerfile \
+            --push \
+            "${tag_args[@]}" \
+            "${label_args[@]}" \
+            "${build_arg_args[@]}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
 
   docker_image_manifest:
     name: Publish multi-arch Docker tags
