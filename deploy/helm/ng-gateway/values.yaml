@@ -19,8 +19,10 @@ gateway:
   # Image configuration
   image:
     registry: ""
-    repository: ng-gateway
-    tag: "latest"
+    # Docker image repository (Docker Hub namespace/repo by default)
+    repository: shiyuecamus/ng-gateway
+    # Image tag. If empty, chart will default to `.Chart.AppVersion` for reproducible releases.
+    tag: ""
     pullPolicy: ""
   
   # Replica count

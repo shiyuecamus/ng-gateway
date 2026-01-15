@@ -405,3 +405,109 @@ jobs:
           pkg="deploy/linux/dist/ng-gateway-${pkg_version}-1.${{ matrix.rpm_arch }}.rpm"
           test -f "${pkg}"
           gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber
+
+  docker_image_push:
+    name: Build & Push Docker image (ng-gateway)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Dockerfile builds UI from ng-gateway-ui (git submodule).
+          submodules: recursive
+
+      - name: Compute release version
+        id: version
+        run: |
+          set -euo pipefail
+          ver="${RELEASE_TAG#v}"
+          echo "release_version=${ver}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            shiyuecamus/ng-gateway
+          tags: |
+            type=raw,value=${{ steps.version.outputs.release_version }}
+            type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/gateway.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm_chart_push:
+    name: Package & Push Helm chart (OCI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute release version
+        id: version
+        run: |
+          set -euo pipefail
+          ver="${RELEASE_TAG#v}"
+          echo "release_version=${ver}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Helm lint
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/ng-gateway
+
+      - name: Login to Docker Hub OCI registry
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${DOCKERHUB_USERNAME:?missing DOCKERHUB_USERNAME}"
+          : "${DOCKERHUB_TOKEN:?missing DOCKERHUB_TOKEN}"
+          helm registry login registry-1.docker.io -u "${DOCKERHUB_USERNAME}" -p "${DOCKERHUB_TOKEN}"
+
+      - name: Package chart
+        run: |
+          set -euo pipefail
+          out_dir="/tmp/ng-gateway-charts"
+          mkdir -p "${out_dir}"
+          helm package deploy/helm/ng-gateway \
+            --destination "${out_dir}" \
+            --version "${{ steps.version.outputs.release_version }}" \
+            --app-version "${{ steps.version.outputs.release_version }}"
+          ls -lh "${out_dir}"
+
+      - name: Push chart to Docker Hub (OCI)
+        run: |
+          set -euo pipefail
+          chart="/tmp/ng-gateway-charts/ng-gateway-chart-${{ steps.version.outputs.release_version }}.tgz"
+          test -f "${chart}"
+          helm push "${chart}" oci://registry-1.docker.io/shiyuecamus
