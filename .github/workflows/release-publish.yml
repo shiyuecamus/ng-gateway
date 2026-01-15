@@ -483,8 +483,7 @@ jobs:
           docker buildx rm -f ng-gateway-builder >/dev/null 2>&1 || true
           docker buildx create --name ng-gateway-builder --driver docker-container --use \
             --driver-opt "env.http_proxy=${HTTP_PROXY:-}" \
-            --driver-opt "env.https_proxy=${HTTPS_PROXY:-}" \
-            --driver-opt "env.no_proxy=${NO_PROXY:-}"
+            --driver-opt "env.https_proxy=${HTTPS_PROXY:-}"
           docker buildx inspect ng-gateway-builder --bootstrap
 
       - name: Login to Docker Hub
