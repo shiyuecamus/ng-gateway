@@ -406,26 +406,25 @@ jobs:
           test -f "${pkg}"
           gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber
 
-  docker_image_push:
-    name: Build & Push Docker image
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+  docker_image_push_arch:
+    name: Build & Push Docker image (${{ matrix.platform }})
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 180
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Self-hosted runner (Ubuntu amd64 VM)
+          - platform: linux/amd64
+            arch_tag: amd64
+            runs_on: [self-hosted, Linux, X64, ng-docker]
+          # Self-hosted runner (Ubuntu arm64 VM)
+          - platform: linux/arm64
+            arch_tag: arm64
+            runs_on: [self-hosted, Linux, ARM64, ng-docker]
     steps:
-      - name: Free disk space on runner
-        run: |
-          set -euo pipefail
-          echo "[before] disk usage:"
-          df -h
-          # GitHub hosted runners ship with large preinstalled toolchains that are not needed here.
-          # Removing them is a common practice to avoid Buildx "no space left on device" failures.
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
-          sudo apt-get clean || true
-          docker system prune -af || true
-          echo "[after] disk usage:"
-          df -h
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -448,27 +447,71 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker image metadata
+      - name: Docker image metadata (arch tag)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             shiyuecamus/ng-gateway
           tags: |
-            type=raw,value=${{ steps.version.outputs.release_version }}
-            type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
+            type=raw,value=${{ steps.version.outputs.release_version }}-${{ matrix.arch_tag }}
+            type=raw,value=latest-${{ matrix.arch_tag }},enable=${{ github.event.release.prerelease == false }}
 
-      - name: Build & push
+      - name: Build & push (single-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/gateway.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  docker_image_manifest:
+    name: Publish multi-arch Docker tags
+    needs: [docker_image_push_arch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Compute release version
+        id: version
+        run: |
+          set -euo pipefail
+          ver="${RELEASE_TAG#v}"
+          echo "release_version=${ver}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push multi-arch tag (version)
+        run: |
+          set -euo pipefail
+          ver="${{ steps.version.outputs.release_version }}"
+          docker buildx imagetools create \
+            -t "shiyuecamus/ng-gateway:${ver}" \
+            "shiyuecamus/ng-gateway:${ver}-amd64" \
+            "shiyuecamus/ng-gateway:${ver}-arm64"
+          docker buildx imagetools inspect "shiyuecamus/ng-gateway:${ver}"
+
+      - name: Create and push multi-arch tag (latest)
+        if: ${{ github.event.release.prerelease == false }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "shiyuecamus/ng-gateway:latest" \
+            "shiyuecamus/ng-gateway:latest-amd64" \
+            "shiyuecamus/ng-gateway:latest-arm64"
+          docker buildx imagetools inspect "shiyuecamus/ng-gateway:latest"
 
   helm_chart_push:
     name: Package & Push Helm chart
