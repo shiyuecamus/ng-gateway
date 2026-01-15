@@ -492,33 +492,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker image metadata (arch tag)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            shiyuecamus/ng-gateway
-          tags: |
-            type=raw,value=${{ steps.version.outputs.release_version }}-${{ matrix.arch_tag }}
-            type=raw,value=latest-${{ matrix.arch_tag }},enable=${{ github.event.release.prerelease == false }}
-
-      - name: Build & push (single-arch)
-        env:
-          META_TAGS: ${{ steps.meta.outputs.tags }}
-          META_LABELS: ${{ steps.meta.outputs.labels }}
+      - name: Build & push
         run: |
           set -euo pipefail
 
-          # Buildx supports multiple tags; metadata-action outputs newline-separated tags.
-          tag_args=()
-          while IFS= read -r t; do
-            [[ -n "${t}" ]] && tag_args+=(--tag "${t}")
-          done <<< "${META_TAGS}"
-
-          label_args=()
-          while IFS= read -r l; do
-            [[ -n "${l}" ]] && label_args+=(--label "${l}")
-          done <<< "${META_LABELS}"
+          # Push by digest (no arch-specific tags).
+          # This is the key to keeping Docker Hub clean: only the final multi-arch tags will exist.
+          metadata_file="/tmp/ng-gateway-buildx-metadata-${{ matrix.arch_tag }}.json"
 
           build_arg_args=()
           [[ -n "${HTTP_PROXY:-}" ]] && build_arg_args+=(--build-arg "HTTP_PROXY=${HTTP_PROXY}")
@@ -529,12 +509,29 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --file deploy/docker/gateway.Dockerfile \
             --push \
-            "${tag_args[@]}" \
-            "${label_args[@]}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${{ steps.version.outputs.release_version }}" \
+            --metadata-file "${metadata_file}" \
+            --output "type=image,name=shiyuecamus/ng-gateway,push-by-digest=true,name-canonical=true,push=true" \
             "${build_arg_args[@]}" \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             .
+
+          # Extract `containerimage.digest` from buildx metadata without depending on python/jq.
+          digest="$(grep -oE '"containerimage\.digest"\s*:\s*"[^"]+"' "${metadata_file}" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          : "${digest:?missing containerimage.digest in ${metadata_file}}"
+
+          echo "[ok] built digest=${digest}"
+          printf '%s\n' "${digest}" > "digest-${{ matrix.arch_tag }}.txt"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-digest-${{ matrix.arch_tag }}
+          path: digest-${{ matrix.arch_tag }}.txt
+          if-no-files-found: error
 
   docker_image_manifest:
     name: Publish multi-arch Docker tags
@@ -560,24 +557,34 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: docker-digest-*
+          merge-multiple: true
+
       - name: Create and push multi-arch tag (version)
         run: |
           set -euo pipefail
           ver="${{ steps.version.outputs.release_version }}"
+          digest_amd64="$(cat digest-amd64.txt)"
+          digest_arm64="$(cat digest-arm64.txt)"
           docker buildx imagetools create \
             -t "shiyuecamus/ng-gateway:${ver}" \
-            "shiyuecamus/ng-gateway:${ver}-amd64" \
-            "shiyuecamus/ng-gateway:${ver}-arm64"
+            "shiyuecamus/ng-gateway@${digest_amd64}" \
+            "shiyuecamus/ng-gateway@${digest_arm64}"
           docker buildx imagetools inspect "shiyuecamus/ng-gateway:${ver}"
 
       - name: Create and push multi-arch tag (latest)
         if: ${{ github.event.release.prerelease == false }}
         run: |
           set -euo pipefail
+          digest_amd64="$(cat digest-amd64.txt)"
+          digest_arm64="$(cat digest-arm64.txt)"
           docker buildx imagetools create \
             -t "shiyuecamus/ng-gateway:latest" \
-            "shiyuecamus/ng-gateway:latest-amd64" \
-            "shiyuecamus/ng-gateway:latest-arm64"
+            "shiyuecamus/ng-gateway@${digest_amd64}" \
+            "shiyuecamus/ng-gateway@${digest_arm64}"
           docker buildx imagetools inspect "shiyuecamus/ng-gateway:latest"
 
   helm_chart_push:
