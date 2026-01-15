@@ -478,13 +478,14 @@ jobs:
       - name: Set up Docker Buildx
         run: |
           set -euo pipefail
-          # Create a dedicated builder and inject proxy env into buildkitd container.
-          # This avoids hardcoding proxy values in YAML and works with runner-level configuration.
+          # `push-by-digest` requires docker-container driver.
+          # Avoid falling back to the default "docker" driver by forcing a fresh builder and explicitly using it.
+          docker buildx rm -f ng-gateway-builder >/dev/null 2>&1 || true
           docker buildx create --name ng-gateway-builder --driver docker-container --use \
             --driver-opt "env.http_proxy=${HTTP_PROXY:-}" \
             --driver-opt "env.https_proxy=${HTTPS_PROXY:-}" \
-            --driver-opt "env.no_proxy=${NO_PROXY:-}" || true
-          docker buildx inspect --bootstrap
+            --driver-opt "env.no_proxy=${NO_PROXY:-}"
+          docker buildx inspect ng-gateway-builder --bootstrap
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -506,6 +507,7 @@ jobs:
           [[ -n "${NO_PROXY:-}" ]] && build_arg_args+=(--build-arg "NO_PROXY=${NO_PROXY}")
 
           docker buildx build \
+            --builder ng-gateway-builder \
             --platform "${{ matrix.platform }}" \
             --file deploy/docker/gateway.Dockerfile \
             --push \
