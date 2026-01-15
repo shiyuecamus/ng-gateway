@@ -24,7 +24,11 @@ fi
 # Users can put overrides like:
 # - NG__GENERAL__RUNTIME_DIR=/var/lib/ng-gateway
 if [[ ! -f "${config_dir}/env" ]]; then
-  printf "%s\n" "# NG Gateway environment overrides (optional)" > "${config_dir}/env"
+  {
+    printf "%s\n" "# NG Gateway environment overrides (optional)"
+    printf "%s\n" "# Example: NG__GENERAL__RUNTIME_DIR=/var/lib/ng-gateway"
+    printf "%s\n" ""
+  } > "${config_dir}/env"
 fi
 
 # Ensure builtin drivers/plugins are available under runtime working directory.

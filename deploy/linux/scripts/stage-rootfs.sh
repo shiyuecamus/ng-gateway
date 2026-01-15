@@ -81,10 +81,14 @@ cp -f "${bin_path}" "${opt_dir}/bin/ng-gateway-bin"
 chmod +x "${opt_dir}/bin/ng-gateway-bin"
 
 echo "[stage] default config"
-if [[ -f "${REPO_ROOT}/gateway.toml" ]]; then
-  cp -f "${REPO_ROOT}/gateway.toml" "${opt_dir}/gateway.toml"
+linux_cfg="${REPO_ROOT}/deploy/linux/resources/gateway.toml"
+repo_cfg="${REPO_ROOT}/gateway.toml"
+if [[ -f "${linux_cfg}" ]]; then
+  cp -f "${linux_cfg}" "${opt_dir}/gateway.toml"
+elif [[ -f "${repo_cfg}" ]]; then
+  cp -f "${repo_cfg}" "${opt_dir}/gateway.toml"
 else
-  echo "error: default config not found: ${REPO_ROOT}/gateway.toml"
+  echo "error: default config not found: ${linux_cfg} or ${repo_cfg}"
   exit 1
 fi
 

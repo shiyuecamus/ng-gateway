@@ -1,0 +1,108 @@
+# Default gateway config for Linux deb/rpm distribution.
+#
+# Key differences vs repo root `gateway.toml`:
+# - UI uses `embedded_zip` because Linux packages are built with `ui-embedded` and ship a single
+#   binary that can serve UI without any filesystem dist directory.
+# - Ports keep the repo defaults (5678/5679) to match documentation and existing examples.
+#
+# Note:
+# - Many file paths are relative to the process working directory.
+# - In Linux packages, systemd sets `WorkingDirectory=/var/lib/ng-gateway`, so keep `runtime_dir="."`.
+#
+
+# General
+[general]
+runtime_dir = "."
+ca_cert_path = "ca.crt"
+ca_key_path = "ca.key"
+
+# Southward communication configuration
+[general.southward]
+driver_sync_start_timeout_ms = 2000
+
+# Northward communication configuration
+[general.northward]
+queue_capacity = 10000
+app_sync_start_timeout_ms = 2000
+cache_ttl_ms = 3600000
+
+# Collector configuration
+[general.collector]
+collection_timeout_ms = 30000
+metrics_interval_ms = 60000
+max_concurrent_collections = 200
+retry_attempts = 3
+retry_delay_ms = 1000
+outbound_queue_capacity = 10000
+
+# Metrics configuration
+[metrics]
+enabled = false
+endpoint = "http://localhost:4317"
+export_interval = 60000
+service_name = "ng"
+
+# Web
+[web]
+router_prefix = "/api"
+host = "0.0.0.0"
+port = 5678
+workers = 0
+
+# Web UI (served by the gateway process)
+[web.ui]
+enabled = true
+# Mode: embedded_zip | filesystem | disabled
+mode = "embedded_zip"
+filesystem_root = "./ng-gateway-ui/apps/web-antd/dist"
+
+[web.ssl]
+enabled = true
+port = 5679
+type = "auto"
+cert = "./certs/cert.pem"
+key = "./certs/key.pem"
+
+[web.cors]
+mode = "allow_all"
+
+[web.cors.whitelist]
+origins = ["*"]
+methods = ["GET", "POST", "PUT", "DELETE"]
+headers = [
+  "Content-Type",
+  "AccessToken",
+  "X-CSRF-Token",
+  "Authorization",
+  "Token",
+  "X-Token",
+  "X-User-Id",
+]
+expose_headers = [
+  "Content-Length",
+  "Access-Control-Allow-Origin",
+  "Access-Control-Allow-Headers",
+  "Content-Type",
+]
+credentials = true
+
+# JWT
+[web.jwt]
+secret = "ng-gateway"
+expire = 3600000
+issuer = "ng-gateway"
+
+# Cache
+[cache]
+type = "moka"
+prefix = "ng-gateway"
+delimiter = ":"
+
+# Database
+[db.sqlite]
+path = "ng-gateway.db"
+timeout = 5000
+idle_timeout = 5000
+max_lifetime = 5000
+max_connections = 100
+auto_create = true
