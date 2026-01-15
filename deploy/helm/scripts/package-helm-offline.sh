@@ -5,8 +5,8 @@ set -euo pipefail
 # 功能：构建网关单镜像（内嵌 UI 静态资源），导出为 tar，打包 Helm Chart 和镜像到 zip
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+DEPLOY_DIR="${REPO_ROOT}/deploy"
 HELM_DIR="${DEPLOY_DIR}/helm"
 
 # 配置参数
@@ -423,6 +423,7 @@ Gateway 的配置通过 Helm Chart 的 \`values.yaml\` 进行配置。主要配�
 ### 持久化存储
 
 默认启用三个 PVC：
+
 - \`gateway-data\`: 网关数据（SQLite 数据库等）
 - \`gateway-drivers\`: 自定义驱动目录
 - \`gateway-plugins\`: 自定义插件目录
@@ -430,7 +431,7 @@ Gateway 的配置通过 Helm Chart 的 \`values.yaml\` 进行配置。主要配�
 ### Ingress
 
 如果启用 Ingress（all-in-one），Ingress 将 \`/\` 路由到 Gateway Service，
-由网关进程同时提供 UI（`/`）和 API（`/api`）。
+由网关进程同时提供 UI（\`/\`）和 API（\`/api\`）。
 
 ## 故障排查
 

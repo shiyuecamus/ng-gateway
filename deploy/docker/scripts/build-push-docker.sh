@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 # Ensure BuildKit is enabled
 export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
@@ -118,4 +118,3 @@ docker buildx build \
   "$REPO_ROOT"
 
 echo "[done] Build and push completed."
-

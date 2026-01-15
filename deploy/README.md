@@ -8,9 +8,9 @@
 ## 构建代理（Proxy）
 
 如你的网络环境需要代理（公司内网 / CI / 海外依赖拉取慢），以下脚本均支持透传：
-- `deploy/scripts/build-single.sh`
-- `deploy/scripts/package-offline.sh`
-- `deploy/scripts/package-helm-offline.sh`
+- `deploy/docker/scripts/build-single.sh`
+- `deploy/docker/scripts/package-offline.sh`
+- `deploy/helm/scripts/package-helm-offline.sh`
 
 使用方式：设置环境变量即可（未设置则不会传递 build-arg）：
 
@@ -27,13 +27,16 @@ export NO_PROXY=localhost,127.0.0.1
 ```
 deploy/
 ├── docker/                        # 网关单镜像 Dockerfile（包含 UI dist）
-│   └── gateway.Dockerfile
+│   ├── gateway.Dockerfile
+│   └── scripts/
+│       ├── build-single.sh            # 在线构建 all-in-one 网关镜像
+│       ├── build-push-docker.sh       # buildx 多架构构建/推送
+│       └── package-offline.sh         # Docker 离线包（zip，目标机 docker run）
 ├── helm/                          # Helm Chart（all-in-one：仅 gateway）
-│   └── ng-gateway/
-└── scripts/
-    ├── build-single.sh            # 在线构建 all-in-one 网关镜像
-    ├── package-offline.sh         # Docker 离线包（zip，目标机 docker run）
-    └── package-helm-offline.sh    # Helm 离线包（zip）
+│   ├── ng-gateway/
+│   └── scripts/
+│       ├── package-helm-offline.sh    # Helm 离线包（zip）
+│       └── package-push-helm.sh       # Helm Chart 打包并 push（OCI）
 ```
 
 ---
@@ -43,7 +46,7 @@ deploy/
 ### 构建镜像
 
 ```bash
-./deploy/scripts/build-single.sh
+./deploy/docker/scripts/build-single.sh
 ```
 
 支持的环境变量（不传则使用默认值）：
@@ -56,7 +59,7 @@ deploy/
 示例：
 
 ```bash
-VERSION=v1.2.3 IMAGE_PREFIX=ng ./deploy/scripts/build-single.sh
+VERSION=v1.2.3 IMAGE_PREFIX=ng ./deploy/docker/scripts/build-single.sh
 ```
 
 ### 验证镜像是否可用（推荐流程）
@@ -137,7 +140,7 @@ docker run -d \
 ### 生成离线包（构建 + 导出镜像 tar + 打包 zip）
 
 ```bash
-./deploy/scripts/package-offline.sh
+./deploy/docker/scripts/package-offline.sh
 ```
 
 常用参数：
@@ -149,7 +152,7 @@ docker run -d \
 示例：
 
 ```bash
-VERSION=v1.2.3 PLATFORM=linux/amd64 ./deploy/scripts/package-offline.sh
+VERSION=v1.2.3 PLATFORM=linux/amd64 ./deploy/docker/scripts/package-offline.sh
 ```
 
 ### 目标机部署
@@ -171,7 +174,7 @@ cd ng-gateway-offline-*
 ### 生成离线包（构建 + 导出镜像 tar + 打包 Chart tgz + zip）
 
 ```bash
-./deploy/scripts/package-helm-offline.sh
+./deploy/helm/scripts/package-helm-offline.sh
 ```
 
 常用参数：

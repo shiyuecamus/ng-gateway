@@ -5,8 +5,8 @@ set -euo pipefail
 # 功能：构建网关单镜像（内嵌 UI 静态资源），导出为 tar，打包部署文件到 zip
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+DEPLOY_DIR="${REPO_ROOT}/deploy"
 
 # 配置参数
 REGISTRY="${REGISTRY:-}"
@@ -374,3 +374,4 @@ echo "  1. 将 ${PACKAGE_NAME} 传输到目标服务器"
 echo "  2. 解压: unzip ${PACKAGE_NAME}"
 echo "  3. 运行: cd $(basename "${PACKAGE_NAME%.zip}") && ./deploy.sh"
 echo ""
+

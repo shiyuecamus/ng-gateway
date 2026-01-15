@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 # This project Dockerfiles rely on BuildKit features (e.g. `RUN --mount=type=cache`).
 # Ensure BuildKit is enabled so `docker build` works consistently across environments.
@@ -53,5 +53,3 @@ fi
 
 echo "[done] Image built:"
 echo "  $gateway_image"
-
-
