@@ -3,7 +3,7 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway
+  name: {{ include "ng-gateway.fullname" . }}-servicemonitor
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
     {{- with .Values.serviceMonitor.labels }}

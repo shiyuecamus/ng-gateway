@@ -102,8 +102,8 @@ gateway:
   # Ports are automatically read from gateway.config.web.port and gateway.config.web.ssl.port
   service:
     type: ClusterIP
-    httpPort: 8080
-    httpsPort: 8883
+    httpPort: 8978
+    httpsPort: 8979
     annotations: {}
     # For NodePort/LoadBalancer
     nodePort:
@@ -157,14 +157,14 @@ gateway:
     # Web configuration
     web:
       routerPrefix: "/api"
-      port: 5678
+      port: 8978
       # 0 = use CPU count, >0 = exact number, <0 = CPU count / abs(workers)
       workers: 0
       
       # SSL configuration
       ssl:
         enabled: true
-        port: 5679
+        port: 8979
         # auto: generate or load from ca_cert_path and ca_key_path, local: load from cert and key
         type: "auto"
         cert: "./certs/cert.pem"

@@ -3,7 +3,7 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway
+  name: {{ include "ng-gateway.fullname" . }}-podmonitor
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
     {{- with .Values.podMonitor.labels }}

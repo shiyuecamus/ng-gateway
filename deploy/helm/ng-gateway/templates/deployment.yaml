@@ -6,7 +6,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway
+  name: {{ include "ng-gateway.fullname" . }}
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
 spec:
@@ -57,7 +57,7 @@ spec:
             {{- end }}
           envFrom:
             - configMapRef:
-                name: {{ include "ng-gateway.fullname" . }}-gateway-config
+                name: {{ include "ng-gateway.fullname" . }}-config
           {{- if .Values.gateway.envFromSecrets }}
           {{- range .Values.gateway.envFromSecrets }}
             - secretRef:
@@ -107,7 +107,7 @@ spec:
         {{- if and .Values.persistence.gatewayData.enabled $gatewayDataHasSC }}
         - name: gateway-data
           persistentVolumeClaim:
-            claimName: {{ include "ng-gateway.fullname" . }}-gateway-data
+            claimName: {{ include "ng-gateway.fullname" . }}-data
         {{- else }}
         - name: gateway-data
           emptyDir: {}
@@ -115,7 +115,7 @@ spec:
         {{- if and .Values.persistence.gatewayDrivers.enabled $gatewayDriversHasSC }}
         - name: gateway-drivers
           persistentVolumeClaim:
-            claimName: {{ include "ng-gateway.fullname" . }}-gateway-drivers
+            claimName: {{ include "ng-gateway.fullname" . }}-drivers
         {{- else }}
         - name: gateway-drivers
           emptyDir: {}
@@ -123,7 +123,7 @@ spec:
         {{- if and .Values.persistence.gatewayPlugins.enabled $gatewayPluginsHasSC }}
         - name: gateway-plugins
           persistentVolumeClaim:
-            claimName: {{ include "ng-gateway.fullname" . }}-gateway-plugins
+            claimName: {{ include "ng-gateway.fullname" . }}-plugins
         {{- else }}
         - name: gateway-plugins
           emptyDir: {}

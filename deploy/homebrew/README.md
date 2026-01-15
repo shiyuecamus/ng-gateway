@@ -151,9 +151,9 @@ brew tap homebrew/services
 启动/查看/停止：
 
 ```bash
-brew services start shiyuecamus/ng-gateway/ng-gateway
+brew services start ng-gateway
 brew services list
-brew services stop shiyuecamus/ng-gateway/ng-gateway
+brew services stop ng-gateway
 ```
 
 查看日志（Homebrew service 定义写入到 `$(brew --prefix)/var/log/`）：
@@ -167,5 +167,29 @@ tail -n 200 "$(brew --prefix)/var/log/ng-gateway.error.log"
 
 - 端口被占用：编辑 `$(brew --prefix)/var/lib/ng-gateway/gateway.toml`（`[web].port` / `[web.ssl].port`），然后 `brew services restart ...`
 - 配置改坏导致启动失败：先看 `ng-gateway.error.log`，再用 `brew services restart ...` 重启验证
+
+---
+
+## 卸载与数据清理（重要）
+
+Homebrew 的惯例是：**卸载软件不自动删除 `var/` 下的用户数据**（避免误删）。  
+因此 `brew uninstall ng-gateway` 只会卸载程序本体，不会删除运行目录与数据。
+
+如果你确认要“彻底卸载”（包含运行目录与数据），建议按以下顺序执行：
+
+```bash
+# 1) 停止后台服务
+brew services stop ng-gateway || true
+
+# 2) 卸载程序本体
+brew uninstall ng-gateway
+
+# 3) 删除运行目录（会删除 SQLite DB、证书、drivers/plugins 等）
+rm -rf "$(brew --prefix)/var/lib/ng-gateway"
+
+# 4) 可选：删除日志
+rm -f "$(brew --prefix)/var/log/ng-gateway.log" \
+      "$(brew --prefix)/var/log/ng-gateway.error.log"
+```
 
 

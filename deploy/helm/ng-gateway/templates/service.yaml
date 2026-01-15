@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway
+  name: {{ include "ng-gateway.fullname" . }}-service
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
   {{- with .Values.gateway.service.annotations }}

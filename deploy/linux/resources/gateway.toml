@@ -3,7 +3,7 @@
 # Key differences vs repo root `gateway.toml`:
 # - UI uses `embedded_zip` because Linux packages are built with `ui-embedded` and ship a single
 #   binary that can serve UI without any filesystem dist directory.
-# - Ports keep the repo defaults (5678/5679) to match documentation and existing examples.
+# - Ports use the product default (8978/8979) to align with Docker and Homebrew distributions.
 #
 # Note:
 # - Many file paths are relative to the process working directory.
@@ -46,7 +46,7 @@ service_name = "ng"
 [web]
 router_prefix = "/api"
 host = "0.0.0.0"
-port = 5678
+port = 8978
 workers = 0
 
 # Web UI (served by the gateway process)
@@ -58,7 +58,7 @@ filesystem_root = "./ng-gateway-ui/apps/web-antd/dist"
 
 [web.ssl]
 enabled = true
-port = 5679
+port = 8979
 type = "auto"
 cert = "./certs/cert.pem"
 key = "./certs/key.pem"

@@ -83,12 +83,12 @@ Service management (systemd):
   - enable:  systemctl enable --now ng-gateway
 
 Health checks (defaults from ${config_dir}/gateway.toml):
-  - HTTP:  curl -fsS http://127.0.0.1:5678/health   # -> OK
-  - HTTPS: curl -kfsS https://127.0.0.1:5679/health # if enabled (self-signed: -k)
+  - HTTP:  curl -fsS http://127.0.0.1:8978/health   # -> OK
+  - HTTPS: curl -kfsS https://127.0.0.1:8979/health # if enabled (self-signed: -k)
 
 Web access (depends on [web.ui] settings):
-  - UI:  http://127.0.0.1:5678/ (if UI enabled)
-  - API: http://127.0.0.1:5678/api
+  - UI:  http://127.0.0.1:8978/ (if UI enabled)
+  - API: http://127.0.0.1:8978/api
 
 Default UI credentials (initial):
   - username: system_admin

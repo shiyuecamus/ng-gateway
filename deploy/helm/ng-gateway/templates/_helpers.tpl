@@ -67,7 +67,7 @@ app.kubernetes.io/component: gateway
 Gateway selector labels
 */}}
 {{- define "ng-gateway.gateway.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "ng-gateway.name" . }}-gateway
+app.kubernetes.io/name: {{ include "ng-gateway.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: gateway
 {{- end }}

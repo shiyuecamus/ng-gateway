@@ -6,7 +6,7 @@ apiVersion: policy/v1beta1
 {{- end }}
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway
+  name: {{ include "ng-gateway.fullname" . }}-pdb
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
 spec:

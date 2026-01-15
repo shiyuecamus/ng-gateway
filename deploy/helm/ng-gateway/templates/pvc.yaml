@@ -7,7 +7,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway-data
+  name: {{ include "ng-gateway.fullname" . }}-data
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
   {{- with .Values.persistence.gatewayData.annotations }}
@@ -36,7 +36,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway-drivers
+  name: {{ include "ng-gateway.fullname" . }}-drivers
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
   {{- with .Values.persistence.gatewayDrivers.annotations }}
@@ -65,7 +65,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "ng-gateway.fullname" . }}-gateway-plugins
+  name: {{ include "ng-gateway.fullname" . }}-plugins
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
   {{- with .Values.persistence.gatewayPlugins.annotations }}
