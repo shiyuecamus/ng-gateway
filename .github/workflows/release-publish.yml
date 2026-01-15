@@ -407,12 +407,25 @@ jobs:
           gh release upload "${RELEASE_TAG}" "${pkg}" --repo "${REPO}" --clobber
 
   docker_image_push:
-    name: Build & Push Docker image (ng-gateway)
+    name: Build & Push Docker image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
     steps:
+      - name: Free disk space on runner
+        run: |
+          set -euo pipefail
+          echo "[before] disk usage:"
+          df -h
+          # GitHub hosted runners ship with large preinstalled toolchains that are not needed here.
+          # Removing them is a common practice to avoid Buildx "no space left on device" failures.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          sudo apt-get clean || true
+          docker system prune -af || true
+          echo "[after] disk usage:"
+          df -h
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -458,7 +471,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   helm_chart_push:
-    name: Package & Push Helm chart (OCI)
+    name: Package & Push Helm chart
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

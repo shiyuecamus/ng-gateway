@@ -158,14 +158,6 @@ RUN echo "=== Deployed Plugins ===" && \
     ls -lh /app/plugins/builtin/ && \
     echo "======================="
 
-# Prepare output directory
-RUN mkdir -p /out && \
-    cp target/release/ng-gateway-bin /out/ && \
-    cp -r drivers /out/ && \
-    cp -r plugins /out/ && \
-    find /out/drivers/builtin -type f ! -name '*.so' -delete && \
-    find /out/plugins/builtin -type f ! -name '*.so' -delete
-
 # ==============================================================================
 # STAGE 4: Runtime - Create the final minimal image
 # This stage copies the compiled binary and drivers into a minimal base image
@@ -198,13 +190,13 @@ WORKDIR /app
 RUN mkdir -p /app/pki/own /app/pki/private
 
 # Copy binary from builder
-COPY --from=builder --chmod=755 /out/ng-gateway-bin ./ng-gateway-bin
+COPY --from=builder --chmod=755 /app/target/release/ng-gateway-bin ./ng-gateway-bin
 
 # Copy all deployed drivers
-COPY --from=builder /out/drivers/builtin/ /app/drivers/builtin/
+COPY --from=builder /app/drivers/builtin/ /app/drivers/builtin/
 
 # Copy all deployed plugins
-COPY --from=builder /out/plugins/builtin/ /app/plugins/builtin/
+COPY --from=builder /app/plugins/builtin/ /app/plugins/builtin/
 
 # Copy UI static assets into runtime image (filesystem serving mode)
 COPY --from=ui-builder /app/ng-gateway-ui/apps/web-antd/dist/ /app/ui/
