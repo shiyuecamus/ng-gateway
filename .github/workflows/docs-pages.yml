@@ -57,7 +57,8 @@ jobs:
           #   https://owner.github.io/ng-gateway/
           # so the base must be `/ng-gateway/`.
           VITEPRESS_BASE: /${{ github.event.repository.name }}/
-        run: pnpm run build:docs
+        # Build the docs package directly (avoid Turbo cache for deterministic base output).
+        run: pnpm --filter @vben/docs run build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
