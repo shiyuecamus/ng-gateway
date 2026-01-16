@@ -1,0 +1,74 @@
+name: Docs - GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      # Submodule pointer updates are tracked at the submodule root path
+      # (a gitlink entry), not at nested paths like `ng-gateway-ui/docs/**`.
+      - "ng-gateway-ui"
+      - ".github/workflows/docs-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code (with submodules)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: ng-gateway-ui/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ng-gateway-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build docs
+        working-directory: ng-gateway-ui
+        env:
+          # GitHub Pages (project pages) base path
+          VITEPRESS_BASE: /ng-gateway/
+        run: pnpm run build:docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ng-gateway-ui/docs/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
