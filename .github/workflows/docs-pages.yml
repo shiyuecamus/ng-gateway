@@ -52,8 +52,11 @@ jobs:
       - name: Build docs
         working-directory: ng-gateway-ui
         env:
-          # GitHub Pages (project pages) base path
-          VITEPRESS_BASE: /ng-gateway/
+          # GitHub Pages (project pages) base path.
+          # For a repo like `owner/ng-gateway`, the Pages URL is:
+          #   https://owner.github.io/ng-gateway/
+          # so the base must be `/ng-gateway/`.
+          VITEPRESS_BASE: /${{ github.event.repository.name }}/
         run: pnpm run build:docs
 
       - name: Upload Pages artifact
