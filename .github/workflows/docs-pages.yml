@@ -52,15 +52,25 @@ jobs:
       - name: Build docs
         working-directory: ng-gateway-ui
         env:
-          # GitHub Pages (project pages) base path.
-          # For a repo like `owner/ng-gateway`, the Pages URL is:
-          #   https://owner.github.io/ng-gateway/
-          # so the base must be `/ng-gateway/`.
-          VITEPRESS_BASE: /${{ github.event.repository.name }}/
+          # This repo only serves a custom domain on the root path.
+          # So the VitePress base must be `/` (no repo prefix).
+          VITEPRESS_BASE: /
         # Build via Turbo to ensure workspace deps are built first (e.g. `@vben-core/*`).
         # We also include `VITEPRESS_BASE` in Turbo cache keys via `ng-gateway-ui/turbo.json`,
         # so cached outputs won't accidentally reuse a wrong base.
         run: pnpm run build:docs
+
+      - name: Prepare Pages output (CNAME / .nojekyll)
+        run: |
+          set -euo pipefail
+          out_dir="ng-gateway-ui/docs/.vitepress/dist"
+          test -d "${out_dir}"
+          # Avoid GitHub Pages Jekyll processing (safe even if already present).
+          touch "${out_dir}/.nojekyll"
+          # Keep custom domain sticky even when deploying via Actions.
+          if [[ -f "CNAME" ]] && [[ -s "CNAME" ]]; then
+            cp -f "CNAME" "${out_dir}/CNAME"
+          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
