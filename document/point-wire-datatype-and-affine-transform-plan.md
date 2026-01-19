@@ -15,10 +15,12 @@
   - **语义**：**wire_data_type**（内存布局/协议源类型）。
   - 例：Modbus Holding Register 两字节的无符号整型就是 `UInt16`；四字节 IEEE754 就是 `Float32`。
 
-- **`transform: Option<Transform>`（Point 与 ActionParameter 都要有）**
+- **Transform（逻辑层变换：类型转换 + 仿射换算）**
 
   - **语义**：逻辑层变换（类型转换 + 仿射换算）。
-  - `transform=None`：逻辑类型默认 **跟随 wire**；不做数值仿射。
+  - **Point**：API/SDK 推荐以 `transform: Option<Transform>` 暴露；DB 用 `transform_*` 结构化列存储。
+  - **ActionParameter / Parameter**：为与 Point 字段命名对齐，JSON 里用 `transform_*` 平铺字段表达；运行时可组装为 `Option<Transform>` 参与 codec 计算。
+  - **规则**：未配置 transform（或 transform 字段全空）时，逻辑类型默认 **跟随 wire**；不做数值仿射。
 
 - **`TransformDatatype`（建议命名：`data_type` 或 `logical_data_type`，本文用 `logical_dt` 表示）**
   - **语义**：**逻辑数据类型**（northward 输出 `NGValue` 的类型、UI 校验与展示的类型、写入 API 的类型）。
@@ -85,13 +87,39 @@
 
 > 为什么 Point 不直接存 JSON：point 是高频、需要分页过滤/展示/导入导出，结构化列更可控。
 
-### 2.2 ActionParameter（inputs 已是 JSON，直接扩展 JSON 结构）
+#### 2.1.1 Migration（必须补齐；否则线上 DB 无法落库/回读）
+
+本仓库当前仅有 `ng-gateway-storage/src/migration/m20220101_000001_create_table.rs`（一次性 create tables），因此要把 point 的 `transform_*` 列落到 DB，必须新增一个真正的“表结构变更 migration”：
+
+- **新增 migration 文件**：例如 `ng-gateway-storage/src/migration/m20260120_000002_point_transform.rs`
+- **在 `ng-gateway-storage/src/migration/mod.rs` 注册**：把新 migration 加到 `MigratorTrait::migrations()` 的列表中（在 create_table 之后）
+- **Up（表结构）**：
+  - `ALTER TABLE point ADD COLUMN transform_data_type SMALLINT NULL`
+  - `ALTER TABLE point ADD COLUMN transform_scale DOUBLE NULL`
+  - `ALTER TABLE point ADD COLUMN transform_offset DOUBLE NULL`
+  - `ALTER TABLE point ADD COLUMN transform_negate BOOLEAN NOT NULL DEFAULT 0`
+- **Up（数据回填，可选但强烈建议）**：
+  - 若旧 `point.scale` 存在：`transform_scale = scale`（把旧语义整体迁移进 transform）
+  - `transform_data_type` 留空（None 表示 logical 跟随 wire），除非你希望把历史点强制升级为某个固定 logical 类型
+- **Up（删除旧列 scale）**：
+  - **SQLite**：不支持直接 `DROP COLUMN`，只能“重建表 + copy data + rename”（或接受保留 `scale` 列但业务废弃它）
+  - **Postgres/MySQL**：可直接 drop（若部署环境确定不是 SQLite）
+- **Down**：按需要实现（破坏性升级可选择不提供 down，或仅撤销新列；SQLite 回退同样需要重建表）
+
+> 破坏性升级口径下：推荐至少做到“新增 transform\_\* + 回填 transform_scale”，至于是否物理删除 `scale` 取决于 DB 后端与发布窗口。
+
+### 2.2 ActionParameter（inputs 是 JSON，但字段也要与 Point 对齐为“平铺语义字段”）
 
 `action.inputs` 目前是 JSON（`Parameters(Vec<Parameter>)`），因此 Parameter 直接扩展字段即可：
 
 - `Parameter.data_type`：语义改为 wire_dt（与 point 同口径）
-- 新增 `Parameter.transform: Option<Transform>`
-- 同理：UI/导入模板需要支持 `param_transform_*` 字段（见第 3 节）
+- **新增一组 transform 平铺字段（与 Point 列命名对齐）**：
+  - `Parameter.transform_data_type: Option<DataType>`（logical；None 表示跟随 wire）
+  - `Parameter.transform_scale: Option<f64>`
+  - `Parameter.transform_offset: Option<f64>`
+  - `Parameter.transform_negate: bool`（默认 false）
+
+> 说明：Parameter 仍然是 JSON（没有 DB schema migration 压力），但为了全链路一致性与 UI/模板字段对齐，仍采用 `transform_*` 平铺命名；运行时可用 helper 将平铺字段组装为 `Option<Transform>` 传给 codec。
 
 ---
 
@@ -262,7 +290,7 @@ IEC104 的 wire 类型多由 ASDU TypeID 决定；`point.data_type` 作为 wire_
 
 ### 4.7 DNP3（`ng-gateway-southward/dnp3`）
 
-- `dnp3/src/types.rs:PointMeta` 需要新增 `transform: Option<Transform>`（或展开字段）
+- `dnp3/src/types.rs:PointMeta`：新增 transform 信息（可用 `transform: Option<Transform>`，或同样展开为 `transform_*` 平铺字段）
 - `dnp3/src/codec.rs:L20-L34`：coerce 使用逻辑类型 + transform
 - `dnp3/src/handler.rs:L128/L152/L188/L206/L224/L242`：调用不变或按新签名替换（取决于是否保留 Dnp3Codec 薄封装）
 
@@ -295,7 +323,11 @@ IEC104 的 wire 类型多由 ASDU TypeID 决定；`point.data_type` 作为 wire_
 ### 5.2 Action Parameter 表单
 
 - `param.data_type` 现在表示：wire_dt
-- 新增 `param.transform.*` 同上
+- 新增 `param.transform_*`（平铺字段，与 Point 对齐）：
+  - `param.transform_data_type`
+  - `param.transform_scale`
+  - `param.transform_offset`
+  - `param.transform_negate`
 
 ---
 
