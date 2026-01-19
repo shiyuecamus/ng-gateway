@@ -18,7 +18,7 @@
 - **Transform（逻辑层变换：类型转换 + 仿射换算）**
 
   - **语义**：逻辑层变换（类型转换 + 仿射换算）。
-  - **Point**：API/SDK 推荐以 `transform: Option<Transform>` 暴露；DB 用 `transform_*` 结构化列存储。
+  - **Point**：API/SDK 推荐以 `transform: Transform` 暴露；DB 用 `transform_*` 结构化列存储。
   - **ActionParameter / Parameter**：为与 Point 字段命名对齐，JSON 里用 `transform_*` 平铺字段表达；运行时可组装为 `Option<Transform>` 参与 codec 计算。
   - **规则**：未配置 transform（或 transform 字段全空）时，逻辑类型默认 **跟随 wire**；不做数值仿射。
 
@@ -83,7 +83,7 @@
 
 并在 API/SDK 上呈现为：
 
-- `transform: Option<Transform>`
+- `transform: Transform`
 
 > 为什么 Point 不直接存 JSON：point 是高频、需要分页过滤/展示/导入导出，结构化列更可控。
 
@@ -290,7 +290,7 @@ IEC104 的 wire 类型多由 ASDU TypeID 决定；`point.data_type` 作为 wire_
 
 ### 4.7 DNP3（`ng-gateway-southward/dnp3`）
 
-- `dnp3/src/types.rs:PointMeta`：新增 transform 信息（可用 `transform: Option<Transform>`，或同样展开为 `transform_*` 平铺字段）
+- `dnp3/src/types.rs:PointMeta`：新增 transform 信息（可用 `transform: Transform`，或同样展开为 `transform_*` 平铺字段）
 - `dnp3/src/codec.rs:L20-L34`：coerce 使用逻辑类型 + transform
 - `dnp3/src/handler.rs:L128/L152/L188/L206/L224/L242`：调用不变或按新签名替换（取决于是否保留 Dnp3Codec 薄封装）
 
