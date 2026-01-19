@@ -1,4 +1,4 @@
-# XTask - Build Automation for NG Gateway
+# NG Gateway XTask (`ng-gateway-xtask`)
 
 This crate provides custom build tasks for the ng-gateway project using the [xtask pattern](https://github.com/matklad/cargo-xtask).
 
@@ -87,7 +87,7 @@ CMD ["ng-gateway-bin"]
 
 ## 🔧 Adding New Commands
 
-To add a new task, edit `xtask/src/main.rs`:
+To add a new task, edit `ng-gateway-xtask/src/main.rs`:
 
 ```rust
 #[derive(Subcommand)]

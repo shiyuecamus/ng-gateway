@@ -1,12 +1,12 @@
 [package]
-name = "xtask"
+name = "ng-gateway-xtask"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 # xtask is a helper binary, not a library
 [[bin]]
-name = "xtask"
+name = "ng-gateway-xtask"
 path = "src/main.rs"
 
 [dependencies]

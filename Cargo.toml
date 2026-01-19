@@ -24,7 +24,7 @@ members = [
   "ng-gateway-northward/opcua-server",
   "ng-gateway-northward/pulsar",
   "ng-gateway-northward/kafka",
-  "xtask",
+  "ng-gateway-xtask",
 ]
 resolver = "2"
 

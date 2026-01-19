@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "xtask")]
+#[command(name = "ng-gateway-xtask")]
 #[command(about = "Task runner for ng-gateway project", long_about = None)]
 struct Cli {
     #[command(subcommand)]

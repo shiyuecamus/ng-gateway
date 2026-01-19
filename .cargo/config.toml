@@ -2,7 +2,9 @@
 
 [alias]
 # XTask aliases for common build tasks
-xtask = "run --package xtask --"
+xtask = "run --package ng-gateway-xtask --"
+# Optional: explicit alias matching the crate name.
+ng-gateway-xtask = "run --package ng-gateway-xtask --"
 build-with-drivers = "xtask build --profile release"
 deploy-drivers = "xtask deploy --profile release"
 
