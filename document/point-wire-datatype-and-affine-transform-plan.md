@@ -1,614 +1,313 @@
-# Point `wire_data_type` + Affine Transform（scale + offset + negate）重构计划（破坏性变更版）
+# Point / ActionParameter：`data_type` 作为 wire 语义 + `Transform`（含 scale/offset/negate/TransformDatatype）重构计划（破坏性变更版）
 
-> 目标：把 **“逻辑类型（data_type）”** 与 **“wire/内存布局类型（wire_data_type）”** 彻底拆开，并将缩放从“仅乘 scale”升级为**仿射变换**（`scale + offset + negate`），用于 uplink 工程量换算与 downlink 逆变换写入。
+> 目标：把“内存布局类型（wire）”与“逻辑类型 + 工程量换算（transform）”彻底解耦，并统一到 Point 与 Action Parameter 两条链路上。
 >
-> **约束（按你的要求）**：本计划 **不考虑兼容旧函数/旧 API/旧容错**，允许一次性重构与删除。
+> **硬约束**：本文不考虑兼容旧函数/旧 API/旧容错，允许一次性重构与删除。
 
 ---
 
-## 1. 最终数据模型（明确语义）
+## 1. 最终模型：语义与计算规则（最佳实践口径）
 
-### 1.1 Point 字段语义（全局统一）
+### 1.1 核心语义（必须写死）
 
 - **`data_type: DataType`**
 
-  - **语义**：逻辑数据类型。
-  - **硬约束（术语统一）**：本文中 **`logical_dt == data_type`**（northward 输出 `NGValue` 的类型、UI 校验与展示的类型、写入 API 的类型）。
+  - **语义**：**wire_data_type**（内存布局/协议源类型）。
+  - 例：Modbus Holding Register 两字节的无符号整型就是 `UInt16`；四字节 IEEE754 就是 `Float32`。
 
-- **`wire_data_type: Option<DataType>`**
+- **`transform: Option<Transform>`（Point 与 ActionParameter 都要有）**
 
-  - **语义**：驱动 decode/encode 使用的 wire/内存布局类型。
-  - **运行时解析规则**：`wire_dt = wire_data_type.unwrap_or(data_type)`（Option 只是表达“跟随逻辑类型”，不是兼容旧 API 的手段）。
+  - **语义**：逻辑层变换（类型转换 + 仿射换算）。
+  - `transform=None`：逻辑类型默认 **跟随 wire**；不做数值仿射。
 
-- **`scale: Option<f64>` / `offset: Option<f64>` / `negate: bool`**
-  - **语义**：对数值型点应用仿射变换（uplink）与逆变换（downlink）。
+- **`TransformDatatype`（建议命名：`data_type` 或 `logical_data_type`，本文用 `logical_dt` 表示）**
+  - **语义**：**逻辑数据类型**（northward 输出 `NGValue` 的类型、UI 校验与展示的类型、写入 API 的类型）。
+  - **规则**：`logical_dt = transform.datatype.unwrap_or(wire_dt)`（其中 `wire_dt == point.data_type`）。
 
-### 1.2 统一换算公式（uplink）
+### 1.2 Transform 结构（建议）
 
-对数值型（`DataType::is_numeric()`）：
+为保持最小复杂度但覆盖现场需求，本期仅支持仿射 + 逻辑类型：
 
-\[
-y = \text{negate?}(-(x \cdot s + o)):(x \cdot s + o)
-\]
+- **Transform**
+  - **datatype**: `Option<DataType>`（逻辑类型；None 表示跟随 wire）
+  - **scale**: `Option<f64>`（默认为 1.0）
+  - **offset**: `Option<f64>`（默认为 0.0）
+  - **negate**: `bool`（默认为 false）
 
-- `x`: 按 `wire_dt` decode 的原始值（中间态统一 `f64`）
-- `s`: `scale.unwrap_or(1.0)`
-- `o`: `offset.unwrap_or(0.0)`
-- `y`: 逻辑值，最终装箱为 `data_type` 的 `NGValue`
+> 说明：把旧 `scale` **完全纳入 transform**，Point/Parameter 不再单独保存 `scale` 字段（破坏性变更）。
 
-非数值型（Boolean/String/Binary/Timestamp）：不应用 affine（保持协议语义）。
+### 1.3 Uplink（采集上行）统一算法
 
-### 1.3 downlink 逆变换（必须实现闭环）
+给定：
 
-对数值型：
+- `wire_dt = point.data_type`
+- `logical_dt = transform.datatype.unwrap_or(wire_dt)`（transform 可能为 None）
 
-1. 若 `negate=true`：`y = -y`
-2. `x = (y - o) / s`（`s==0` ⇒ 配置错误，拒绝写）
-3. 按 `wire_dt` 编码写入设备（整数 wire 采用 `round()` 并做范围检查）
+流程：
 
----
+1. **Decode（wire）**：按 `wire_dt` 从协议数据解码得到原始值 `x`
+2. **Transform（可选）**：仅当 `wire_dt` 与 `logical_dt` 都是数值类时：
+   - \(y = x \cdot s + o\)，若 `negate=true` 则 \(y = -y\)
+3. **Coerce（logical）**：将 `y` 装箱为 `NGValue(logical_dt)`
+4. **Bounds**：`min_value/max_value` 作用在逻辑值 \(y\) 上
 
-## 2. 破坏性变更清单（删除/重命名/签名变更）
+### 1.4 Downlink（写入下行）统一算法（闭环必须）
 
-### 2.1 SDK（强制改动点）
+写入请求传入的是 **逻辑类型** `NGValue(logical_dt)`：
 
-- **删除**：`ValueCodec::apply_scale(value, scale)`（仅乘法，语义过窄）
-- **删除**：所有仅带 `scale` 的 `coerce_*_to_value(...)` 入口（避免双轨 API）
-- **新增/替换**：统一仿射版本（示例命名，具体可按你团队习惯调整）
-  - `ValueCodec::apply_affine(value: f64, scale: Option<f64>, offset: Option<f64>, negate: bool) -> f64`
-  - `ValueCodec::coerce_bool_to_value(value, expected, scale, offset, negate)`（bool 通常忽略 affine，但签名统一可减少分支）
-  - `ValueCodec::coerce_f64_to_value(value, expected, scale, offset, negate)`
-  - `ValueCodec::coerce_u64_to_value(value, expected, scale, offset, negate)`
-  - `ValueCodec::coerce_i64_to_value(value, expected, scale, offset, negate)`
-
-### 2.2 Southward trait（必须一次性升级）
-
-修改 `ng-gateway-sdk/src/southward/mod.rs` 的 `RuntimePoint`：
-
-- **新增必需方法**（不提供 default impl，强制所有驱动点实现一致语义）
-  - `fn wire_data_type(&self) -> Option<DataType>;`
-  - `fn offset(&self) -> Option<f64>;`
-  - `fn negate(&self) -> bool;`
-
-> 仍保留 `fn data_type(&self) -> DataType; fn scale(&self) -> Option<f64>;`，但所有 codec/driver 必须切换到 affine 版本。
-
-### 2.3 Web/API/UI（不保留旧字段定义）
-
-- `NewPoint/UpdatePoint/PointInfo`：必须新增并暴露 `wireDataType/offset/negate`
-- UI（`ng-gateway-ui/apps/web-antd`）：PointForm 必须渲染并提交新字段；导入模板必须支持新列
+1. `validate_datatype(logical_dt)`
+2. Bounds（逻辑值）
+3. **inverse transform（若启用 transform 且数值型）**
+   - 若 `negate=true`：`y = -y`
+   - 若 `scale == 0`：拒绝写（配置错误）
+   - \(x = (y - o) / s\)
+4. **Encode（wire）**：按 `wire_dt` 编码写入设备（整数 wire 采用 `round()` 并范围检查）
 
 ---
 
-## 3. 仓库级改造点（非驱动）
+## 2. 数据结构落库与 API（Point + Action）
 
-### 3.1 DB migration（必须）
+### 2.1 Point（DB 是结构化列；API/SDK 是 Transform struct）
 
-`point` 表新增列：
+当前 `point` 表已有列：`data_type`, `scale` 等。新方案为破坏性重构：
 
-- `wire_data_type SMALLINT NULL`
-- `offset DOUBLE NULL`
-- `negate BOOLEAN NOT NULL DEFAULT 0`
+- **保留列名 `data_type`，但语义改为 wire_dt**
+- **删除列 `scale`（或至少从业务语义上废弃）**
+- 新增一组“transform 列”（对应 Transform struct）：
+  - `transform_data_type SMALLINT NULL`（逻辑类型）
+  - `transform_scale DOUBLE NULL`
+  - `transform_offset DOUBLE NULL`
+  - `transform_negate BOOLEAN NOT NULL DEFAULT 0`
 
-新增 migration 文件并注册（不改历史 create_table）：
+并在 API/SDK 上呈现为：
 
-- `ng-gateway-storage/src/migration/m20260120_000002_alter_point_add_wire_and_affine.rs`
-- `ng-gateway-storage/src/migration/mod.rs` 注册
+- `transform: Option<Transform>`
 
-### 3.2 Models / Repository / Domain
+> 为什么 Point 不直接存 JSON：point 是高频、需要分页过滤/展示/导入导出，结构化列更可控。
 
-需要把字段贯穿到所有层（这里仅列“必须改的文件”）：
+### 2.2 ActionParameter（inputs 已是 JSON，直接扩展 JSON 结构）
 
-- `ng-gateway-models/src/entities/point.rs`
-- `ng-gateway-models/src/domain/point.rs`
-- `ng-gateway-repository/src/point.rs`（主要是 partial model / select 字段覆盖）
-- `ng-gateway-web/src/api/v1/point.rs`（入参/出参结构自然跟随 domain）
-- `ng-gateway-sdk/src/southward/model.rs`（`PointModel` 新增字段）
+`action.inputs` 目前是 JSON（`Parameters(Vec<Parameter>)`），因此 Parameter 直接扩展字段即可：
 
-### 3.3 Core 索引元数据（PointMeta）
-
-`ng-gateway-core/src/southward/manager.rs` 目前构建 `PointMeta { data_type, scale, ... }`（供 northward/monitor 等用）。
-
-- **必须新增**：`wire_data_type/offset/negate`
-- **必须明确**：`PointValue.value.data_type()` 与 `PointMeta.data_type`（逻辑）一致；`wire_data_type` 仅用于 southward codec/driver
+- `Parameter.data_type`：语义改为 wire_dt（与 point 同口径）
+- 新增 `Parameter.transform: Option<Transform>`
+- 同理：UI/导入模板需要支持 `param_transform_*` 字段（见第 3 节）
 
 ---
 
-## 4. 逐驱动重构清单（优化/重构/删除点逐项列明）
+## 3. SDK 级重构（删除旧 API，统一 Transform）
 
-> 本节是核心：每个驱动列出“改哪些文件、删哪些函数、重构哪些路径、要移除哪些容错”。
+### 3.1 新增公共类型：`Transform`
 
-### 4.1 Modbus（`ng-gateway-southward/modbus`）——最重构、收益最大
+在 `ng-gateway-sdk` 定义 Transform（供 southward + web/ui schema + 运行时复用）：
 
-#### 4.1.1 需要新增字段（点模型）
+- `ng-gateway-sdk/src/southward/types.rs` 或新文件 `ng-gateway-sdk/src/transform.rs`
 
-- `modbus/src/types.rs`
-  - `ModbusPoint` 增加：`wire_data_type: Option<DataType>`, `offset: Option<f64>`, `negate: bool`
-  - `impl RuntimePoint for ModbusPoint`：实现新增 trait 方法
+### 3.2 ValueCodec 重构（强制统一入口）
 
-#### 4.1.2 codec 重构（删除旧容错、拆 decode 与 coerce）
+**删除**：
 
-- `modbus/src/codec.rs`
-  - **删除**：`ModbusCodec::parse_register_value(words, data_type, byte_order, word_order, scale)`
-    - 必须移除现有 “len=2 也能读 Float32 / len=8 也能读 UInt16”等 smart-cast/容错分支（这是类型歧义根源）
-  - **新增**（建议）：
-    - `decode_registers_to_number(words, wire_dt, byte_order, word_order) -> DriverResult<f64>`
-      - 依据 `wire_dt` 严格要求 word 数：
-        - `Int16/UInt16`：1 word
-        - `Int32/UInt32/Float32`：2 words
-        - `Int64/UInt64/Float64/Timestamp`：4 words（Timestamp 是否允许由协议决定）
-      - 长度不匹配：直接 `ConfigurationError`（拒绝容错）
-    - `decode_registers_to_ng_value(words, wire_dt, logical_dt, byte_order, word_order, scale, offset, negate) -> DriverResult<NGValue>`
-      - 内部：`decode -> ValueCodec::coerce_f64/u64/i64_to_value(..., logical_dt, scale, offset, negate)`
-  - **写入相关删除/替换**：
-    - `encode_registers_from_value(&NGValue, data_type, ...)` 必须改成以 `wire_dt` 为准：
-      - 新签名：`encode_registers_from_value(&NGValue /* logical */, wire_dt, byte_order, word_order, quantity, scale, offset, negate)`
-      - 流程：`logical NGValue -> (y) -> inverse affine -> x -> encode as wire_dt`
+- `ValueCodec::apply_scale(value, scale)`
+- 所有仅带 `scale` 的 `coerce_*_to_value(value, expected, scale)` 入口
 
-#### 4.1.3 driver 重构（collect + write）
+**新增**（推荐两层 API）：
 
-- `modbus/src/driver.rs`
+- **Transform 纯函数**
 
-  - collect 时：用 `wire_dt` 解码寄存器，再输出 `data_type` 的 `NGValue`
-    - 替换调用点：`ModbusCodec::parse_register_value(...)` → `decode_registers_to_ng_value(..., p.wire_data_type.unwrap_or(p.data_type), p.data_type, p.scale, p.offset, p.negate)`
-  - write 时：
-    - `validate_datatype(point.data_type)` 保持（逻辑校验）
-    - 由 `encode_registers_from_value(... wire_dt ...)` 做逆变换 + 编码
+  - `ValueCodec::apply_transform_f64(x: f64, t: &Transform) -> f64`
+  - `ValueCodec::invert_transform_f64(y: f64, t: &Transform) -> Option<f64>`（scale==0 返回 None）
 
-- `modbus/src/planner.rs`
+- **Typed coercion（最终装箱）**
+  - `ValueCodec::coerce_bool_to_value(value: bool, logical_dt: DataType, t: Option<&Transform>)`
+  - `ValueCodec::coerce_f64_to_value(value: f64, logical_dt: DataType, t: Option<&Transform>)`
+  - `ValueCodec::coerce_u64_to_value(value: u64, logical_dt: DataType, t: Option<&Transform>)`
+  - `ValueCodec::coerce_i64_to_value(value: i64, logical_dt: DataType, t: Option<&Transform>)`
 
-  - **必须改动**：所有计算 quantity/word_len 的逻辑必须使用 `wire_dt`（不是 `data_type`）
-  - action 参数同理（如果 action 参数未来也需要 affine，可复用同样设计）
+> 关键点：coerce 的 “expected” 始终是 **logical_dt**，不再混入 wire 语义。
 
-- `modbus/tests/*`
-  - 更新测试用例：新增 `wire_data_type/offset/negate` 字段；移除依赖旧容错行为的测试
+### 3.3 RuntimePoint / RuntimeParameter trait（破坏性升级）
 
-#### 4.1.4 行级/调用点级变更（旧调用 → 新调用）
+`ng-gateway-sdk/src/southward/mod.rs`：
 
-- **`ng-gateway-southward/modbus/src/codec.rs:L168-L174`**
-
-  - **旧**：`pub fn parse_register_value(words: &[u16], data_type: DataType, byte_order, word_order, scale: Option<f64>) -> DriverResult<NGValue>`
-  - **新**：删除该函数；新增：
-    - `decode_registers_to_number(words, wire_dt, byte_order, word_order) -> DriverResult<f64>`
-    - `decode_registers_to_ng_value(words, wire_dt, logical_dt, byte_order, word_order, scale, offset, negate) -> DriverResult<NGValue>`
-
-- **`ng-gateway-southward/modbus/src/driver.rs:L341-L347`**（Registers → Telemetry）
-
-  - **旧**：
-    - `ModbusCodec::parse_register_value(slice, p.data_type, ..., p.scale)`
-  - **新**：
-    - `ModbusCodec::decode_registers_to_ng_value(slice, p.wire_data_type().unwrap_or(p.data_type()), p.data_type(), self.inner.config.byte_order, self.inner.config.word_order, p.scale(), p.offset(), p.negate())`
-
-- **`ng-gateway-southward/modbus/src/driver.rs:L366-L372`**（Registers → Attribute）
-
-  - **旧**：
-    - `ModbusCodec::parse_register_value(slice, p.data_type, ..., p.scale)`
-  - **新**：同上（仅 push 到 `attribute_values`）
-
-- **`ng-gateway-southward/modbus/src/driver.rs:L721-L727`**（write_point：register write encode）
-
-  - **旧**：
-    - `ModbusCodec::encode_registers_from_value(&value, point.data_type, byte_order, word_order, point.quantity.max(1))`
-  - **新**：
-    - `ModbusCodec::encode_registers_from_value(&value /* logical */, point.wire_data_type.unwrap_or(point.data_type), byte_order, word_order, point.quantity.max(1), point.scale, point.offset, point.negate)`
-
-- **`ng-gateway-southward/modbus/src/planner.rs:L133-L139`**（WriteSingleRegister action）
-
-  - **旧**：
-    - `ModbusCodec::encode_registers_from_value(value, mp.data_type, byte_order, word_order, 1)`
-  - **新**：
-    - `ModbusCodec::encode_registers_from_value(value /* logical */, mp.wire_data_type.unwrap_or(mp.data_type), byte_order, word_order, 1, mp.scale, mp.offset, mp.negate)`
-
-- **`ng-gateway-southward/modbus/src/planner.rs:L154-L160`**（WriteMultipleRegisters action）
-  - **旧**：
-    - `ModbusCodec::encode_registers_from_value(value, mp.data_type, byte_order, word_order, mp.quantity.max(1))`
-  - **新**：
-    - `ModbusCodec::encode_registers_from_value(value /* logical */, mp.wire_data_type.unwrap_or(mp.data_type), byte_order, word_order, mp.quantity.max(1), mp.scale, mp.offset, mp.negate)`
+- `RuntimePoint::data_type()` 语义改为 **wire_dt**
+- 新增：
+  - `fn transform(&self) -> Option<&Transform>;`
+- `RuntimeParameter::data_type()` 语义改为 **wire_dt**
+- 新增：
+  - `fn transform(&self) -> Option<&Transform>;`
 
 ---
 
-### 4.2 S7（`ng-gateway-southward/s7`）——已有 typed value，主要做 affine + wire_dt 断言/映射
+## 4. 逐驱动重构清单（含行级/调用点级替换清单）
 
-#### 4.2.1 点模型字段
+> 说明：下面的“行号”以当前仓库快照为准（你刚才 grep/打开的版本）。如果后续代码移动，需重新跑一次 grep 校准。
 
-- `s7/src/types.rs`
-  - `S7Point` 增加：`wire_data_type/offset/negate`
-  - `RuntimePoint` 新方法实现
+### 4.1 Modbus（`ng-gateway-southward/modbus`）
 
-#### 4.2.2 codec 重构（集中在 `S7Codec`）
+#### 4.1.1 设计要点
 
-- `s7/src/codec.rs`
-  - **重构**：`S7Codec::to_value(value: &S7DataValue, expected: DataType, scale: Option<f64>)`
-  - **新签名**：
-    - `to_value(value: &S7DataValue, wire_dt: DataType, logical_dt: DataType, scale, offset, negate) -> Option<NGValue>`
-  - **实现语义**：
-    - 从 `S7DataValue` 按 **wire_dt** 提取 `x`（例如 Word/DWord/Real/Int 等），类型不匹配直接返回 None（配置错误信号）
-    - `x -> affine -> y -> coerce to logical_dt`
-  - **写路径**：
-    - `S7Codec::from_value(v: &NGValue, ts: S7TransportSize)` 之前必须先把逻辑值做 inverse affine → 按 wire_dt coerce，再转成对应 transport size 的 `S7DataValue`
+- `point.data_type` == wire_dt（严格决定寄存器宽度与符号）
+- `logical_dt` 来自 `point.transform.datatype`（或 None 跟随 wire）
+- 删除 smart-cast/长度容错（这类容错是歧义根源）
 
-#### 4.2.3 driver 重构点
+#### 4.1.2 行级/调用点级变更（旧 → 新）
 
-- `s7/src/driver.rs`
-  - collect 时：从 session/planner 取得 `S7DataValue` 后，调用新版 `S7Codec::to_value(...wire_dt/logical_dt...)`
-  - write 时：`validate_datatype(point.data_type)` 保持（逻辑）；编码时使用 `wire_dt + inverse affine`
+- **`ng-gateway-southward/modbus/src/driver.rs:L341-L347`（Telemetry）** 与 **`L366-L372`（Attribute）**
 
-#### 4.2.4 行级/调用点级变更（旧调用 → 新调用）
+  - **旧**：`ModbusCodec::parse_register_value(slice, p.data_type, ..., p.scale)`
+  - **新**：
+    - wire decode：`wire_dt = p.data_type()`
+    - `logical_dt = p.transform().and_then(|t| t.datatype).unwrap_or(wire_dt)`
+    - `ModbusCodec::decode_registers_to_ng_value(slice, wire_dt, logical_dt, ..., p.transform())`
 
-- **`ng-gateway-southward/s7/src/codec.rs:L22-L26`**
+- **`ng-gateway-southward/modbus/src/driver.rs:L721-L727`（write_point encode）**
 
-  - **旧**：`pub fn to_value(value: &S7DataValue, expected: DataType, scale: Option<f64>) -> Option<NGValue>`
-  - **新**：`pub fn to_value(value: &S7DataValue, wire_dt: DataType, logical_dt: DataType, scale: Option<f64>, offset: Option<f64>, negate: bool) -> Option<NGValue>`
-    - 内部所有 `ValueCodec::coerce_*_to_value(*, expected, scale)` 调整为传入 `(logical_dt, scale, offset, negate)`，并在进入 coerce 前用 `wire_dt` 从 `S7DataValue` 提取 `x`
+  - **旧**：`encode_registers_from_value(&value, point.data_type, ..., point.quantity.max(1))`
+  - **新**：`encode_registers_from_value(&value /* logical */, wire_dt=point.data_type, ..., point.quantity.max(1), point.transform)`
+
+- **`ng-gateway-southward/modbus/src/planner.rs:L133-L139` / `L154-L160`**
+  - **旧**：`encode_registers_from_value(value, mp.data_type, ...)`（mp.data_type 之前被当逻辑）
+  - **新**：`encode_registers_from_value(value /* logical */, wire_dt=mp.data_type /* wire */, ..., mp.transform)`
+
+#### 4.1.3 codec 必须删除/新增
+
+- **删除**：`modbus/src/codec.rs:parse_register_value(...)`（旧签名：data_type=逻辑 + len 容错）
+- **新增**：
+  - `decode_registers_to_scalar(words, wire_dt, byte_order, word_order) -> DriverResult<DecodedScalar>`
+  - `decode_registers_to_ng_value(words, wire_dt, logical_dt, byte_order, word_order, t: Option<&Transform>) -> DriverResult<NGValue>`
+  - `encode_registers_from_value(value: &NGValue /* logical */, wire_dt, byte_order, word_order, quantity, t: Option<&Transform>) -> DriverResult<Vec<u16>>`
+
+---
+
+### 4.2 S7（`ng-gateway-southward/s7`）
 
 - **`ng-gateway-southward/s7/src/driver.rs:L158`**
+
   - **旧**：`S7Codec::to_value(&v, p.data_type(), p.scale())`
-  - **新**：`S7Codec::to_value(&v, p.wire_data_type().unwrap_or(p.data_type()), p.data_type(), p.scale(), p.offset(), p.negate())`
+  - **新**：
+    - `wire_dt = p.data_type()`（现在表示 wire）
+    - `logical_dt = p.transform().and_then(|t| t.datatype).unwrap_or(wire_dt)`
+    - `S7Codec::to_value(&v, wire_dt, logical_dt, p.transform())`
+
+- **`ng-gateway-southward/s7/src/codec.rs:L22-L26`**
+  - **旧签名**：`to_value(value, expected /*逻辑*/, scale)`
+  - **新签名**：`to_value(value, wire_dt, logical_dt, t: Option<&Transform>)`
 
 ---
 
-### 4.3 MC（三菱 3E，`ng-gateway-southward/mc`）——强依赖 word_len，必须改为 wire_dt 驱动
-
-#### 4.3.1 点模型字段
-
-- `mc/src/types.rs`
-  - `McPoint` 增加：`wire_data_type/offset/negate`
-
-#### 4.3.2 word_len / typed_api / codec 重构
-
-- `mc/src/driver.rs`
-
-  - `words_for_data_type(data_type, string_len_bytes)` **必须改为** `words_for_data_type(wire_dt, string_len_bytes)`（读写长度以 wire 为准）
-  - collect 逻辑里 `specs.push(TypedPointReadSpec { data_type: point.data_type, ... })`
-    - 必须改为传入 **wire_dt**（用于读多少字、如何解码）
-
-- `mc/src/typed_api.rs`
-
-  - `TypedPointReadSpec` / `McReadItemTyped` 需要携带 `logical_dt` 与 affine 参数（或者直接在 driver 层做二次转换）
-  - 推荐：typed_api 只做 **wire decode**，输出一个 `DecodedScalar`（或 `f64`）供 driver 层 affine+coerce
-
-- `mc/src/codec.rs`
-  - `encode_typed(data_type, value: &NGValue)` 的 `data_type` 参数必须变为 **wire_dt**
-  - 写入点值时：`NGValue(logical) -> inverse affine -> encode(wire_dt)`
-
-#### 4.3.3 行级/调用点级变更（旧调用 → 新调用）
-
-- **`ng-gateway-southward/mc/src/factory.rs:L85-L103`**
-
-  - **旧**：构造 `McPoint { data_type: point.data_type, ..., scale: point.scale, ... }`
-  - **新**：构造 `McPoint { data_type: point.data_type /* logical_dt */, wire_data_type: point.wire_data_type, scale: point.scale, offset: point.offset, negate: point.negate, ... }`
+### 4.3 MC（三菱 3E，`ng-gateway-southward/mc`）
 
 - **`ng-gateway-southward/mc/src/driver.rs:L179`**
 
-  - **旧**：`fn words_for_data_type(data_type: DataType, string_len_bytes: Option<u16>)`
-  - **新**：`fn words_for_data_type(wire_dt: DataType, string_len_bytes: Option<u16>)`
+  - `words_for_data_type(...)` 参数语义变为 `wire_dt`
 
-- **`ng-gateway-southward/mc/src/driver.rs:L300-L308`**（collect：bit device）
+- **`ng-gateway-southward/mc/src/driver.rs:L300-L308` / `L336-L342`**
 
-  - **旧**：`TypedPointReadSpec { data_type: point.data_type, ... }`
-  - **新**：`TypedPointReadSpec { data_type: point.wire_data_type.unwrap_or(point.data_type), ... }`
+  - **旧**：`TypedPointReadSpec { data_type: point.data_type, ... }`（之前混逻辑）
+  - **新**：`TypedPointReadSpec { data_type: point.data_type /* wire */, ... }`
+  - 逻辑输出类型从 `point.transform.datatype` 决定（在 decode 后 coerce 时使用）
 
-- **`ng-gateway-southward/mc/src/driver.rs:L327`**（collect：word_len 计算）
-
-  - **旧**：`let word_len = words_for_data_type(point.data_type, point.string_len_bytes)?;`
-  - **新**：`let word_len = words_for_data_type(point.wire_data_type.unwrap_or(point.data_type), point.string_len_bytes)?;`
-
-- **`ng-gateway-southward/mc/src/driver.rs:L336-L342`**（collect：word/dword spec）
-
-  - **旧**：`TypedPointReadSpec { data_type: point.data_type, ... }`
-  - **新**：`TypedPointReadSpec { data_type: point.wire_data_type.unwrap_or(point.data_type), ... }`
-
-- **`ng-gateway-southward/mc/src/driver.rs:L658`**（write_point：word_len 计算）
-  - **旧**：`let word_len = words_for_data_type(point.data_type, point.string_len_bytes)?;`
-  - **新**：`let word_len = words_for_data_type(point.wire_data_type.unwrap_or(point.data_type), point.string_len_bytes)?;`
+- **`ng-gateway-southward/mc/src/driver.rs:L327` / `L658`**
+  - word_len 计算必须用 wire_dt（即 `point.data_type`）
 
 ---
 
-### 4.4 IEC104（`ng-gateway-southward/iec104`）——消息本身带类型，重点是 affine+logical_dt 输出
+### 4.4 IEC104（`ng-gateway-southward/iec104`）
 
-#### 4.4.1 点模型字段
+IEC104 的 wire 类型多由 ASDU TypeID 决定；`point.data_type` 作为 wire_dt 更适合做一致性断言：
 
-- `iec104/src/types.rs`
-  - `Iec104Point` 增加：`wire_data_type/offset/negate`
-  - `RuntimePoint` 新方法实现
-
-#### 4.4.2 driver 重构（核心改动点清单）
-
-- `iec104/src/driver.rs`
-  - 当前大量分支直接 `ValueCodec::coerce_*_to_value(v, meta.data_type, meta.scale)`：
-    - 必须替换为 affine 版本：`coerce_*_to_value(v, meta.data_type, meta.scale, meta.offset, meta.negate)`
-  - `wire_data_type` 的作用：
-    - 对 IEC104：wire 类型更多来自 ASDU TypeID；`wire_dt` 可用于 **断言配置一致性**（例如 TypeID=Float 但 wire_dt 配成 Int，直接告警/丢弃）
-    - 即：增加 `assert_wire_dt_matches_typeid(meta.wire_dt, type_id)`，不匹配视作配置错误
-
-#### 4.4.3 行级/调用点级变更（旧调用 → 新调用）
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L239-L243`**（BitString）
-
-  - **旧**：`ValueCodec::coerce_u64_to_value(v as u64, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_u64_to_value(v as u64, meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L274-L278`**（StepPosition）
-
-  - **旧**：`ValueCodec::coerce_i64_to_value(v.value() as i64, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_i64_to_value(v.value() as i64, meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L309-L311`**（SinglePoint）
-
-  - **旧**：`ValueCodec::coerce_bool_to_value(v, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_bool_to_value(v, meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L342-L346`**（DoublePoint）
-
-  - **旧**：`ValueCodec::coerce_u64_to_value(v as u64, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_u64_to_value(v as u64, meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L377-L379`**（MeasuredValueFloat）
-
-  - **旧**：`ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L410-L412`**（MeasuredValueNormal）
-
-  - **旧**：`ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L443-L445`**（MeasuredValueScaled）
-
-  - **旧**：`ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/iec104/src/driver.rs:L476-L478`**（IntegratedTotals）
-  - **旧**：`ValueCodec::coerce_i64_to_value(v, meta.data_type, meta.scale)`
-  - **新**：`ValueCodec::coerce_i64_to_value(v, meta.data_type, meta.scale, meta.offset, meta.negate)`
+- 目前调用点（示例）：
+  - `ng-gateway-southward/iec104/src/driver.rs:L239-L243` 等多处 `ValueCodec::coerce_*`
+  - **旧**：`coerce_*(v, meta.data_type, meta.scale)`
+  - **新**：
+    - `wire_dt = meta.data_type`（现在是 wire）
+    - `logical_dt = meta.transform.datatype.unwrap_or(wire_dt)`
+    - `ValueCodec::coerce_*(v, logical_dt, meta.transform.as_ref())`
 
 ---
 
-### 4.5 OPC UA（`ng-gateway-southward/opcua`）——Variant 为 wire，coerce 输出逻辑类型
+### 4.5 OPC UA（`ng-gateway-southward/opcua`）
 
-#### 4.5.1 点模型字段
-
-- `opcua/src/types.rs`
-  - `OpcUaPoint` 增加：`wire_data_type/offset/negate`
-
-#### 4.5.2 codec 重构
-
-- `opcua/src/codec.rs`
-  - `coerce_variant_value(value, expected, scale)`：
-    - 新签名：`coerce_variant_value(value, logical_dt, scale, offset, negate)`
-    - 在 numeric path 上调用 affine 版本的 ValueCodec
-  - `wire_data_type`：
-    - 可选：若 `wire_data_type` 存在，则在 `numeric_as_f64` 前做 Variant 类型断言（例如期待 UInt16 却拿到 Double），不匹配报错/丢弃
-
-#### 4.5.3 driver 重构
-
-- `opcua/src/driver.rs`
-  - collect：替换 `OpcUaCodec::coerce_variant_value(variant, p.data_type(), p.scale())`
-    - 改为传入 `p.data_type()`（逻辑）+ `p.offset()` + `p.negate()`
-  - write：保持 `validate_datatype(point.data_type)`（逻辑），Variant 编码仍以逻辑类型写入（OPC UA 通常写逻辑类型即可）
-
-#### 4.5.4 行级/调用点级变更（旧调用 → 新调用）
-
-- **`ng-gateway-southward/opcua/src/codec.rs:L38-L42`**
-
-  - **旧**：`coerce_variant_value(value: &Variant, expected: DataType, scale: Option<f64>)`
-  - **新**：`coerce_variant_value(value: &Variant, logical_dt: DataType, scale: Option<f64>, offset: Option<f64>, negate: bool)`
-    - 其中 `logical_dt == expected == point.data_type`
-
-- **`ng-gateway-southward/opcua/src/codec.rs:L45-L46`**（Boolean）
-
-  - **旧**：`ValueCodec::coerce_bool_to_value(*b, expected, scale)`
-  - **新**：`ValueCodec::coerce_bool_to_value(*b, logical_dt, scale, offset, negate)`
-
-- **`ng-gateway-southward/opcua/src/codec.rs:L60`**（String numeric fallback）
-
-  - **旧**：`ValueCodec::coerce_f64_to_value(n, expected, scale)`
-  - **新**：`ValueCodec::coerce_f64_to_value(n, logical_dt, scale, offset, negate)`
-
-- **`ng-gateway-southward/opcua/src/codec.rs:L77-L79`**（numeric fast path）
-
-  - **旧**：`ValueCodec::coerce_f64_to_value(n, expected, scale).or_else(|| ValueCodec::coerce_bool_to_value(n != 0.0, expected, scale))`
-  - **新**：同样替换为 affine 版本（传入 `logical_dt/scale/offset/negate`）
-
-- **`ng-gateway-southward/opcua/src/driver.rs:L394-L395`**（周期性 read）
+- **`ng-gateway-southward/opcua/src/driver.rs:L394-L395`**
 
   - **旧**：`OpcUaCodec::coerce_variant_value(variant, p.data_type(), p.scale())`
-  - **新**：`OpcUaCodec::coerce_variant_value(variant, p.data_type(), p.scale(), p.offset(), p.negate())`
+  - **新**：
+    - `wire_dt = p.data_type()`（wire）
+    - `logical_dt = p.transform().and_then(|t| t.datatype).unwrap_or(wire_dt)`
+    - `OpcUaCodec::coerce_variant_value(variant, wire_dt, logical_dt, p.transform())`
 
-- **`ng-gateway-southward/opcua/src/types.rs:L430-L432`**（订阅回调 meta.coerce）
-  - **旧**：`OpcUaCodec::coerce_variant_value(variant, self.point.data_type, self.point.scale)`
-  - **新**：`OpcUaCodec::coerce_variant_value(variant, self.point.data_type /* logical_dt */, self.point.scale, self.point.offset, self.point.negate)`
+- **订阅回调**
+  - `ng-gateway-southward/opcua/src/types.rs:L430-L432` 的 `PointMeta::coerce()` 同样改造
 
 ---
 
-### 4.6 EtherNet/IP（`ng-gateway-southward/ethernet-ip`）——PlcValue 为 wire，输出逻辑类型
+### 4.6 EtherNet/IP（`ng-gateway-southward/ethernet-ip`）
 
-#### 4.6.1 点模型字段
-
-- `ethernet-ip/src/types.rs`
-  - `EthernetIpPoint` 增加：`wire_data_type/offset/negate`
-
-#### 4.6.2 codec/driver 重构
-
-- `ethernet-ip/src/codec.rs`
-
-  - `to_ng_value(value: PlcValue, expected: DataType, scale)`：
-    - 新签名：`to_ng_value(value: PlcValue, logical_dt: DataType, scale, offset, negate)`
-    - 各分支用 affine 版本 ValueCodec
-  - `wire_data_type`：
-    - 可选断言：如果配置了 `wire_data_type`，则校验 `PlcValue` 变体是否匹配（例如 wire=UInt16 却读到 LREAL，直接告警）
-
-- `ethernet-ip/src/driver.rs`
-  - collect：替换 `EthernetIpCodec::to_ng_value(plc_value, point.data_type, point.scale)`
-    - 改为传入 `offset/negate`
-  - write_point：如果你希望“写工程量到整型 tag”，则必须：
-    - `logical NGValue -> inverse affine -> coerce to wire_dt -> to_plc_value(wire_dt)`
-    - 否则 wire_dt 只是断言，不参与写入
-
-#### 4.6.3 行级/调用点级变更（旧调用 → 新调用）
-
-- **`ng-gateway-southward/ethernet-ip/src/codec.rs:L31-L35`**
-
-  - **旧**：`to_ng_value(value: PlcValue, expected: DataType, scale: Option<f64>)`
-  - **新**：`to_ng_value(value: PlcValue, logical_dt: DataType, scale: Option<f64>, offset: Option<f64>, negate: bool)`
-
-- **`ng-gateway-southward/ethernet-ip/src/codec.rs:L45-L55`**（PlcValue 数值分支）
-
-  - **旧**：`ValueCodec::coerce_*_to_value(..., expected, scale)`
-  - **新**：`ValueCodec::coerce_*_to_value(..., logical_dt, scale, offset, negate)`
-
-- **`ng-gateway-southward/ethernet-ip/src/codec.rs:L65-L66`**（Timestamp 数值 fallback）
-
-  - **旧**：`ValueCodec::coerce_f64_to_value(n, DataType::Timestamp, scale)`
-  - **新**：`ValueCodec::coerce_f64_to_value(n, DataType::Timestamp, scale, offset, negate)`
-
-- **`ng-gateway-southward/ethernet-ip/src/driver.rs:L191-L195`**（collect uplink）
+- **`ng-gateway-southward/ethernet-ip/src/driver.rs:L191-L195`**
 
   - **旧**：`EthernetIpCodec::to_ng_value(plc_value, point.data_type, point.scale)`
-  - **新**：`EthernetIpCodec::to_ng_value(plc_value, point.data_type /* logical_dt */, point.scale, point.offset, point.negate)`
-
-- **`ng-gateway-southward/ethernet-ip/src/driver.rs:L360`**（write_point）
-  - **旧**：`EthernetIpCodec::to_plc_value(&value, point.data_type)`
   - **新**：
-    - 若需要 wire 写入：`value(logical) -> inverse affine -> coerce to wire_dt -> EthernetIpCodec::to_plc_value(&wire_value, wire_dt)`
-    - 若仅逻辑写入：保持逻辑类型写入（不使用 wire_dt）
+    - `wire_dt = point.data_type`（wire）
+    - `logical_dt = point.transform.datatype.unwrap_or(wire_dt)`
+    - `EthernetIpCodec::to_ng_value(plc_value, wire_dt, logical_dt, point.transform.as_ref())`
+
+- **`ng-gateway-southward/ethernet-ip/src/driver.rs:L360`（write_point）**
+  - **旧**：`EthernetIpCodec::to_plc_value(&value, point.data_type)`（写逻辑类型到 PLC）
+  - **新**：
+    - 先校验 `value` 是 logical_dt
+    - inverse transform 得到 wire 值
+    - `to_plc_value(&wire_value, wire_dt)`
 
 ---
 
-### 4.7 DNP3（`ng-gateway-southward/dnp3`）——handler 使用 PointMeta，集中在 meta 与 codec
+### 4.7 DNP3（`ng-gateway-southward/dnp3`）
 
-#### 4.7.1 元数据结构改造
-
-- `dnp3/src/types.rs`
-  - `PointMeta` 增加：`wire_data_type/offset/negate`
-  - `Dnp3Point` 增加同样字段
-
-#### 4.7.2 codec 重构
-
-- `dnp3/src/codec.rs`
-  - `bool_to_value/f64_to_value/u64_to_value` 全部改为 affine 版本
-  - `octets_to_value`（binary/string）保持不变
-
-#### 4.7.3 handler/driver 连接处
-
-- `dnp3/src/handler.rs`
-  - `buffer_with_meta_lookup` 的闭包仍返回 `Option<NGValue>`，但内部应使用新版 Dnp3Codec（带 offset/negate）
-
-#### 4.7.4 行级/调用点级变更（旧调用 → 新调用）
-
-- **`ng-gateway-southward/dnp3/src/types.rs:PointMeta`**
-
-  - **旧字段**：`data_type`, `scale`
-  - **新字段**：新增 `wire_data_type`, `offset`, `negate`（用于 codec 仿射）
-
-- **`ng-gateway-southward/dnp3/src/codec.rs:L20-L34`**
-
-  - **旧**：
-    - `ValueCodec::coerce_bool_to_value(value, meta.data_type, meta.scale)`
-    - `ValueCodec::coerce_f64_to_value(value, meta.data_type, meta.scale)`
-    - `ValueCodec::coerce_u64_to_value(value, meta.data_type, meta.scale)`
-  - **新**：三处都替换为 affine 版本（传入 `meta.offset/meta.negate`）
-
-- **`ng-gateway-southward/dnp3/src/handler.rs:L128`**（BinaryInput）
-
-  - **旧**：`|meta| Dnp3Codec::bool_to_value(value.value, meta)`
-  - **新**：保持函数名不变即可（内部已升级为 affine）；若你选择删除 `Dnp3Codec` 的薄封装，则改为直接调用 `ValueCodec::*_to_value(..., meta.data_type, meta.scale, meta.offset, meta.negate)`
-
-- **`ng-gateway-southward/dnp3/src/handler.rs:L152`**（DoubleBitBinaryInput）
-
-  - **旧**：`|meta| Dnp3Codec::u64_to_value(v as u64, meta)`
-  - **新**：同上
-
-- **`ng-gateway-southward/dnp3/src/handler.rs:L188` / `L206`**（Counter / FrozenCounter）
-
-  - **旧**：`|meta| Dnp3Codec::u64_to_value(value.value as u64, meta)`
-  - **新**：同上
-
-- **`ng-gateway-southward/dnp3/src/handler.rs:L224` / `L242`**（AnalogInput / AnalogOutput）
-  - **旧**：`|meta| Dnp3Codec::f64_to_value(value.value, meta)`
-  - **新**：同上
+- `dnp3/src/types.rs:PointMeta` 需要新增 `transform: Option<Transform>`（或展开字段）
+- `dnp3/src/codec.rs:L20-L34`：coerce 使用逻辑类型 + transform
+- `dnp3/src/handler.rs:L128/L152/L188/L206/L224/L242`：调用不变或按新签名替换（取决于是否保留 Dnp3Codec 薄封装）
 
 ---
 
-### 4.8 DL/T 645（`ng-gateway-southward/dlt645`）——写点已实现，必须闭环支持 inverse affine
+### 4.8 DL/T 645（`ng-gateway-southward/dlt645`）
 
-#### 4.8.1 点模型字段
-
-- `dlt645/src/types.rs`
-  - `Dl645Point` 增加：`wire_data_type/offset/negate`
-
-#### 4.8.2 uplink codec 改造
-
-- `dlt645/src/codec.rs`
-  - `decode_point_value` 内所有 `ValueCodec::coerce_f64_to_value(v, point.data_type, point.scale)`
-    - 替换为 affine 版本（传入 `point.offset/point.negate`）
-  - `wire_data_type`：
-    - DL/T 645 的 wire 是 BCD/协议字段；`wire_dt` 可作为“解码后 raw 值类型断言”（比如强制走 u64/i64/f64 路径），但不建议影响报文解析长度（长度由 DI/decimals 决定）
-
-#### 4.8.3 downlink（write_point）闭环
-
-- `dlt645/src/driver.rs`
-  - 目前 `write_point` 直接把 `NGValue(logical)` 交给 `encode_parameter_value`
-  - 必须改为：`logical -> inverse affine -> raw -> encode`
-    - 在 `Dl645Codec::encode_parameter_value` 前，执行 inverse affine 并把值转换成 wire_dt（若 wire_dt 配置为空则跟随 data_type）
-
-#### 4.8.4 行级/调用点级变更（旧调用 → 新调用）
-
-- **`ng-gateway-southward/dlt645/src/driver.rs:L658`**（collect uplink）
-
-  - **旧**：`Dl645Codec::decode_point_value(version, point, &resp)`
-  - **新**：保持函数名不变即可，但 `decode_point_value` 内部必须升级为 affine（见下）
-
-- **`ng-gateway-southward/dlt645/src/codec.rs:L74-L93`**（Float/Int/UInt 三分支）
-
-  - **旧**：`ValueCodec::coerce_f64_to_value(v, point.data_type, point.scale)`
-  - **新**：`ValueCodec::coerce_f64_to_value(v, point.data_type /* logical_dt */, point.scale, point.offset, point.negate)`
-
-- **`ng-gateway-southward/dlt645/src/codec.rs:L100-L102`**（Boolean）
-
-  - **旧**：`ValueCodec::coerce_bool_to_value((b & 0x01) != 0, DataType::Boolean, None)`
-  - **新**：`ValueCodec::coerce_bool_to_value((b & 0x01) != 0, DataType::Boolean, None, None, false)`（签名统一）
-
-- **`ng-gateway-southward/dlt645/src/driver.rs:L839-L846`**（write_point：datatype guard）
-  - **旧**：`value.validate_datatype(point.data_type)`
-  - **新**：保持逻辑校验不变，但写入前必须执行 inverse affine（新增代码位置建议在该校验之后、`handle_write_data` 之前）
+- `dlt645/src/codec.rs:L74-L93`：coerce 改为逻辑类型 + transform
+- `dlt645/src/driver.rs:L839-L846`：write_point 校验应改为校验 logical_dt（来自 transform）
 
 ---
 
-### 4.9 CJ/T 188（`ng-gateway-southward/cjt188`）——仅 uplink；写点未实现
+### 4.9 CJ/T 188（`ng-gateway-southward/cjt188`）
 
-#### 4.9.1 点模型字段
-
-- `cjt188/src/types.rs`
-  - `Cjt188Point` 增加：`wire_data_type/offset/negate`
-
-#### 4.9.2 uplink 解析处改造
-
-- `cjt188/src/codec/di_parser.rs`
-  - 当前循环中对每个 point 执行：
-    - `ValueCodec::coerce_f64/u64/i64_to_value(v, point.data_type, point.scale)`
-  - 必须替换为 affine 版本（传入 `point.offset/point.negate`）
-  - `wire_data_type`：
-    - 该协议的 wire 值由 DI schema 决定（BCD、u16 状态等），`wire_dt` 建议作为断言/选择分支（DecodedScalar::U64/I64/F64 的选择与 wire_dt 不一致时告警）
-
-#### 4.9.3 行级/调用点级变更（旧调用 → 新调用）
-
-- **`ng-gateway-southward/cjt188/src/codec/di_parser.rs:L236-L243`**
-  - **旧**：
-    - `ValueCodec::coerce_f64_to_value(v, point.data_type, point.scale)`
-    - `ValueCodec::coerce_u64_to_value(v, point.data_type, point.scale)`
-    - `ValueCodec::coerce_i64_to_value(v, point.data_type, point.scale)`
-  - **新**：三处都替换为 affine 版本（传入 `point.offset/point.negate`）
+- `cjt188/src/codec/di_parser.rs:L236-L243`：coerce 改为逻辑类型 + transform
 
 ---
 
-## 5. 示例（配置与结果）
+## 5. UI / 导入模板字段（破坏性变更）
 
-### 示例：现场（U16=201 → 20.1）
+### 5.1 Point 表单
 
-- `data_type`：`Float64`
-- `wire_data_type`：`UInt16`
-- `scale`：`0.1`
-- `offset`：`None`
-- `negate`：`false`
+- 原 `dataType` 字段现在表示：**wire_data_type**
+- 新增：`transform` 分组
+  - `transform.datatype`（TransformDatatype / 逻辑类型）
+  - `transform.scale`
+  - `transform.offset`
+  - `transform.negate`
 
-uplink：`201 -> 201*0.1 = 20.1`，输出 `NGValue::Float64(20.1)`
+### 5.2 Action Parameter 表单
+
+- `param.data_type` 现在表示：wire_dt
+- 新增 `param.transform.*` 同上
+
+---
+
+## 6. 示例（现场场景）
+
+### 示例：寄存器 U16=201，逻辑值 20.1
+
+- `point.data_type`（wire_dt）：`UInt16`
+- `point.transform`：
+  - `datatype`: `Float64`
+  - `scale`: `0.1`
+  - `offset`: `0`
+  - `negate`: `false`
+
+uplink：decode 得到 `x=201` → transform 得到 `y=20.1` → 输出 `NGValue::Float64(20.1)`
