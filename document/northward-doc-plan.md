@@ -1,312 +1,302 @@
-# 北向插件文档结构与产品级落地计划（v3.0）
+# NG Gateway 北向插件文档（产品级）规划稿
 
-本文档用于规划并落地 `ng-gateway-ui/docs/src/northward` 的**产品级北向插件文档**：让用户不需要看源码，也能清楚知道：
-
-- **如何使用北向插件**：怎么创建/配置 App、怎么订阅设备、怎么上线与回滚
-- **怎么验证**：如何确认“连接成功/数据上云/下行可用/不会丢得离谱”
-- **需要注意什么**：弱网、队列背压、平台限流、TLS、幂等、顺序、容量预算
-- **遇到问题怎么排查**：从症状到根因的路径 + 具体命令/指标/日志字段
-
-> 范式参考：`docs/src/southward/*` 的写法（配置模型 + 必读注意点 + 排障），并与现有北向 `overview.md` 的术语/语义保持一致。
+> 目标：输出一套“语义正确、可交付、产品级”的北向（Northward）文档信息架构与页面设计，让用户能**按文档完成使用、配置、验证、排障与扩展**。
+>
+> 本规划稿基于当前代码实现进行约束（Kafka/Pulsar/ThingsBoard/OPC UA Server），对未实现/不支持的能力将明确标注，并统一指向路线图：`/guide/other/roadmap`（侧边栏配置：`ng-gateway-ui/docs/.vitepress/config/zh.mts` 第 204 行）。
 
 ---
 
-## 0. 文档范围与硬边界（避免“写了但做不到”）
+## 0. 读者与范围
 
-### 0.1 本轮文档要覆盖的“用户旅程”
+### 0.1 目标读者
 
-1. **选型**：我该选 Kafka / Pulsar / ThingsBoard / MQTT / OPC UA Server？
-2. **安装启用**：插件是否存在？版本匹配吗？依赖（Broker/平台）可达吗？
-3. **配置**：App 配置、AppSubscription（订阅设备/路由）、RetryPolicy、QueuePolicy、TLS
-4. **验证**：连接状态、数据是否到达、是否有丢弃/积压、下行命令是否可闭环
-5. **上线与运维**：容量预算、告警、升级/回滚、弱网与平台限流的处置
-6. **排障**：连接不上、鉴权失败、发布失败、队列满、延迟变大、CPU/内存异常
+- **集成工程师**：把网关数据上送到 Kafka/Pulsar/ThingsBoard 或对外暴露 OPC UA Server。
+- **运维/现场工程师**：关心弱网、队列、重试、吞吐、告警、排障。
+- **二次开发者**：要扩展插件、扩展 payload、做声明式映射或未来的 Lua Transform。
 
-### 0.2 明确暂不支持（或仅 Roadmap）的能力
+### 0.2 文档覆盖范围（本版本）
 
-文档中必须以 **`::: warning` 明示**，并在路线图中可追踪：
+- **已实现并需要写成产品级**：
+  - Kafka（uplink + downlink）
+  - Pulsar（uplink + downlink）
+  - ThingsBoard（uplink + RPC/attributes 等下行链路 + Provision + 凭据持久化）
+  - OPC UA Server（把网关点位暴露为 OPC UA 节点 + 写回）
+  - 通用：`RetryPolicy`、`QueuePolicy`、模板渲染（Handlebars）、payload（EnvelopeJson/Kv/TimeseriesRows/MappedJson）、downlink（EnvelopeJson/MappedJson + AckPolicy/FailurePolicy）
+- **侧边栏已预留但当前 repo 未看到对应北向插件 crate 的条目**（需要在文档中明确“当前版本暂不支持/尚未落地”）：
+  - MQTT / WebSocket / HTTP（`ng-gateway-ui/docs/.vitepress/config/zh.mts` 的北向菜单里存在，但 `ng-gateway-northward/` 下未发现相应 crate）
 
-- **磁盘断网续传（Disk WAL + 回放）**：当前 `overview.md` 已标注 Roadmap；需要补齐“产品级最佳实践（现阶段怎么做）+ 路线图条目（未来怎么做）”
-- **更精细的队列满降级策略**（按数据类型/优先级/时效性自动降级：丢弃、采样、按 last 合并等）：需要“现状说明 + 最佳实践 + Roadmap”
-- **HTTP/WebSocket 北向连接器**：`zh.mts` 侧边栏已预留，但若实现/文档未完成，需要给出“暂不支持页 + 路线图”
+### 0.3 非目标（当前版本不承诺）
 
----
-
-## 1. 读者画像（决定文档怎么写）
-
-- **集成工程师（主要读者）**：关心“怎么配 + 怎么验证 + 出问题怎么办”
-- **运维/现场工程师**：关心“告警指标 + 排障路径 + 回滚与风险”
-- **开发者**：关心“插件边界、失败语义、队列与背压协作、配置 schema”
-
-写作原则：
-
-- **默认读者是集成工程师**：每页必须能做到“复制配置 + 执行验证”
-- **高级概念放到“概念/最佳实践”**：不要把新手挡在第一屏
-- **所有关键能力都要给“现状 vs Roadmap”**：避免误用与售前误导
+::: warning 当前版本限制（需要在文档中显式写清楚）
+- **断网续传（磁盘 WAL / 持久化队列）**：core 目前只提供**内存 buffer**（`QueuePolicy.buffer_enabled`），无磁盘落盘与回放。
+- **满队列精细化降级**：目前仅支持 `dropPolicy=Discard/Block`（core），以及 OPC UA Server 的 `DiscardOldest/DiscardNewest/BlockWithTimeout`（插件内更新队列）。未实现“时间采样、按 latest 合并、按窗口聚合、分级丢弃”等更复杂策略。
+- **ThingsBoard Protobuf**：配置项存在但实现为 `TODO`，当前会返回错误“Protobuf format not yet implemented”。
+:::
 
 ---
 
-## 2. 北向术语与语义（统一心智模型）
+## 1. 现状能力清单（按实现落地）
 
-文档中统一使用以下概念，并在第一次出现时链接到 `northward/overview.md`：
+> 本节用于决定“文档该怎么写”，不是最终给用户看的文档正文；落地时会把关键信息拆进各页面。
 
-- **Plugin（插件）**：Kafka/Pulsar/ThingsBoard/MQTT/OPC UA Server
-- **App（北向应用实例）**：一个 Plugin 的一个运行实例（可多实例：多租户/多 topic/隔离策略）
-- **AppSubscription（应用订阅）**：App 订阅哪些设备/点位；并用 `priority` 表达资源紧张时优先级
-- **RetryPolicy**：指数退避重试（连接重试/发送失败重试）
-- **QueuePolicy**：队列容量、队列满策略、断链缓冲（目前以内存为主，磁盘为 Roadmap）
+### 1.1 Core（AppActor）层面的通用语义
+
+- **每个 Northward App 独立 Actor**：独立数据队列（Gateway→Plugin）与事件通道（Plugin→Gateway），互相隔离。
+- **QueuePolicy（内存队列 + 可选内存 buffer）**：
+  - `capacity`：Gateway→Plugin 主队列容量（bounded mpsc）。
+  - `dropPolicy`：
+    - `Discard`：队列满丢弃当前条。
+    - `Block`：阻塞等待 `blockDuration`，超时则丢弃。
+  - `bufferEnabled/bufferCapacity/bufferExpireMs`：当插件未连接时，数据进入**内存 FIFO buffer**；连接恢复时尝试 flush 到主队列（flush 时如果主队列满，会把剩余数据重新放回 buffer）。
+  - **无磁盘 WAL**：buffer 只在内存，重启/掉电会丢失。
+- **RetryPolicy**：用于插件 supervisor 的连接重试/退避（Kafka/Pulsar/ThingsBoard 均使用 gateway-level backoff 构建器）。
+
+### 1.2 通用 payload 与模板（SDK）
+
+- **Topic/Key 模板引擎**：Handlebars `{{var}}`，非 strict（缺失键→空字符串），内置 `{{default x "fallback"}}` helper。
+- **UplinkPayloadConfig**：
+  - `envelope_json`（默认）
+  - `kv { includeMeta }`
+  - `timeseries_rows { includeMeta }`
+  - `mapped_json { config }`：JMESPath 表达式映射（compile once, apply many）。
+- **MappedJson 输入视图（稳定 shape）**：`{schema_version,event_kind,ts_ms,app:{...},device:{...},data:{...}}`
+  - 这决定了文档里要给用户一份**可复制的字段表 + 示例输入**。
+
+### 1.3 Kafka 插件（northward/kafka）
+
+- **Uplink**：topic/key 支持模板；headers 会携带 RenderContext kv；producer 支持 idempotence、acks、compression、batch/linger/timeouts、max.in.flight 等。
+- **Downlink**：
+  - 精确 topic 订阅（不支持模板/通配/regex）。
+  - group.id = `ng-gateway-plugin-{app_id}`，`enable.auto.commit=false`，`auto.offset.reset=latest`。
+  - payload 支持 `EnvelopeJson` 或 `MappedJson`（带 filter：json pointer / property / key）。
+  - `AckPolicy` + `FailurePolicy` 决定 commit 行为。
+
+### 1.4 Pulsar 插件（northward/pulsar）
+
+- **Uplink**：topic/key 模板；properties = RenderContext kv；partition_key = key；支持可选 batching（默认 false）+ compression（默认 LZ4）。
+- **Downlink**：
+  - subscription name = `ng-gateway-plugin-{app_id}`，SubType=Shared。
+  - topics 为 route table 的精确 topic 列表（无 wildcard）。
+  - 按 `AckPolicy/FailurePolicy` 做 ack / nack。
+
+### 1.5 ThingsBoard 插件（northward/thingsboard）
+
+- **连接模式**：None / UsernamePassword / Token / X509Certificate / Provision。
+- **Provision**：
+  - `/provision/request` & `/provision/response`，支持总超时、最大重试次数、重试间隔。
+  - 凭据持久化：extension manager `provision_credentials`。
+- **Uplink（JSON）**：
+  - Telemetry：`v1/gateway/telemetry`，payload 形状按 ThingsBoard Gateway API。
+  - Attributes：`v1/gateway/attributes`。
+  - Connect/Disconnect：`v1/gateway/connect` / `v1/gateway/disconnect`。
+- **Downlink/交互**：订阅 attributes/RPC/gateway rpc 等 topic，通过 router 分发到 handlers，并转为 `NorthwardEvent`。
+- **Protobuf**：配置枚举存在，但当前实现会返回错误（需要文档明确告知）。
+
+### 1.6 OPC UA Server 插件（northward/opcua-server）
+
+- **对外暴露 OPC UA Server**（与 southward 的 OPC UA driver 不同：这是 northward 插件）。
+- **节点结构**：
+  - AddressSpace 根：`Objects/NG-Gateway/{channel}/{device}/{point}`
+  - NodeId（String）：`ns=1;s={channel}.{device}.{point_key}`（对组件进行 sanitize：仅保留 `[A-Za-z0-9._-]`，其余替换为 `-`）
+  - Variable 的 `DataType` 与 `AccessLevel` 由点位 meta 映射。
+- **更新队列**：插件内部 update queue（batch 级）支持 `DiscardOldest/DiscardNewest/BlockWithTimeout`，默认容量 10_000、默认丢弃 oldest（偏实时新鲜度）。
+- **写回**：
+  - OPC UA Write → `NorthwardEvent::WritePoint`（带 timeout_ms）
+  - 等待 `WritePointResponse` 再回写 status；错误映射到 OPC UA `StatusCode`。
+- **安全**：
+  - endpoints：`no_security` 与 `basic256sha256_sign_encrypt`（默认 endpoint 目前是 `no_security`）
+  - `trusted_client_certs` 支持 PEM 或 base64 DER，会 materialize 到 `./pki/plugin/{plugin_id}/trusted/`
 
 ---
 
-## 3. 目标信息架构（IA）：目录树 + 导航对齐
+## 2. 文档信息架构（IA）与页面树（建议落地到 VitePress）
 
-### 3.1 最终目录树（建议落地）
+### 2.1 北向文档的“产品级导航”建议
+
+**目标**：用户按“从 0 到 1”的路径阅读；同时保留“查字典式参考”页面；每个插件页都能独立闭环（配置→验证→注意事项→排障）。
+
+建议把北向拆成三层：
+
+1) **总览/快速开始/通用语义（跨插件）**  
+2) **协议与数据格式（跨插件）**：Envelope/Kv/TimeseriesRows/MappedJson/模板变量/Downlink 语义  
+3) **插件分册（按平台）**：Kafka / Pulsar / ThingsBoard / OPC UA Server
+
+### 2.2 建议的 docs 文件结构（`ng-gateway-ui/docs/src/northward/`）
+
+> 说明：当前仅有 `northward/overview.md`。以下是完整建议树；你确认后我再把这些页面逐个创建并填充。
 
 ```text
-ng-gateway-ui/docs/src/northward/
-├── overview.md                         # 已有：北向架构/通用策略/现状与 Roadmap（补充链接与落地指引）
-├── quickstart.md                       # 新增：10 分钟跑通（创建 App + 订阅 + 验证）
-├── configuration.md                    # 新增：通用配置模型（App/AppSubscription/RetryPolicy/QueuePolicy）
-├── verification.md                     # 新增：验证清单（连通性/上行/下行/指标/日志）
-├── troubleshooting.md                  # 新增：北向专项排障（连接/鉴权/限流/队列满/延迟）
-├── best-practices/
-│   ├── capacity-planning.md            # 新增：容量预算（队列容量/带宽/CPU/磁盘（Roadmap））
-│   ├── offline-and-weak-network.md     # 新增：弱网最佳实践（现阶段做法 + 断网续传 Roadmap）
-│   ├── queue-full-strategies.md        # 新增：队列满策略（现状 + 规划：丢弃/采样/last 合并等）
-│   ├── security-and-secrets.md         # 新增：TLS/证书/凭证管理（引用 ops/tls.md）
-│   └── multi-app-isolation.md          # 新增：多 App 隔离（关键数据/遥测拆分、不同策略）
-├── kafka/
-│   ├── index.md                        # 新增：Kafka 插件使用（配置/验证/排障）
-│   ├── auth.md                         # 新增：SASL/SSL 认证矩阵（可选拆分）
-│   └── tuning.md                       # 新增：吞吐/顺序/幂等/压缩/批处理（生产建议）
-├── pulsar/
-│   ├── index.md                        # 新增：Pulsar 插件使用（配置/验证/排障）
-│   └── tuning.md                       # 新增：producer batching、compression、topic 策略
-├── thingsboard/
-│   ├── index.md                        # 新增：ThingsBoard 插件使用（连接/映射/验证）
-│   ├── mapping.md                      # 新增：Telemetry/Attributes 映射与命名约定
-│   └── rpc.md                          # 新增：下行 RPC 闭环（与网关 Action/WritePoint 对齐）
-├── opcua/
-│   ├── index.md                        # 新增：OPC UA Server 使用（地址空间/连通性/验证）
-│   └── security.md                     # 新增：安全策略/证书/UaExpert 验证
-├── mqtt/
-│   ├── index.md                        # 新增：MQTT 插件使用（Topic/认证/TLS/验证）
-│   └── best-practices.md               # 新增：Topic 规划、Retain/LWT、QoS 选择、限流
-├── http.md                             # 新增（占位）：若当前不支持则写清楚 + 路线图
-└── websocket.md                        # 新增（占位）：若当前不支持则写清楚 + 路线图
+docs/src/northward/
+  overview.md                      # 已存在：需要补齐与本规划一致的链接与限制说明
+  quick-start.md                   # 从 0 到 1：创建 App/订阅/验证链路
+  concepts.md                      # Plugin/App/AppSubscription、uplink/downlink、数据面/控制面
+  policies/
+    retry-policy.md                # RetryPolicy 语义、默认值、最佳实践
+    queue-policy.md                # QueuePolicy/内存 buffer 现状与限制（无磁盘）
+  templates/
+    handlebars.md                  # 模板语法（Handlebars + default helper），变量表
+    variables.md                   # RenderContext 变量、时间分区变量 yyyy/MM/dd/HH
+  payload/
+    overview.md                    # 四种上行 payload 选型指南
+    envelope-json.md               # 协议包络（现有 overview.md 已引用：需要补文件）
+    kv.md                          # Kv 形状与 includeMeta
+    timeseries-rows.md             # TimeseriesRows 形状与 includeMeta
+    mapped-json.md                 # JMESPath 映射：输入视图/规则/陷阱/性能
+    mapped-json-jmespath.md        # 常用 JMESPath cheat sheet（面向用户）
+  downlink/
+    overview.md                    # 下行总览：事件种类、topic 精确订阅限制、ack/failure
+    envelope-json.md               # 下行 EnvelopeJson：WritePoint/Command/RpcResponse
+    mapped-json.md                 # 下行 mapped_json：filter 的使用方式（JsonPointer/Key/Property）
+  best-practices/
+    architecture.md                # 多 App 隔离、容量预算、关键数据与遥测拆分
+    performance.md                 # 吞吐调优：批处理、压缩、topic/partition 策略
+    reliability.md                 # 弱网策略：Retry/Queue/buffer 现状与 roadmap
+  troubleshooting/
+    overview.md                    # 排障索引（按症状）
+    common-errors.md               # 常见错误码/日志关键字/定位路径
+    verify-checklist.md            # “怎么验证”清单：连通性/主题/消息格式/消费确认
+  kafka/
+    index.md                       # Kafka 插件总览与快速配置
+    connection-security.md         # PLAINTEXT/SSL/SASL、TLS/SASL 参数与踩坑
+    uplink.md                      # uplink topics/keys/headers/payload
+    partitions.md                  # 分区策略（key）、有序性、幂等与吞吐
+    downlink.md                    # downlink topic 精确订阅、group、Ack/Failure、offset 行为
+    examples.md                    # 典型场景配置示例（含 JSON）
+    troubleshooting.md             # Kafka 专属排障（认证、ACL、超时、QueueFull、消费组）
+    assets/
+      placeholder.txt              # 截图占位目录（你后续替换）
+  pulsar/
+    index.md
+    connection-auth.md
+    uplink.md
+    partitions.md                  # partition_key 与 topic 规划
+    downlink.md                    # Shared subscription + ack/nack + filter
+    examples.md
+    troubleshooting.md
+    assets/placeholder.txt
+  thingsboard/
+    index.md
+    connection-modes.md            # None/Token/UserPass/X509/Provision
+    provision.md                   # Provision 深入：profile/key/secret、凭据存储、重试
+    uplink-format.md               # TB Gateway Telemetry/Attributes/Connect/Disconnect payload 形状
+    rpc-and-attributes.md          # RPC/Attributes 下行：topic、payload、事件映射
+    protobuf-status.md             # 明确说明：Protobuf 当前不支持（指向 roadmap）
+    examples.md
+    troubleshooting.md
+    assets/placeholder.txt
+  opcua-server/
+    index.md
+    node-mapping.md                # NodeId/层级/命名 sanitize 规则（必须稳定）
+    security.md                    # endpoints、trusted_client_certs、PKI 目录、证书导入
+    writeback.md                   # Write → WritePoint → Response → StatusCode 映射
+    performance.md                 # update queue 与 drop policy 调优
+    troubleshooting.md
+    assets/placeholder.txt
+  not-supported/
+    mqtt.md                        # 若保留侧边栏入口：明确当前版本不支持
+    websocket.md
+    http.md
 ```
 
-### 3.2 与侧边栏导航的对齐（`docs/.vitepress/config/zh.mts`）
-
-当前 `zh.mts` 已有北向条目：Kafka / Pulsar / Thingsboard / OPC UA / MQTT / WebSocket / HTTP（见侧边栏 `北向` 分组）。
-
-本计划建议：
-
-- **保持现有导航不动**（先把页面补齐），避免用户链接失效
-- 对 **HTTP/WebSocket**：
-  - 若实现/文档暂未完成：落地 `northward/http.md` 与 `northward/websocket.md` 为“暂不支持说明页”
-  - 同时更新路线图（见第 7 章）
-
----
-
-## 4. 每一页要写什么（必须可用、可验证、可排障）
-
-> 这部分是落地写作的“验收标准”。每一页完成后，读者应该能在不求助的情况下走完关键路径。
-
-### 4.1 `northward/quickstart.md`（10 分钟跑通）
-
-内容结构建议：
-
-- **前置条件**：网关已安装；至少 1 个 Southward Channel + Device + Point 能产生数据
-- **步骤 1：创建北向 App**
-  - UI 操作步骤（截图占位）
-  - 最小可用配置示例（JSON）
-- **步骤 2：创建 AppSubscription**
-  - 选择设备/过滤规则/priority（截图占位）
-- **步骤 3：验证**
-  - App 状态 = Connected（截图占位）
-  - 平台侧看到数据（Kafka/Pulsar/MQTT/ThingsBoard 示例各给 1 个最短验证命令）
-  - 关键指标/日志确认“没有持续背压”
-
-截图占位（示例）：
-
-- `![创建北向 App（占位）](./assets/quickstart/app-create.png)`
-- `![配置 AppSubscription（占位）](./assets/quickstart/subscription-create.png)`
-- `![平台侧消费验证（占位）](./assets/quickstart/consume-verify.png)`
-
-### 4.2 `northward/configuration.md`（通用配置模型）
-
-必须包含：
-
-- **App / AppSubscription 的字段解释**（与 `overview.md` 保持一致）
-- **RetryPolicy** 参数表 + 推荐默认值解释（含“什么时候不要无限重试”）
-- **QueuePolicy** 参数表 + 推荐默认值解释
-- **字段命名规则**：对外 JSON camelCase vs 内部 snake_case（`overview.md` 已提及）
-
-必须用 `::: tip` 强调：
-
-::: tip 推荐做法：拆分 App 做隔离
-把“关键数据（告警/事件/控制面）”和“高频遥测”拆到不同 App，分别配置不同的 `queuePolicy` 与 `retryPolicy`，避免慢消费者拖垮全局。
-:::
-
-### 4.3 `northward/verification.md`（怎么验证：连得上、发得出、收得到）
-
-必须覆盖三层验证：
-
-- **网关侧**：App 状态、指标（队列深度/丢弃数/重试次数）、日志（鉴权失败/限流/超时）
-- **网络侧**：DNS/路由/端口/TLS
-- **平台侧**：最短消费/查看方式
-
-必须给出一个“验证清单”：
-
-- [ ] App 显示 Connected（或至少能自动重连）
-- [ ] 平台侧能看到新数据（不是历史缓存）
-- [ ] 队列深度在可控范围波动，不持续上涨
-- [ ] drops 为 0（或在预期范围内）且有解释
-
-::: warning 验证不要只看“能连上”
-只验证连接成功是不够的。必须同时验证：在业务峰值流量下，队列不会长期接近满、不会持续丢弃、延迟不会不可控增长。
-:::
-
-### 4.4 `northward/troubleshooting.md`（北向专项排障）
-
-这里要承接 `docs/src/ops/troubleshooting.md`，但聚焦北向“可操作”的细节。
-
-建议用 Mermaid 做 3 条排障树：
-
-1. **连接失败**：网络不可达 → TLS → 鉴权 → 平台限流/ACL
-2. **连接正常但没数据**：订阅错误 → 路由/过滤 → payload/schema → 平台消费组/offset
-3. **延迟变大/丢数据**：队列满 → 插件 buffer full（见第 6 章）→ 降级策略 → 容量预算/拆分 App
-
-必须包含一个“常见错误码/日志”表格（按插件类型分别列）：
-
-- 鉴权失败（401/403/SASL auth failed）
-- TLS handshake failed / certificate verify failed
-- timeout / connection reset / broken pipe
-- rate limited / quota exceeded
-- queue full / backpressure applied（对应 `ng-gateway-sdk/src/northward/mod.rs` 的行为）
-
-### 4.5 `northward/best-practices/offline-and-weak-network.md`（弱网/断链最佳实践）
-
-必须明确两段内容：
-
-- **现阶段（已支持）**：内存队列 + 重试/退避的最佳实践（怎么配、怎么验证、怎么告警）
-- **Roadmap（计划支持）**：磁盘 WAL + 回放的产品规划（为什么需要、用户能获得什么、会暴露哪些配置）
-
-::: warning 当前版本的断网续传是 Roadmap
-当前版本的可靠性主要依赖 **内存队列（QueuePolicy）+ 重试（RetryPolicy）**。磁盘 WAL 断网续传/回放属于 Roadmap，请不要将其作为强承诺能力依赖。
-:::
-
-### 4.6 `northward/best-practices/queue-full-strategies.md`（队列满策略：现状 + 规划）
-
-这页是你特别点名的关键页：要同时写清楚 **当前行为** 与 **产品级策略规划**。
-
-必须引用现状（面向用户语言，不需要贴源码）：
-
-- 北向插件内部存在 **bounded queue**；当队列满时会返回背压错误（`Plugin buffer full - backpressure applied`）。
-- 这意味着“上游继续推数据 ≠ 系统会无限缓存”；系统会显式暴露拥塞信号。
-
-产品级策略规划（文档里先说清楚，后续实现再落地）：
-
-- **策略 A：Discard（丢弃）**（默认建议用于高频遥测）
-  - 丢弃“最不值钱”的数据（通常是过期遥测）
-- **策略 B：Sample（采样）**
-  - 当队列深度超过阈值时，按比例降低上报频率（例如 1/2、1/4）
-- **策略 C：Coalesce by last（按 last 合并）**
-  - 以 `(device_id, point_key, type)` 为 key，只保留最新值（适合“状态类遥测”，不适合“事件类”）
-- **策略 D：Priority preserve（按优先级保留）**
-  - 报警/事件/控制面响应优先保留；遥测优先降级
-
-必须讲清楚每种策略的“代价/边界”：
-
-- 采样会影响统计准确性
-- last 合并会丢掉变化过程（只能保留最终态）
-- 优先级需要“数据类型可判定”与指标可观测
-
----
-
-## 5. 插件分册：每个插件页面必须包含的固定章节
-
-为了“语义正确 + 可运营”，每个插件 `*/index.md` 都按相同结构写（用户不需要重新学习）：
-
-1. **适用场景**：什么时候用它、替代方案是什么
-2. **前置条件**：平台准备项（Topic/Token/证书/ACL/Consumer）
-3. **最小配置示例**：一份可复制的 App.config + retryPolicy + queuePolicy
-4. **订阅与路由**：AppSubscription 怎么配（至少 1 个示例）
-5. **验证**：平台侧最短验证方式（命令 + 截图占位）
-6. **常见问题**：鉴权/TLS/限流/顺序/幂等/消费组/offset（按插件特性）
-7. **最佳实践**：吞吐调优、Topic/Partition 规划、隔离与容量预算
-8. **安全建议**：TLS、凭证管理（引用 `ops/tls.md`）
-
-每个插件至少要有 1 张“平台侧验证截图占位”。
-
----
-
-## 6. 与代码行为对齐：队列满（`ng-gateway-sdk/src/northward/mod.rs`）需要怎么对用户讲
-
-### 6.1 现状需要在文档中明确的事实
-
-- 插件侧对 `process_data` 采用 **非阻塞入队**；当队列满时返回背压错误（`Plugin buffer full - backpressure applied`）。
-- 这不是“Bug”，是**系统自保护**：避免无限堆积导致 OOM。
-
-### 6.2 文档需要回答的三个问题（用户最关心）
-
-1. **队列为什么会满**：平台慢/断网/限流/配置不合理/单 App 承载了太多数据
-2. **满了会发生什么**：是否丢数据？是否阻塞？是否重试？如何观测？
-3. **我该怎么处理**：拆分 App、调整 QueuePolicy/RetryPolicy、启用采样/last 合并（Roadmap）、扩容平台/带宽
-
-::: tip 文档写法建议
-把“队列满”当成一个**可操作的系统状态**来讲：给阈值、给指标、给动作（立刻止血 + 长期治理）。
+::: tip 侧边栏调整建议（最小化）
+- 如果你希望“用户不要点进不存在的页面”，建议把当前侧边栏里未实现的 MQTT/WebSocket/HTTP 先移到 `not-supported/` 并明确写“Roadmap”，或临时从侧边栏隐藏。
+- 为保持与 `southward/*/index.md` 一致，建议北向插件也使用 `index.md` 形式，并把侧边栏 link 统一改成带 `/` 的路径（例如 `/northward/kafka/`）。
 :::
 
 ---
 
-## 7. 路线图（需要同步更新到 `docs/src/guide/introduction/roadmap.md`）
+## 3. 每类页面的“产品级写作模板”（落地时统一套用）
 
-当前路线图文件还是空的（`TODO`）。本轮文档规划需要至少补齐以下条目，并在北向 `overview.md`/最佳实践页中反向链接：
+> 这一部分是“写作规范 + 内容 checklist”，确保每页都能让用户独立闭环。
 
-- **北向磁盘断网续传（Disk WAL + 回放 + 限速）**
-  - 需求：弱网/断链/掉电不丢关键数据
-  - 关键点：落盘格式、目录、磁盘配额、回放速率上限、与实时链路隔离
-- **北向队列满智能降级**
-  - 丢弃/采样/last 合并/按优先级保留
-  - 必须配套指标：丢弃数、合并命中数、采样倍率、队列深度分位数
-- **HTTP / WebSocket 北向连接器**
-  - 若当前未生产可用：先给占位文档 + Roadmap 状态说明
+### 3.1 插件首页（`northward/<plugin>/index.md`）模板
+
+- **这是什么**：插件定位、适用场景、你会获得什么能力（uplink/downlink/写回等）。
+- **你需要准备什么**：依赖组件（Broker、证书、账号、topic 规划等）。
+- **最快跑通（10 分钟）**：
+  - 创建 App
+  - 配置最小字段（只填必填）
+  - 建立 AppSubscription
+  - 验证：如何看到消息（示例命令）
+  - 常见失败点（3~5 个）
+- **配置模型总览**：给一份“字段表 + 默认值 + 推荐值”。
+- **限制/不支持**：放在醒目的 `::: warning` 中（例如：topic 精确订阅、protobuf 不支持、无磁盘续传等）。
+
+### 3.2 通用策略（`RetryPolicy` / `QueuePolicy`）页面模板
+
+- **语义先行**：用 2~3 段话解释“为什么需要它”与“选错会怎样”。
+- **字段表**：字段名、类型、默认值、建议范围、错误后果。
+- **最佳实践**：
+  - 关键数据 vs 高频遥测拆分 App
+  - `Discard` vs `Block` 选择
+  - buffer 只适用于短时抖动（并明确“不是断网续传”）
+- **运维指标**：推荐监控的 counters/latency/queue depth（结合现有 ops 文档链接）。
+
+### 3.3 payload 协议页面模板（Envelope/Kv/TimeseriesRows/MappedJson）
+
+- **何时选它**（决策表）
+- **JSON 形状（示例）**：最少给 2 个例子：Telemetry & Attributes（或控制面）。
+- **字段语义**：schema_version、event_kind、ts_ms、device/app 元信息等。
+- **兼容性**：哪些字段稳定承诺、哪些可能扩展。
+- **性能注意事项**：字段名重复、对象大小、批量写入建议。
+- **常见坑**：时间戳单位、字符串/二进制编码、meta 开关对体积影响。
+
+### 3.4 downlink 页面模板（EnvelopeJson / MappedJson）
+
+- **事件类型**：WritePoint / CommandReceived / RpcResponseReceived（分别解释“它对应什么场景”）。
+- **topic 限制**：必须精确匹配（强约束）。
+- **ack/failure 语义**：AckPolicy=OnSuccess/Always/Never；FailurePolicy=Drop/Error（commit/ack/nack 行为）。
+- **安全建议**：topic 不承载敏感信息；鉴权/ACL；避免把 request_id 编进 topic。
+- **排障**：过滤器不匹配、payload decode 错、事件通道关闭等。
 
 ---
 
-## 8. 截图清单（统一占位，后续你替换即可）
+## 4. 截图规划（占位符清单）
 
-建议统一放到：`ng-gateway-ui/docs/src/northward/assets/`（按页面子目录组织）。
+> 你后续会自行截图替换；落地文档时我会在对应位置放 `![...](...)` 占位。
 
-- `assets/quickstart/app-create.png`：创建北向 App
-- `assets/quickstart/subscription-create.png`：配置 AppSubscription
-- `assets/quickstart/consume-verify.png`：平台侧看到数据
-- `assets/verification/app-status.png`：App 状态/连接状态
-- `assets/verification/metrics-queue.png`：队列深度/丢弃数指标面板
-- `assets/kafka/kcat-consume.png`：kcat 消费验证
-- `assets/mqtt/mosquitto-sub.png`：mosquitto_sub 验证
-- `assets/thingsboard/telemetry.png`：ThingsBoard 最新遥测
-- `assets/opcua/uaexpert.png`：UaExpert 节点树/变量值
+### 4.1 通用 UI（北向 App）
+
+- **创建北向 App**：App 列表页 + 新建弹窗/页面  
+  `<!-- TODO screenshot: northward-app-create -->`
+- **配置 RetryPolicy/QueuePolicy**：策略配置区域  
+  `<!-- TODO screenshot: northward-policy-config -->`
+- **AppSubscription 订阅设备**：选择设备/优先级/保存  
+  `<!-- TODO screenshot: northward-app-subscription -->`
+- **连接状态与错误信息**：Connected/Failed/last_error 展示  
+  `<!-- TODO screenshot: northward-connection-state -->`
+
+### 4.2 Kafka / Pulsar / ThingsBoard / OPC UA Server 专属
+
+- **Kafka**：topic/key/payload 配置区；消费验证截图  
+  `<!-- TODO screenshot: kafka-config -->` / `<!-- TODO screenshot: kafka-consume-verify -->`
+- **Pulsar**：service_url/auth/batching；消费验证截图  
+  `<!-- TODO screenshot: pulsar-config -->` / `<!-- TODO screenshot: pulsar-consume-verify -->`
+- **ThingsBoard**：Provision 配置、TB 后台 device profile/key/secret 配置、收到 telemetry 的平台界面  
+  `<!-- TODO screenshot: tb-provision-config -->` / `<!-- TODO screenshot: tb-ui-telemetry -->`
+- **OPC UA Server**：UAExpert 浏览树、读值、写值与返回状态  
+  `<!-- TODO screenshot: opcua-browse -->` / `<!-- TODO screenshot: opcua-write -->`
 
 ---
 
-## 9. 落地步骤与验收标准（写完就是“可交付”）
+## 5. Roadmap 对齐（需要在文档中明确链接）
 
-### 9.1 落地顺序（建议）
+### 5.1 本规划中明确“当前不支持/未来计划”的点
 
-1. `northward/quickstart.md`
-2. `northward/configuration.md` + `northward/verification.md`
-3. `northward/troubleshooting.md`
-4. `northward/best-practices/*`（弱网/队列满/容量预算/隔离/安全）
-5. 各插件分册：Kafka → MQTT → ThingsBoard → Pulsar → OPC UA
-6. `northward/http.md` / `northward/websocket.md`（占位或落地）
-7. 更新 `guide/introduction/roadmap.md`（同步 Roadmap）
+- **磁盘 WAL / 断网续传 / 回放**（产品级可靠性）
+- **满队列精细化策略**：时间采样、latest 合并、按数据类型优先级丢弃、按窗口聚合等
+- **二进制 payload（Protobuf/Avro）**：包括 Schema 管理、灰度双写等
+- **Lua Transform Sandbox（MappedJson 的下一步）**：参见 `document/ng-lua-transform-sandbox-design.md`
 
-### 9.2 验收标准（每页通用）
+### 5.2 文档内的统一指向
 
-- 有 **最小配置示例**（可复制）
-- 有 **验证步骤**（可执行）
-- 有 **常见问题与排查**（可操作）
-- 对 Roadmap 能力有 **明确 warning**（不误导）
+- 路线图页面（站内）：`/guide/other/roadmap`
+- Lua Transform 设计（repo 文档）：`document/ng-lua-transform-sandbox-design.md`
+
+---
+
+## 6. 落地顺序（你确认后我将按此推进）
+
+1) 先补齐北向的“通用闭环”页面：`quick-start`、`queue-policy`、`retry-policy`、`templates/variables`、`payload/*`、`downlink/*`、`troubleshooting/*`  
+2) 再逐个落地插件分册：Kafka → Pulsar → ThingsBoard → OPC UA Server  
+3) 最后处理“侧边栏存在但未实现的插件”页面：写清楚 not-supported 并指向 roadmap（或按你的偏好从侧边栏隐藏）

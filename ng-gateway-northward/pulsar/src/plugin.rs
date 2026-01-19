@@ -51,7 +51,7 @@ impl SerializeMessage for OutboundMessage {
     }
 }
 
-/// Pulsar northward plugin (Phase 1: uplink only).
+/// Pulsar northward plugin
 pub struct PulsarPlugin {
     config: Arc<PulsarPluginConfig>,
     _extension_manager: Arc<dyn ExtensionManager>,

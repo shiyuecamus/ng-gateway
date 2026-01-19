@@ -6,7 +6,7 @@ use serde_json::json;
 
 /// Build static metadata once to be embedded as JSON for the gateway UI/config.
 ///
-/// Phase 1 focuses on uplink mapping. Phase 2 adds downlink subscription/mapping.
+/// focuses on uplink mapping. Phase 2 adds downlink subscription/mapping.
 pub(super) fn build_metadata() -> PluginConfigSchemas {
     vec![
         build_connection_group(),

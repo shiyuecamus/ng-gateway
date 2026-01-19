@@ -7,7 +7,7 @@ pub use ng_gateway_sdk::northward::downlink::{
 };
 pub use ng_gateway_sdk::northward::payload::UplinkPayloadConfig;
 
-/// Pulsar plugin configuration (Phase 1: uplink only)
+/// Pulsar plugin configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PulsarPluginConfig {
@@ -15,7 +15,7 @@ pub struct PulsarPluginConfig {
     /// Uplink mappings (Gateway -> Pulsar), by `NorthwardData` kind.
     #[serde(default)]
     pub uplink: UplinkConfig,
-    /// Reserved for Phase 2 (Downlink: Pulsar -> Gateway).
+    /// Downlink: Pulsar -> Gateway
     #[serde(default)]
     pub downlink: DownlinkConfig,
 }
@@ -127,7 +127,7 @@ fn default_enabled_true() -> bool {
     true
 }
 
-// ===== mappings (Phase 1) =====
+// ===== mappings=====
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
