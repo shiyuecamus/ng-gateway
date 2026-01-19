@@ -12,7 +12,7 @@ use ng_gateway_models::{
 };
 use sea_orm::{
     prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
-    Order, PaginatorTrait, QueryFilter, QueryOrder, QueryTrait,
+    Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 
 /// Repository for action operations
@@ -164,6 +164,19 @@ impl ActionRepository {
         Ok(Action::find()
             .filter(ActionColumn::DeviceId.eq(device_id))
             .order_by_asc(ActionColumn::Id)
+            .all(&conn)
+            .await?)
+    }
+
+    /// Find action IDs by device ID (lightweight).
+    pub async fn find_ids_by_device_id(device_id: i32) -> StorageResult<Vec<i32>> {
+        let conn = get_db_connection().await?;
+        Ok(Action::find()
+            .select_only()
+            .column(ActionColumn::Id)
+            .filter(ActionColumn::DeviceId.eq(device_id))
+            .order_by_asc(ActionColumn::Id)
+            .into_tuple::<i32>()
             .all(&conn)
             .await?)
     }

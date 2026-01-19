@@ -341,9 +341,9 @@ pub async fn clear(
 ) -> WebResult<WebResponse<bool>> {
     let device_id = payload.device_id;
 
-    // Fetch all points for the device and delete them via gateway to keep runtime in sync
-    let points = PointRepository::find_by_device_id(device_id).await?;
-    let ids: Vec<i32> = points.into_iter().map(|p| p.id).collect();
+    // Only fetch IDs to reduce DB I/O for large devices (e.g. hundreds of points).
+    // The gateway will perform DB delete + runtime sync.
+    let ids = PointRepository::find_ids_by_device_id(device_id).await?;
 
     if ids.is_empty() {
         return Ok(WebResponse::ok(true));

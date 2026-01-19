@@ -343,9 +343,9 @@ pub async fn clear(
 ) -> WebResult<WebResponse<bool>> {
     let channel_id = payload.channel_id;
 
-    // Fetch all devices for the channel and delete them via gateway to keep runtime in sync
-    let devices = DeviceRepository::find_by_channel_id(channel_id).await?;
-    let ids: Vec<i32> = devices.into_iter().map(|d| d.id).collect();
+    // Only fetch IDs to reduce DB I/O for large channels.
+    // The gateway will perform DB delete + runtime sync.
+    let ids = DeviceRepository::find_ids_by_channel_id(channel_id).await?;
 
     if ids.is_empty() {
         return Ok(WebResponse::ok(true));

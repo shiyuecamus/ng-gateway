@@ -13,7 +13,7 @@ use ng_gateway_models::{
 };
 use sea_orm::{
     prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
-    Order, PaginatorTrait, QueryFilter, QueryOrder, QueryTrait,
+    Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 
 /// Repository for point operations
@@ -165,6 +165,22 @@ impl PointRepository {
         Ok(Point::find()
             .filter(PointColumn::DeviceId.eq(device_id))
             .order_by_asc(PointColumn::Id)
+            .all(&conn)
+            .await?)
+    }
+
+    /// Find point IDs by device ID (lightweight).
+    ///
+    /// This is intended for bulk operations like "clear points", where we only need IDs
+    /// and want to avoid loading full models (potentially large columns).
+    pub async fn find_ids_by_device_id(device_id: i32) -> StorageResult<Vec<i32>> {
+        let conn = get_db_connection().await?;
+        Ok(Point::find()
+            .select_only()
+            .column(PointColumn::Id)
+            .filter(PointColumn::DeviceId.eq(device_id))
+            .order_by_asc(PointColumn::Id)
+            .into_tuple::<i32>()
             .all(&conn)
             .await?)
     }

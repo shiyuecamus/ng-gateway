@@ -422,9 +422,9 @@ pub async fn clear(
 ) -> WebResult<WebResponse<bool>> {
     let device_id = payload.device_id;
 
-    // Fetch all actions for the device and delete them via gateway to keep runtime in sync
-    let actions = ActionRepository::find_by_device_id(device_id).await?;
-    let ids: Vec<i32> = actions.into_iter().map(|a| a.id).collect();
+    // Only fetch IDs to reduce DB I/O for large devices.
+    // The gateway will perform DB delete + runtime sync.
+    let ids = ActionRepository::find_ids_by_device_id(device_id).await?;
 
     if ids.is_empty() {
         return Ok(WebResponse::ok(true));

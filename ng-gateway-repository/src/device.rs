@@ -10,7 +10,7 @@ use ng_gateway_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, Order, PaginatorTrait,
-    QueryFilter, QueryOrder, QueryTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 
 /// Repository for device operations
@@ -202,6 +202,19 @@ impl DeviceRepository {
             .filter(DeviceColumn::ChannelId.eq(channel_id))
             .order_by_asc(DeviceColumn::Id)
             .into_partial_model::<DeviceInfo>()
+            .all(&conn)
+            .await?)
+    }
+
+    /// Find device IDs by channel ID (lightweight).
+    pub async fn find_ids_by_channel_id(channel_id: i32) -> StorageResult<Vec<i32>> {
+        let conn = get_db_connection().await?;
+        Ok(Device::find()
+            .select_only()
+            .column(DeviceColumn::Id)
+            .filter(DeviceColumn::ChannelId.eq(channel_id))
+            .order_by_asc(DeviceColumn::Id)
+            .into_tuple::<i32>()
             .all(&conn)
             .await?)
     }

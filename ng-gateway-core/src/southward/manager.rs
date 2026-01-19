@@ -438,19 +438,17 @@ impl NGSouthwardManager {
 
     #[inline]
     fn remove_point_entry_by_id(&self, point_id: i32) {
-        // Remove reverse mapping first (compute key without holding the guard across map ops).
-        let old_key = self.index.point_entries_by_id.get(&point_id).map(|old| {
-            let m = &old.value().meta;
-            make_point_path_key(
+        // Remove the entry first and derive the reverse key from the removed value.
+        // This avoids an extra DashMap lookup on hot paths like bulk delete/clear.
+        if let Some((_k, entry)) = self.index.point_entries_by_id.remove(&point_id) {
+            let m = &entry.meta;
+            let old_key = make_point_path_key(
                 m.channel_name.as_ref(),
                 m.device_name.as_ref(),
                 m.point_key.as_ref(),
-            )
-        });
-        if let Some(old_key) = old_key {
+            );
             self.index.point_id_by_path.remove(&old_key);
         }
-        self.index.point_entries_by_id.remove(&point_id);
     }
 
     /// Initialize manager from a fully assembled topology in a single high-performance pass.
@@ -2492,6 +2490,9 @@ impl NGSouthwardManager {
             return Ok(());
         }
 
+        // Convert ids to a set to avoid O(n*m) scans when removing many points.
+        let point_id_set: HashSet<i32> = point_ids.iter().copied().collect();
+
         let (device, driver, _) = match self.snapshot_device_and_driver(device_id) {
             Some(v) => v,
             None => return Ok(()),
@@ -2511,7 +2512,7 @@ impl NGSouthwardManager {
                 self.mutate_device_points(device_id, |current| {
                     let mut kept: Vec<Arc<dyn RuntimePoint>> = Vec::with_capacity(current.len());
                     for p in current.drain(..) {
-                        if point_ids.iter().any(|id| *id == p.id()) {
+                        if point_id_set.contains(&p.id()) {
                             removed.push(Arc::clone(&p));
                         } else {
                             kept.push(p);
@@ -2555,7 +2556,7 @@ impl NGSouthwardManager {
                     // Restore metadata entries best-effort.
                     if let Some(points) = self.device_points_slice(device_id) {
                         for p in points.iter() {
-                            if point_ids.iter().any(|id| *id == p.id()) {
+                            if point_id_set.contains(&p.id()) {
                                 self.upsert_point_entry(&channel_name, &device, p, None);
                             }
                         }
@@ -2738,6 +2739,9 @@ impl NGSouthwardManager {
             return Ok(());
         }
 
+        // Convert ids to a set to avoid O(n*m) scans when removing many actions.
+        let action_id_set: HashSet<i32> = action_ids.iter().copied().collect();
+
         struct ActionsRemovedRecord {
             removed: Vec<Arc<dyn RuntimeAction>>,
         }
@@ -2753,7 +2757,7 @@ impl NGSouthwardManager {
                 self.mutate_device_actions(device_id, |current| {
                     let mut kept: Vec<Arc<dyn RuntimeAction>> = Vec::with_capacity(current.len());
                     for a in current.drain(..) {
-                        if action_ids.iter().any(|id| *id == a.id()) {
+                        if action_id_set.contains(&a.id()) {
                             removed.push(Arc::clone(&a));
                         } else {
                             kept.push(a);
