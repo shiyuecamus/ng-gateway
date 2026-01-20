@@ -97,12 +97,10 @@ impl DriverFactory for Cjt188DriverFactory {
         let field_key = driver_config
             .get("field_key")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                DriverError::ConfigurationError(format!(
-                    "Point {} (id={}) missing required field 'field_key' in driver_config",
-                    point.name, point.id
-                ))
-            })?
+            .ok_or(DriverError::ConfigurationError(format!(
+                "Point {} (id={}) missing required field 'field_key' in driver_config",
+                point.name, point.id
+            )))?
             .to_string();
 
         Ok(Arc::new(Cjt188Point {
@@ -116,7 +114,7 @@ impl DriverFactory for Cjt188DriverFactory {
             unit: point.unit,
             min_value: point.min_value,
             max_value: point.max_value,
-            scale: point.scale,
+            transform: point.transform,
             di,
             field_key,
         }))

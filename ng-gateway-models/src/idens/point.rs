@@ -25,7 +25,10 @@ pub enum Point {
     Unit,
     MinValue,
     MaxValue,
-    Scale,
+    TransformDataType,
+    TransformScale,
+    TransformOffset,
+    TransformNegate,
     DriverConfig,
 }
 
@@ -90,9 +93,25 @@ fn create_point_table(_: DatabaseBackend) -> TableCreateStatement {
                 .comment("Maximum value"),
         )
         .col(
-            ColumnDef::new(Point::Scale)
+            ColumnDef::new(Point::TransformDataType)
+                .small_integer()
+                .comment("Transform data type"),
+        )
+        .col(
+            ColumnDef::new(Point::TransformScale)
                 .double()
                 .comment("Scale factor"),
+        )
+        .col(
+            ColumnDef::new(Point::TransformOffset)
+                .double()
+                .comment("Transform offset"),
+        )
+        .col(
+            ColumnDef::new(Point::TransformNegate)
+                .boolean()
+                .default(false)
+                .comment("Transform negate"),
         )
         .col(
             ColumnDef::new(Point::DriverConfig)

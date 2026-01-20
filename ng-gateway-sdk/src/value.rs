@@ -507,7 +507,7 @@ impl TryFrom<&NGValue> for bool {
             }
             NGValue::Timestamp(ms) => Ok(*ms != 0),
             NGValue::String(s) => {
-                parse_bool_from_str(s.as_ref()).ok_or_else(|| NGValueCastError::ParseError {
+                parse_bool_from_str(s.as_ref()).ok_or(NGValueCastError::ParseError {
                     target: "bool",
                     value: s.to_string(),
                 })

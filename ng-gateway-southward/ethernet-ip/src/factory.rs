@@ -80,7 +80,7 @@ impl DriverFactory for EthernetIpDriverFactory {
             unit: point.unit,
             min_value: point.min_value,
             max_value: point.max_value,
-            scale: point.scale,
+            transform: point.transform,
             tag_name,
         }))
     }
@@ -136,6 +136,7 @@ impl DriverFactory for EthernetIpDriverFactory {
                     default_value: input.default_value,
                     max_value: input.max_value,
                     min_value: input.min_value,
+                    transform: input.transform,
                     tag_name,
                 })
             })

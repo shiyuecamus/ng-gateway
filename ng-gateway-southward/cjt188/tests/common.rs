@@ -5,7 +5,7 @@ use ng_driver_cjt188::types::{
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NorthwardData,
     NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -96,7 +96,7 @@ pub fn build_test_topology_for_version(
                 unit: Some("m3".to_string()),
                 min_value: None,
                 max_value: None,
-                scale: None,
+                transform: Transform::default(),
                 di: di_val,
                 field_key: "current_flow".to_string(), // Default field key for testing
             }

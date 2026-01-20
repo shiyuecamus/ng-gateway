@@ -4,7 +4,7 @@ use super::protocol::frame::addr::S7Address;
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimeParameter, RuntimePoint,
-    Status,
+    Status, Transform,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -146,7 +146,8 @@ pub struct S7Point {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     /// Address expression like "DB1.DBD0" or "I0.0"
     pub address: S7Address,
 }
@@ -182,8 +183,9 @@ impl RuntimePoint for S7Point {
     fn max_value(&self) -> Option<f64> {
         self.max_value
     }
-    fn scale(&self) -> Option<f64> {
-        self.scale
+
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -198,6 +200,8 @@ pub struct S7Parameter {
     pub default_value: Option<serde_json::Value>,
     pub max_value: Option<f64>,
     pub min_value: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     /// Address expression if needed for write
     pub address: S7Address,
 }
@@ -223,6 +227,10 @@ impl RuntimeParameter for S7Parameter {
     }
     fn min_value(&self) -> Option<f64> {
         self.min_value
+    }
+
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 

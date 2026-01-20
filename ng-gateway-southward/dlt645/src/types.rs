@@ -2,7 +2,7 @@ use crate::protocol::frame::{parse_di_str, Dl645Address};
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     DriverError, DriverResult, ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice,
-    RuntimeParameter, RuntimePoint, Status,
+    RuntimeParameter, RuntimePoint, Status, Transform,
 };
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -348,7 +348,8 @@ pub struct Dl645Point {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     /// 4-byte DI encoded as a numeric value parsed from hex, such as 0x00010000.
     pub di: u32,
     /// Optional number of decimal places for BCD values.
@@ -396,8 +397,8 @@ impl RuntimePoint for Dl645Point {
         self.max_value
     }
 
-    fn scale(&self) -> Option<f64> {
-        self.scale
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -475,6 +476,8 @@ pub struct Dl645Parameter {
     pub default_value: Option<serde_json::Value>,
     pub max_value: Option<f64>,
     pub min_value: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     /// Optional number of decimal places for BCD-encoded numeric parameters.
     ///
     /// When present, this value controls how floating point and integer
@@ -533,6 +536,10 @@ impl RuntimeParameter for Dl645Parameter {
 
     fn min_value(&self) -> Option<f64> {
         self.min_value
+    }
+
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 

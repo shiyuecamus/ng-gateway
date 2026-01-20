@@ -155,7 +155,7 @@ impl Driver for S7Driver {
                     continue;
                 }
                 let v = it.value.unwrap();
-                if let Some(value) = S7Codec::to_value(&v, p.data_type(), p.scale()) {
+                if let Some(value) = S7Codec::to_value(&v, p.logical_data_type(), &p.transform) {
                     match p.r#type() {
                         DataPointType::Telemetry => {
                             telemetry_values.push(PointValue {
@@ -293,15 +293,6 @@ impl Driver for S7Driver {
             .unwrap_or(self.inner.connection_policy.write_timeout_ms)
             .max(1);
         let timeout_duration = tokio::time::Duration::from_millis(effective_timeout_ms);
-
-        // Strict datatype guard (core should already validate, keep driver defensive).
-        if !value.validate_datatype(point.data_type) {
-            return Err(DriverError::ValidationError(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                point.data_type,
-                value.data_type()
-            )));
-        }
 
         // Acquire active session
         let session = self

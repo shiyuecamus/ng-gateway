@@ -18,8 +18,8 @@ use ng_gateway_sdk::{
     downcast_parameters, AccessMode, AttributeData, DataPointType, DataType, Driver, DriverError,
     DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
     NGValueCastError, NorthwardData, PointValue, RuntimeAction, RuntimeDevice, RuntimeParameter,
-    RuntimePoint, SouthwardConnectionState, SouthwardInitContext, TelemetryData, WriteOutcome,
-    WriteResult,
+    RuntimePoint, SouthwardConnectionState, SouthwardInitContext, TelemetryData, ValueCodec,
+    WriteOutcome, WriteResult,
 };
 use std::{
     sync::{
@@ -30,7 +30,7 @@ use std::{
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 /// MC driver state and metrics.
 ///
@@ -273,8 +273,8 @@ impl Driver for McDriver {
                 )))?;
 
             if addr.device.is_bit() {
-                // Bit devices currently only support Boolean data type.
-                if point.data_type != DataType::Boolean {
+                // Bit devices currently only support Boolean wire data type.
+                if point.wire_data_type() != DataType::Boolean {
                     return Err(DriverError::ConfigurationError(format!(
                         "MC bit device {:?} only supports Boolean data type for point '{}'",
                         addr.device, point.key
@@ -299,7 +299,7 @@ impl Driver for McDriver {
 
                 specs.push(TypedPointReadSpec {
                     index,
-                    data_type: point.data_type,
+                    data_type: point.wire_data_type(),
                     addr,
                     // For bit devices, `word_len` is interpreted as the number
                     // of logical points (bits) instead of 16-bit words.
@@ -324,7 +324,7 @@ impl Driver for McDriver {
                     )));
                 }
 
-                let word_len = words_for_data_type(point.data_type, point.string_len_bytes)?;
+                let word_len = words_for_data_type(point.wire_data_type(), point.string_len_bytes)?;
                 let device_code =
                     addr.device
                         .device_code_3e()
@@ -335,7 +335,7 @@ impl Driver for McDriver {
 
                 specs.push(TypedPointReadSpec {
                     index,
-                    data_type: point.data_type,
+                    data_type: point.wire_data_type(),
                     addr,
                     word_len,
                     device_code,
@@ -395,6 +395,31 @@ impl Driver for McDriver {
             let point = &mc_points[item.index];
             let Some(value) = item.value else {
                 continue;
+            };
+
+            // Uplink semantics:
+            // - `value` is decoded using wire datatype.
+            // - We must apply the logical transform (scale/offset/negate) and box into logical datatype.
+            let wire_dt = point.wire_data_type();
+            let logical_dt = point.logical_data_type();
+            let value = match ValueCodec::wire_to_logical_value(
+                value,
+                wire_dt,
+                logical_dt,
+                &point.transform,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        point_id = point.id,
+                        point_key = %point.key,
+                        wire = ?wire_dt,
+                        logical = ?logical_dt,
+                        error = %e,
+                        "MC uplink wire->logical conversion failed - dropped"
+                    );
+                    continue;
+                }
             };
 
             let target = match point.r#type {
@@ -472,7 +497,7 @@ impl Driver for McDriver {
             let (word_len, device_code) = if addr.device.is_bit() {
                 // Bit devices currently only support Boolean data type for
                 // actions.
-                if param.data_type != DataType::Boolean {
+                if param.wire_data_type() != DataType::Boolean {
                     return Err(DriverError::ConfigurationError(format!(
                         "MC bit device {:?} only supports Boolean data type in action '{}'",
                         addr.device, action.name
@@ -509,7 +534,7 @@ impl Driver for McDriver {
                     )));
                 }
 
-                let word_len = words_for_data_type(param.data_type, param.string_len_bytes)?;
+                let word_len = words_for_data_type(param.wire_data_type(), param.string_len_bytes)?;
                 let device_code =
                     addr.device
                         .device_code_3e()
@@ -520,7 +545,7 @@ impl Driver for McDriver {
                 (word_len, device_code)
             };
 
-            let data_bytes = McCodec::encode_typed(param.data_type, value)?;
+            let data_bytes = McCodec::encode_typed(param.wire_data_type(), value)?;
 
             entries.push(WriteEntry {
                 addr,
@@ -605,15 +630,6 @@ impl Driver for McDriver {
             .max(1);
         let timeout_duration = tokio::time::Duration::from_millis(effective_timeout_ms);
 
-        // Strict datatype guard (core should already validate, keep driver defensive).
-        if !value.validate_datatype(point.data_type) {
-            return Err(DriverError::ValidationError(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                point.data_type,
-                value.data_type()
-            )));
-        }
-
         let addr = McLogicalAddress::parse(&point.address.raw).map_err(|e| {
             DriverError::ConfigurationError(format!(
                 "Invalid MC address '{}': {e}",
@@ -622,7 +638,7 @@ impl Driver for McDriver {
         })?;
 
         let (word_len, device_code) = if addr.device.is_bit() {
-            if point.data_type != DataType::Boolean {
+            if point.wire_data_type() != DataType::Boolean {
                 return Err(DriverError::ConfigurationError(format!(
                     "MC bit device {:?} only supports Boolean data type for write_point",
                     addr.device
@@ -655,7 +671,7 @@ impl Driver for McDriver {
                     addr.device
                 )));
             }
-            let word_len = words_for_data_type(point.data_type, point.string_len_bytes)?;
+            let word_len = words_for_data_type(point.wire_data_type(), point.string_len_bytes)?;
             let device_code =
                 addr.device
                     .device_code_3e()

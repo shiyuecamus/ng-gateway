@@ -206,14 +206,12 @@ fn build_datetime(
     minute: u32,
     second: u32,
 ) -> Result<NaiveDateTime, ProtocolError> {
-    let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
-        ProtocolError::Semantic(format!("Invalid date: year={year} month={month} day={day}"))
-    })?;
-    let time = NaiveTime::from_hms_opt(hour, minute, second).ok_or_else(|| {
-        ProtocolError::Semantic(format!(
-            "Invalid time: hour={hour} minute={minute} second={second}"
-        ))
-    })?;
+    let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(ProtocolError::Semantic(
+        format!("Invalid date: year={year} month={month} day={day}"),
+    ))?;
+    let time = NaiveTime::from_hms_opt(hour, minute, second).ok_or(ProtocolError::Semantic(
+        format!("Invalid time: hour={hour} minute={minute} second={second}"),
+    ))?;
     Ok(NaiveDateTime::new(date, time))
 }
 

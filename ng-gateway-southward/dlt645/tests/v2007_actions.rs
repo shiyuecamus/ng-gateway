@@ -5,6 +5,7 @@ use common::{build_init_context, build_test_topology_for_version, init_tracing};
 use ng_driver_dlt645::{Dl645Action, Dl645Driver, Dl645FunctionCode, Dl645Parameter, Dl645Version};
 use ng_gateway_sdk::{
     validate_and_resolve_action_inputs, DataType, Driver, RuntimeAction, SouthwardConnectionState,
+    Transform,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -127,6 +128,7 @@ async fn broadcast_time_sync() {
                 function_code: Dl645FunctionCode::BroadcastTimeSync,
                 di: None,
                 decimals: None,
+                transform: Transform::default(),
             }],
         },
         params,
@@ -150,6 +152,7 @@ async fn write_data() {
                 name: "energy".to_string(),
                 key: "energy".to_string(),
                 data_type: DataType::Float64,
+                transform: Transform::default(),
                 required: true,
                 default_value: None,
                 max_value: None,
@@ -188,6 +191,7 @@ async fn write_address() {
                 function_code: Dl645FunctionCode::WriteAddress,
                 di: None,
                 decimals: None,
+                transform: Transform::default(),
             }],
         },
         params,
@@ -218,6 +222,7 @@ async fn freeze() {
                 function_code: Dl645FunctionCode::Freeze,
                 di: None,
                 decimals: None,
+                transform: Transform::default(),
             }],
         },
         params,
@@ -248,6 +253,7 @@ async fn update_baud_rate() {
                 function_code: Dl645FunctionCode::UpdateBaudRate,
                 di: None,
                 decimals: None,
+                transform: Transform::default(),
             }],
         },
         params,
@@ -278,6 +284,7 @@ async fn clear_max_demand() {
                 function_code: Dl645FunctionCode::ClearMaxDemand,
                 di: None,
                 decimals: None,
+                transform: Transform::default(),
             }],
         },
         params,
@@ -308,6 +315,7 @@ async fn clear_meter() {
                 function_code: Dl645FunctionCode::ClearMeter,
                 di: None,
                 decimals: None,
+                transform: Transform::default(),
             }],
         },
         params,
@@ -338,6 +346,7 @@ async fn clear_events() {
                 function_code: Dl645FunctionCode::ClearEvents,
                 di: None,
                 decimals: None,
+                transform: Transform::default(),
             }],
         },
         params,

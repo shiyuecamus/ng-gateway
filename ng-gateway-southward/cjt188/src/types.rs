@@ -2,6 +2,7 @@ pub use crate::protocol::frame::defs::{Cjt188Address, MeterType};
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     DriverError, DriverResult, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint, Status,
+    Transform,
 };
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -253,7 +254,8 @@ pub struct Cjt188Point {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
 
     /// Data Identifier (DI) to read for this point
     ///
@@ -326,7 +328,7 @@ impl RuntimePoint for Cjt188Point {
         self.max_value
     }
 
-    fn scale(&self) -> Option<f64> {
-        self.scale
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }

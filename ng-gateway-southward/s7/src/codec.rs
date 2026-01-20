@@ -1,7 +1,7 @@
 use super::protocol::frame::{S7DataValue, S7TransportSize};
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, NaiveTime, Utc};
-use ng_gateway_sdk::{DataType, DriverError, DriverResult, NGValue, ValueCodec};
+use ng_gateway_sdk::{DataType, DriverError, DriverResult, NGValue, Transform, ValueCodec};
 use std::sync::Arc;
 
 /// S7 protocol specific codec helpers.
@@ -13,40 +13,34 @@ use std::sync::Arc;
 pub struct S7Codec;
 
 impl S7Codec {
-    /// Convert an S7 typed value into a strongly-typed `NGValue` according to the expected `DataType`.
+    /// Convert an S7 decoded wire value into a strongly-typed `NGValue`.
     ///
     /// # Performance
     /// This is the recommended hot-path conversion API for telemetry/attributes.
     /// It avoids building `serde_json::Value` intermediates.
     #[inline]
-    pub fn to_value(
-        value: &S7DataValue,
-        expected: DataType,
-        scale: Option<f64>,
-    ) -> Option<NGValue> {
+    pub fn to_value(value: &S7DataValue, logical_dt: DataType, t: &Transform) -> Option<NGValue> {
         match value {
-            S7DataValue::Bit(b) => ValueCodec::coerce_bool_to_value(*b, expected, scale),
-            S7DataValue::Byte(v) => match expected {
+            S7DataValue::Bit(b) => ValueCodec::coerce_bool_to_value(*b, logical_dt, t),
+            S7DataValue::Byte(v) => match logical_dt {
                 DataType::Binary => Some(NGValue::Binary(Bytes::copy_from_slice(&[*v]))),
-                _ => ValueCodec::coerce_f64_to_value(*v as f64, expected, scale),
+                _ => ValueCodec::coerce_f64_to_value(*v as f64, logical_dt, t),
             },
-            S7DataValue::Word(v) => ValueCodec::coerce_f64_to_value(*v as f64, expected, scale),
-            S7DataValue::Int(v) => ValueCodec::coerce_f64_to_value(*v as f64, expected, scale),
-            S7DataValue::DWord(v) => ValueCodec::coerce_f64_to_value(*v as f64, expected, scale),
-            S7DataValue::DInt(v) => ValueCodec::coerce_f64_to_value(*v as f64, expected, scale),
-            S7DataValue::Real(v) => ValueCodec::coerce_f64_to_value(*v as f64, expected, scale),
-            S7DataValue::Counter(v) => ValueCodec::coerce_f64_to_value(*v as f64, expected, scale),
-            S7DataValue::Char(c) => match expected {
+            S7DataValue::Word(v) => ValueCodec::coerce_f64_to_value(*v as f64, logical_dt, t),
+            S7DataValue::Int(v) => ValueCodec::coerce_f64_to_value(*v as f64, logical_dt, t),
+            S7DataValue::DWord(v) => ValueCodec::coerce_f64_to_value(*v as f64, logical_dt, t),
+            S7DataValue::DInt(v) => ValueCodec::coerce_f64_to_value(*v as f64, logical_dt, t),
+            S7DataValue::Real(v) => ValueCodec::coerce_f64_to_value(*v as f64, logical_dt, t),
+            S7DataValue::Counter(v) => ValueCodec::coerce_f64_to_value(*v as f64, logical_dt, t),
+            S7DataValue::Char(c) => match logical_dt {
                 DataType::String => Some(NGValue::String(Arc::<str>::from(c.to_string()))),
                 DataType::Boolean => Some(NGValue::Boolean(*c != '\0')),
                 DataType::Binary => Some(NGValue::Binary(Bytes::copy_from_slice(&[(*c as u32)
                     .min(0xFF)
                     as u8]))),
-                _ => {
-                    ValueCodec::coerce_f64_to_value(((*c as u32).min(0xFF)) as f64, expected, scale)
-                }
+                _ => ValueCodec::coerce_f64_to_value(((*c as u32).min(0xFF)) as f64, logical_dt, t),
             },
-            S7DataValue::String(s) | S7DataValue::WString(s) => match expected {
+            S7DataValue::String(s) | S7DataValue::WString(s) => match logical_dt {
                 DataType::String => Some(NGValue::String(Arc::<str>::from(s.as_str()))),
                 DataType::Timestamp => chrono::DateTime::parse_from_rfc3339(s.as_str())
                     .ok()
@@ -55,14 +49,14 @@ impl S7Codec {
                     .trim()
                     .parse::<f64>()
                     .ok()
-                    .and_then(|n| ValueCodec::coerce_f64_to_value(n, expected, scale)),
+                    .and_then(|n| ValueCodec::coerce_f64_to_value(n, logical_dt, t)),
             },
-            S7DataValue::Date(d) => match expected {
+            S7DataValue::Date(d) => match logical_dt {
                 DataType::Timestamp => ValueCodec::date_to_epoch_ms(*d).map(NGValue::Timestamp),
                 DataType::String => Some(NGValue::String(Arc::<str>::from(d.to_string()))),
                 _ => None,
             },
-            S7DataValue::DateTime(ndt) | S7DataValue::DateTimeLong(ndt) => match expected {
+            S7DataValue::DateTime(ndt) | S7DataValue::DateTimeLong(ndt) => match logical_dt {
                 DataType::Timestamp => {
                     Some(NGValue::Timestamp(ValueCodec::datetime_to_epoch_ms(*ndt)))
                 }
@@ -78,23 +72,23 @@ impl S7Codec {
                 DataType::String => Some(NGValue::String(Arc::<str>::from(ndt.to_string()))),
                 _ => {
                     let ms = ValueCodec::datetime_to_epoch_ms(*ndt);
-                    ValueCodec::coerce_f64_to_value(ms as f64, expected, scale)
+                    ValueCodec::coerce_f64_to_value(ms as f64, logical_dt, t)
                 }
             },
-            S7DataValue::TimeOfDay(t) => match expected {
-                DataType::Timestamp => {
-                    Some(NGValue::Timestamp(ValueCodec::time_of_day_to_ms(*t) as i64))
-                }
+            S7DataValue::TimeOfDay(tod) => match logical_dt {
+                DataType::Timestamp => Some(NGValue::Timestamp(
+                    ValueCodec::time_of_day_to_ms(*tod) as i64,
+                )),
                 DataType::String => Some(NGValue::String(Arc::<str>::from(
-                    t.format("%H:%M:%S").to_string(),
+                    tod.format("%H:%M:%S").to_string(),
                 ))),
                 _ => {
-                    let ms = ValueCodec::time_of_day_to_ms(*t) as f64;
-                    ValueCodec::coerce_f64_to_value(ms, expected, scale)
+                    let ms = ValueCodec::time_of_day_to_ms(*tod) as f64;
+                    ValueCodec::coerce_f64_to_value(ms, logical_dt, t)
                 }
             },
             S7DataValue::Time(dur) | S7DataValue::S5Time(dur) | S7DataValue::Timer(dur) => {
-                match expected {
+                match logical_dt {
                     DataType::Timestamp => {
                         Some(NGValue::Timestamp(ValueCodec::duration_to_ms(*dur)))
                     }
@@ -104,7 +98,7 @@ impl S7Codec {
                     )))),
                     _ => {
                         let ms = ValueCodec::duration_to_ms(*dur) as f64;
-                        ValueCodec::coerce_f64_to_value(ms, expected, scale)
+                        ValueCodec::coerce_f64_to_value(ms, logical_dt, t)
                     }
                 }
             }
@@ -176,7 +170,7 @@ impl S7Codec {
                     DriverError::CodecError("Expected timestamp(ms) for S7 Date".to_string())
                 })?;
                 let dt = DateTime::<Utc>::from_timestamp_millis(ms)
-                    .ok_or_else(|| DriverError::CodecError("Invalid timestamp".to_string()))?;
+                    .ok_or(DriverError::CodecError("Invalid timestamp".to_string()))?;
                 Ok(S7DataValue::Date(dt.naive_utc().date()))
             }
             S7TransportSize::DateTime | S7TransportSize::DateTimeLong => {
@@ -185,7 +179,7 @@ impl S7Codec {
                     DriverError::CodecError("Expected timestamp(ms) for S7 DateTime".to_string())
                 })?;
                 let dt = DateTime::<Utc>::from_timestamp_millis(ms)
-                    .ok_or_else(|| DriverError::CodecError("Invalid timestamp".to_string()))?;
+                    .ok_or(DriverError::CodecError("Invalid timestamp".to_string()))?;
                 let ndt: NaiveDateTime = dt.naive_utc();
                 if matches!(ts, S7TransportSize::DateTime) {
                     Ok(S7DataValue::DateTime(ndt))

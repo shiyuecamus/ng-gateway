@@ -1,6 +1,8 @@
 use super::types::Endianness;
 use bytes::Bytes;
-use ng_gateway_sdk::{DataType, DriverError, DriverResult, NGValue, NGValueCastError, ValueCodec};
+use ng_gateway_sdk::{
+    DataType, DriverError, DriverResult, NGValue, NGValueCastError, Transform, ValueCodec,
+};
 use std::sync::Arc;
 
 /// Register-based codec utilities for converting between logical values and Modbus-like register words.
@@ -163,14 +165,15 @@ impl ModbusCodec {
     /// 2. **Decode**: Read the raw value based on the available byte length.
     ///    - If length matches strict type requirements (e.g. 4 bytes for Float32), read directly.
     ///    - If length is smaller (e.g. 2 bytes for Float32), read as Integer and cast (Smart Cast).
-    /// 3. **Scale**: Apply linear scaling (ax + b).
-    /// 4. **Box**: Wrap into the requested `NGValue` variant.
+    /// 3. **Transform**: Apply logical-layer transform (datatype + affine mapping).
+    /// 4. **Box**: Wrap into the requested logical `NGValue` variant.
     pub fn parse_register_value(
         words: &[u16],
-        data_type: DataType,
+        wire_dt: DataType,
+        logical_dt: DataType,
         byte_order: Endianness,
         word_order: Endianness,
-        scale: Option<f64>,
+        t: &Transform,
     ) -> DriverResult<NGValue> {
         if words.is_empty() {
             return Err(Self::cold_err("Empty register words"));
@@ -181,18 +184,40 @@ impl ModbusCodec {
         let len = bytes.len();
 
         // --- Step 2: Handle Non-Numeric Types ---
-        match data_type {
+        match wire_dt {
             DataType::Boolean => {
                 // Convention: Non-zero value in the first register is true
                 let b = words.first().map(|&w| w != 0).unwrap_or(false);
-                return Ok(NGValue::Boolean(b));
+                return ValueCodec::coerce_bool_to_value(b, logical_dt, t).ok_or(
+                    Self::cold_err_string(format!(
+                        "Value {:?} out of range for {:?}",
+                        b, logical_dt
+                    )),
+                );
             }
             DataType::String => {
                 while let Some(true) = bytes.last().map(|b| *b == 0) {
                     bytes.pop();
                 }
                 let s = String::from_utf8_lossy(&bytes);
-                return Ok(NGValue::String(Arc::<str>::from(s)));
+                return Ok(match logical_dt {
+                    DataType::String => NGValue::String(Arc::<str>::from(s)),
+                    DataType::Boolean => NGValue::Boolean(!s.trim().is_empty()),
+                    _ => {
+                        let n = s.trim().parse::<f64>().map_err(|_| {
+                            Self::cold_err_string(format!(
+                                "Failed to parse string '{}' as number for {:?}",
+                                s, logical_dt
+                            ))
+                        })?;
+                        ValueCodec::coerce_f64_to_value(n, logical_dt, t).ok_or(
+                            Self::cold_err_string(format!(
+                                "Value {} out of range for {:?}",
+                                n, logical_dt
+                            )),
+                        )?
+                    }
+                });
             }
             DataType::Binary => return Ok(NGValue::Binary(Bytes::from(bytes))),
             DataType::Timestamp => {
@@ -216,232 +241,154 @@ impl ModbusCodec {
         }
 
         // --- Step 3: Decode Numeric Types (Deterministic Matching) ---
-        // We read everything as f64 first for uniform scaling.
-        let raw_val: f64 = match (data_type, len) {
-            // --- Float32 Target ---
-            (DataType::Float32, 8..) => {
-                // Interpret as f64 source (8 bytes) and later coerce to Float32.
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read f64 for Float32 target"))?;
-                f64::from_be_bytes(arr)
-            }
-            (DataType::Float32, 4..) => {
+        // IMPORTANT: Avoid decoding integer wire types into `f64` to preserve full integer
+        // precision (especially for `UInt64/Int64`). We only use `f64` for float wire types.
+        match wire_dt {
+            DataType::Float32 => {
+                if len < 4 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
                 let arr: [u8; 4] = bytes[0..4]
                     .try_into()
                     .map_err(|_| Self::cold_err("Failed to read f32"))?;
-                f32::from_be_bytes(arr) as f64
+                let raw_val = f32::from_be_bytes(arr) as f64;
+                ValueCodec::coerce_f64_to_value(raw_val, logical_dt, t).ok_or(
+                    Self::cold_err_string(format!(
+                        "Value {} out of range for {:?}",
+                        raw_val, logical_dt
+                    )),
+                )
             }
-            (DataType::Float32, 2..) => {
-                // Smart Cast: i16 -> f32
-                let arr: [u8; 2] = bytes[0..2]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i16 for Float32 target"))?;
-                i16::from_be_bytes(arr) as f64
-            }
-
-            // --- Float64 Target ---
-            (DataType::Float64, 8..) => {
+            DataType::Float64 => {
+                if len < 8 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
                 let arr: [u8; 8] = bytes[0..8]
                     .try_into()
                     .map_err(|_| Self::cold_err("Failed to read f64"))?;
-                f64::from_be_bytes(arr)
-            }
-            (DataType::Float64, 4..) => {
-                // Promote f32 -> f64
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read f32 for Float64 target"))?;
-                f32::from_be_bytes(arr) as f64
-            }
-            (DataType::Float64, 2..) => {
-                // Promote i16 -> f64
-                let arr: [u8; 2] = bytes[0..2]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i16 for Float64 target"))?;
-                i16::from_be_bytes(arr) as f64
+                let raw_val = f64::from_be_bytes(arr);
+                ValueCodec::coerce_f64_to_value(raw_val, logical_dt, t).ok_or(
+                    Self::cold_err_string(format!(
+                        "Value {} out of range for {:?}",
+                        raw_val, logical_dt
+                    )),
+                )
             }
 
-            // --- Int32 Target ---
-            (DataType::Int32, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i64 for Int32 target"))?;
-                i64::from_be_bytes(arr) as f64
+            DataType::UInt8 => {
+                let v = bytes.first().copied().unwrap_or(0) as u64;
+                ValueCodec::coerce_u64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
             }
-            (DataType::Int32, 4..) => {
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i32"))?;
-                i32::from_be_bytes(arr) as f64
+            DataType::Int8 => {
+                let b = bytes.first().copied().unwrap_or(0);
+                let v = i8::from_be_bytes([b]) as i64;
+                ValueCodec::coerce_i64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
             }
-            (DataType::Int32, 2..) => {
-                // Promote i16 -> i32
-                let arr: [u8; 2] = bytes[0..2]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i16 for Int32 target"))?;
-                i16::from_be_bytes(arr) as f64
-            }
-
-            // --- UInt32 Target ---
-            (DataType::UInt32, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u64 for UInt32 target"))?;
-                u64::from_be_bytes(arr) as f64
-            }
-            (DataType::UInt32, 4..) => {
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u32"))?;
-                u32::from_be_bytes(arr) as f64
-            }
-            (DataType::UInt32, 2..) => {
-                // Promote u16 -> u32
-                let arr: [u8; 2] = bytes[0..2]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u16 for UInt32 target"))?;
-                u16::from_be_bytes(arr) as f64
-            }
-
-            // --- Int64 Target ---
-            (DataType::Int64, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i64"))?;
-                i64::from_be_bytes(arr) as f64
-            }
-            (DataType::Int64, 4..) => {
-                // Promote i32 -> i64
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i32 for Int64 target"))?;
-                i32::from_be_bytes(arr) as f64
-            }
-            (DataType::Int64, 2..) => {
-                // Promote i16 -> i64
-                let arr: [u8; 2] = bytes[0..2]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i16 for Int64 target"))?;
-                i16::from_be_bytes(arr) as f64
-            }
-
-            // --- UInt64 Target ---
-            (DataType::UInt64, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u64"))?;
-                u64::from_be_bytes(arr) as f64
-            }
-            (DataType::UInt64, 4..) => {
-                // Promote u32 -> u64
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u32 for UInt64 target"))?;
-                u32::from_be_bytes(arr) as f64
-            }
-            (DataType::UInt64, 2..) => {
-                // Promote u16 -> u64
-                let arr: [u8; 2] = bytes[0..2]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u16 for UInt64 target"))?;
-                u16::from_be_bytes(arr) as f64
-            }
-
-            // --- Standard 16-bit / 8-bit Types ---
-            (DataType::Int16, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i64 for Int16 target"))?;
-                i64::from_be_bytes(arr) as f64
-            }
-            (DataType::Int16, 4..) => {
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i32 for Int16 target"))?;
-                i32::from_be_bytes(arr) as f64
-            }
-            (DataType::Int16, 2..) => {
-                let arr: [u8; 2] = bytes[0..2]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i16"))?;
-                i16::from_be_bytes(arr) as f64
-            }
-
-            (DataType::UInt16, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u64 for UInt16 target"))?;
-                u64::from_be_bytes(arr) as f64
-            }
-            (DataType::UInt16, 4..) => {
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u32 for UInt16 target"))?;
-                u32::from_be_bytes(arr) as f64
-            }
-            (DataType::UInt16, 2..) => {
+            DataType::UInt16 => {
+                if len < 2 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
                 let arr: [u8; 2] = bytes[0..2]
                     .try_into()
                     .map_err(|_| Self::cold_err("Failed to read u16"))?;
-                u16::from_be_bytes(arr) as f64
+                let v = u16::from_be_bytes(arr) as u64;
+                ValueCodec::coerce_u64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
             }
-
-            (DataType::Int8, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i64 for Int8 target"))?;
-                i64::from_be_bytes(arr) as f64
-            }
-            (DataType::Int8, 4..) => {
-                let arr: [u8; 4] = bytes[0..4]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i32 for Int8 target"))?;
-                i32::from_be_bytes(arr) as f64
-            }
-            (DataType::Int8, 2..) => {
+            DataType::Int16 => {
+                if len < 2 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
                 let arr: [u8; 2] = bytes[0..2]
                     .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read i16 for Int8 target"))?;
-                i16::from_be_bytes(arr) as f64
+                    .map_err(|_| Self::cold_err("Failed to read i16"))?;
+                let v = i16::from_be_bytes(arr) as i64;
+                ValueCodec::coerce_i64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
             }
-
-            (DataType::UInt8, 8..) => {
-                let arr: [u8; 8] = bytes[0..8]
-                    .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u64 for UInt8 target"))?;
-                u64::from_be_bytes(arr) as f64
-            }
-            (DataType::UInt8, 4..) => {
+            DataType::UInt32 => {
+                if len < 4 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
                 let arr: [u8; 4] = bytes[0..4]
                     .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u32 for UInt8 target"))?;
-                u32::from_be_bytes(arr) as f64
+                    .map_err(|_| Self::cold_err("Failed to read u32"))?;
+                let v = u32::from_be_bytes(arr) as u64;
+                ValueCodec::coerce_u64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
             }
-            (DataType::UInt8, 2..) => {
-                let arr: [u8; 2] = bytes[0..2]
+            DataType::Int32 => {
+                if len < 4 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
+                let arr: [u8; 4] = bytes[0..4]
                     .try_into()
-                    .map_err(|_| Self::cold_err("Failed to read u16 for UInt8 target"))?;
-                u16::from_be_bytes(arr) as f64
+                    .map_err(|_| Self::cold_err("Failed to read i32"))?;
+                let v = i32::from_be_bytes(arr) as i64;
+                ValueCodec::coerce_i64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
             }
-
-            // --- Fallback / Error ---
-            (dt, l) => {
-                return Err(Self::cold_err_string(format!(
-                    "Insufficient bytes ({}) for type {:?}",
-                    l, dt
-                )))
+            DataType::UInt64 => {
+                if len < 8 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
+                let arr: [u8; 8] = bytes[0..8]
+                    .try_into()
+                    .map_err(|_| Self::cold_err("Failed to read u64"))?;
+                let v = u64::from_be_bytes(arr);
+                ValueCodec::coerce_u64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
             }
-        };
-
-        // --- Step 4: Coerce and Box ---
-        // ValueCodec::coerce_f64_to_value handles scaling, rounding, and type validation/casting
-        ValueCodec::coerce_f64_to_value(raw_val, data_type, scale).ok_or_else(|| {
-            Self::cold_err_string(format!(
-                "Value {} out of range for {:?}",
-                raw_val, data_type
-            ))
-        })
+            DataType::Int64 => {
+                if len < 8 {
+                    return Err(Self::cold_err_string(format!(
+                        "Insufficient bytes ({}) for type {:?}",
+                        len, wire_dt
+                    )));
+                }
+                let arr: [u8; 8] = bytes[0..8]
+                    .try_into()
+                    .map_err(|_| Self::cold_err("Failed to read i64"))?;
+                let v = i64::from_be_bytes(arr);
+                ValueCodec::coerce_i64_to_value(v, logical_dt, t).ok_or(Self::cold_err_string(
+                    format!("Value {} out of range for {:?}", v, logical_dt),
+                ))
+            }
+            other => Err(Self::cold_err_string(format!(
+                "Unsupported numeric wire data type: {:?}",
+                other
+            ))),
+        }
     }
 
     /// Encode coils from a strongly-typed `NGValue`.
@@ -498,7 +445,7 @@ impl ModbusCodec {
             if let NGValue::Binary(b) = value {
                 // For Binary, quantity implies max length or specific length?
                 // Usually binary is just a blob. We can pad if needed.
-                let mut words = Self::bytes_to_words_from_slice(b, byte_order, word_order);
+                let mut words = Self::bytes_to_words(b, byte_order, word_order);
                 let q_usize = quantity as usize;
                 if words.len() > q_usize {
                     words.truncate(q_usize);
@@ -515,24 +462,9 @@ impl ModbusCodec {
         // We use a strategy that matches the `quantity` first, then falls back to default.
         let mut raw_bytes: Vec<u8> = match (data_type, quantity) {
             // --- Float32 Source ---
-            (DataType::Float32, 4) => {
-                let v = f32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as f64).to_be_bytes().to_vec()
-            }
             (DataType::Float32, 2) => {
                 let v = f32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
-            }
-            (DataType::Float32, 1) => {
-                let v = f32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let r = v.round();
-                if !r.is_finite() {
-                    return Err(Self::cast_err(value, "Float32 is not finite"));
-                }
-                if r < i16::MIN as f32 || r > i16::MAX as f32 {
-                    return Err(Self::cast_err(value, "out of i16 range"));
-                }
-                (r as i16).to_be_bytes().to_vec()
             }
 
             // --- Float64 Source ---
@@ -540,60 +472,17 @@ impl ModbusCodec {
                 let v = f64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
             }
-            (DataType::Float64, 2) => {
-                let v = f64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                if !v.is_finite() {
-                    return Err(Self::cast_err(value, "Float64 is not finite"));
-                }
-                if v < -(f32::MAX as f64) || v > f32::MAX as f64 {
-                    return Err(Self::cast_err(value, "out of f32 range"));
-                }
-                (v as f32).to_be_bytes().to_vec()
-            }
-            (DataType::Float64, 1) => {
-                let v = f64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let r = v.round();
-                if !r.is_finite() {
-                    return Err(Self::cast_err(value, "Float64 is not finite"));
-                }
-                if r < i16::MIN as f64 || r > i16::MAX as f64 {
-                    return Err(Self::cast_err(value, "out of i16 range"));
-                }
-                (r as i16).to_be_bytes().to_vec()
-            }
 
             // --- Int32 Source ---
-            (DataType::Int32, 4) => {
-                let v = i32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as i64).to_be_bytes().to_vec()
-            }
             (DataType::Int32, 2) => {
                 let v = i32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
             }
-            (DataType::Int32, 1) => {
-                let v = i32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let v16: i16 = v
-                    .try_into()
-                    .map_err(|_| Self::cast_err(value, "out of i16 range"))?;
-                v16.to_be_bytes().to_vec()
-            }
 
             // --- UInt32 Source ---
-            (DataType::UInt32, 4) => {
-                let v = u32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as u64).to_be_bytes().to_vec()
-            }
             (DataType::UInt32, 2) => {
                 let v = u32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
-            }
-            (DataType::UInt32, 1) => {
-                let v = u32::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let v16: u16 = v
-                    .try_into()
-                    .map_err(|_| Self::cast_err(value, "out of u16 range"))?;
-                v16.to_be_bytes().to_vec()
             }
 
             // --- Int64 Source ---
@@ -601,129 +490,23 @@ impl ModbusCodec {
                 let v = i64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
             }
-            (DataType::Int64, 2) => {
-                let v = i64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let v32: i32 = v
-                    .try_into()
-                    .map_err(|_| Self::cast_err(value, "out of i32 range"))?;
-                v32.to_be_bytes().to_vec()
-            }
-            (DataType::Int64, 1) => {
-                let v = i64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let v16: i16 = v
-                    .try_into()
-                    .map_err(|_| Self::cast_err(value, "out of i16 range"))?;
-                v16.to_be_bytes().to_vec()
-            }
 
             // --- UInt64 Source ---
             (DataType::UInt64, 4) => {
                 let v = u64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
             }
-            (DataType::UInt64, 2) => {
-                let v = u64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let v32: u32 = v
-                    .try_into()
-                    .map_err(|_| Self::cast_err(value, "out of u32 range"))?;
-                v32.to_be_bytes().to_vec()
-            }
-            (DataType::UInt64, 1) => {
-                let v = u64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let v16: u16 = v
-                    .try_into()
-                    .map_err(|_| Self::cast_err(value, "out of u16 range"))?;
-                v16.to_be_bytes().to_vec()
-            }
 
             // --- Int16 Source ---
-            (DataType::Int16, 4) => {
-                let v = i16::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as i64).to_be_bytes().to_vec()
-            }
-            (DataType::Int16, 2) => {
-                let v = i16::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as i32).to_be_bytes().to_vec()
-            }
             (DataType::Int16, 1) => {
                 let v = i16::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
             }
 
             // --- UInt16 Source ---
-            (DataType::UInt16, 4) => {
-                let v = u16::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as u64).to_be_bytes().to_vec()
-            }
-            (DataType::UInt16, 2) => {
-                let v = u16::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as u32).to_be_bytes().to_vec()
-            }
             (DataType::UInt16, 1) => {
                 let v = u16::try_from(value).map_err(|e| Self::cast_err(value, e))?;
                 v.to_be_bytes().to_vec()
-            }
-
-            // --- Int8 Source ---
-            (DataType::Int8, 4) => {
-                let v = i8::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as i64).to_be_bytes().to_vec()
-            }
-            (DataType::Int8, 2) => {
-                let v = i8::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as i32).to_be_bytes().to_vec()
-            }
-            (DataType::Int8, 1) => {
-                let v = i8::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as i16).to_be_bytes().to_vec()
-            }
-
-            // --- UInt8 Source ---
-            (DataType::UInt8, 4) => {
-                let v = u8::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as u64).to_be_bytes().to_vec()
-            }
-            (DataType::UInt8, 2) => {
-                let v = u8::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as u32).to_be_bytes().to_vec()
-            }
-            (DataType::UInt8, 1) => {
-                let v = u8::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                (v as u16).to_be_bytes().to_vec()
-            }
-
-            // --- Boolean Source ---
-            (DataType::Boolean, 4) => {
-                let b = bool::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let n: u64 = if b { 1 } else { 0 };
-                n.to_be_bytes().to_vec()
-            }
-            (DataType::Boolean, 2) => {
-                let b = bool::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let n: u32 = if b { 1 } else { 0 };
-                n.to_be_bytes().to_vec()
-            }
-            (DataType::Boolean, 1) => {
-                let b = bool::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let n: u16 = if b { 1 } else { 0 };
-                n.to_be_bytes().to_vec()
-            }
-
-            // --- Timestamp Source ---
-            (DataType::Timestamp, 4) => {
-                // Standard 64-bit ms
-                let ms: i64 = i64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                ms.to_be_bytes().to_vec()
-            }
-            (DataType::Timestamp, 2) => {
-                // 32-bit: Convert ms to seconds (u32)
-                // Symmetric to parse logic: u32 * 1000 -> i64
-                let ms: i64 = i64::try_from(value).map_err(|e| Self::cast_err(value, e))?;
-                let seconds = ms / 1000;
-                let s: u32 = seconds
-                    .try_into()
-                    .map_err(|_| Self::cast_err(value, "timestamp seconds out of u32 range"))?;
-                s.to_be_bytes().to_vec()
             }
 
             // Catch-all fallthrough for unhandled permutations (e.g. q=3)
@@ -761,29 +544,17 @@ impl ModbusCodec {
             raw_bytes = padded;
         }
 
-        Ok(Self::bytes_to_words_from_slice(
-            &raw_bytes, byte_order, word_order,
-        ))
+        Ok(Self::bytes_to_words(&raw_bytes, byte_order, word_order))
     }
 
     fn cast_err(val: &NGValue, err: impl std::fmt::Display) -> DriverError {
         DriverError::ValidationError(format!("Cast failed for {:?}: {}", val.data_type(), err))
     }
 
-    #[inline(always)]
-    pub fn bytes_to_words(
-        bytes: Vec<u8>,
-        byte_order: Endianness,
-        word_order: Endianness,
-    ) -> Vec<u16> {
-        // Delegate to slice-based version to avoid extra copies or swaps
-        Self::bytes_to_words_from_slice(&bytes, byte_order, word_order)
-    }
-
     #[inline]
     /// Convert a byte slice into register words without copying the input buffer.
     /// If the number of bytes is odd, the last word is padded with zero.
-    pub fn bytes_to_words_from_slice(
+    pub fn bytes_to_words(
         bytes: &[u8],
         byte_order: Endianness,
         word_order: Endianness,
@@ -855,6 +626,6 @@ impl BytesCodec {
         byte_order: Endianness,
         word_order: Endianness,
     ) -> Vec<u16> {
-        ModbusCodec::bytes_to_words_from_slice(bytes.as_ref(), byte_order, word_order)
+        ModbusCodec::bytes_to_words(bytes.as_ref(), byte_order, word_order)
     }
 }

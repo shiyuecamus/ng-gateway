@@ -45,9 +45,9 @@ use ng_gateway_repository::{
     DeviceRepository, DriverRepository, PluginRepository, PointRepository,
 };
 use ng_gateway_sdk::{
-    validate_and_resolve_action_inputs, AccessMode, ClientRpcResponse, Command, DriverLoader,
-    DriverRegistry, NorthwardData, NorthwardEvent, NorthwardLoader, TargetType, WritePoint,
-    WritePointErrorKind, WritePointResponse,
+    validate_and_resolve_action_inputs, AccessMode, ClientRpcResponse, Command, DriverError,
+    DriverLoader, DriverRegistry, NorthwardData, NorthwardEvent, NorthwardLoader, TargetType,
+    ValueCodec, WritePoint, WritePointErrorKind, WritePointResponse,
 };
 use sea_orm::{DatabaseConnection, IntoActiveModel};
 use std::{
@@ -1510,8 +1510,9 @@ impl NGGateway {
             return;
         }
 
-        // Datatype validation
-        if !req.value.validate_datatype(meta.data_type) {
+        // Datatype validation (northward sends logical value).
+        let expected_dt = meta.logical_data_type();
+        if !req.value.validate_datatype(expected_dt) {
             let resp = WritePointResponse::failed(
                 req.request_id.clone(),
                 req.point_id,
@@ -1519,7 +1520,7 @@ impl NGGateway {
                 WritePointErrorKind::TypeMismatch,
                 format!(
                     "type mismatch: expected {:?}, got {:?}",
-                    meta.data_type,
+                    expected_dt,
                     req.value.data_type()
                 ),
                 Utc::now(),
@@ -1566,10 +1567,58 @@ impl NGGateway {
             return;
         }
 
+        // Destructure request to avoid cloning the payload.
+        let WritePoint {
+            request_id,
+            point_id,
+            value,
+            timeout_ms,
+            ..
+        } = req;
+
+        // Convert logical -> wire value before acquiring the channel write lock.
+        // Strong failure policy: never write incorrect values to devices.
+        let wire_value = match ValueCodec::logical_to_wire_value(
+            value.clone(),
+            expected_dt,
+            point.wire_data_type(),
+            point.transform(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let kind = match &e {
+                    DriverError::ValidationError(msg) => {
+                        if msg.contains("out of range") {
+                            WritePointErrorKind::OutOfRange
+                        } else {
+                            WritePointErrorKind::TypeMismatch
+                        }
+                    }
+                    _ => WritePointErrorKind::DriverError,
+                };
+                northward_manager
+                    .send_to_app(
+                        Arc::new(NorthwardData::WritePointResponse(
+                            WritePointResponse::failed(
+                                request_id.clone(),
+                                point_id,
+                                device_id,
+                                kind,
+                                e.to_string(),
+                                Utc::now(),
+                            ),
+                        )),
+                        app_id,
+                    )
+                    .await;
+                return;
+            }
+        };
+
         // Serialize writes per channel.
         let sem = write_serializers.semaphore_for(meta.channel_id);
         let start = Instant::now();
-        let permit = match req.timeout_ms {
+        let permit = match timeout_ms {
             Some(ms) => {
                 let total = Duration::from_millis(ms);
                 match timeout(total, sem.clone().acquire_owned()).await {
@@ -1577,8 +1626,8 @@ impl NGGateway {
                     Ok(Err(_)) => None,
                     Err(_) => {
                         let resp = WritePointResponse::failed(
-                            req.request_id.clone(),
-                            req.point_id,
+                            request_id.clone(),
+                            point_id,
                             device_id,
                             WritePointErrorKind::QueueTimeout,
                             format!("queue timeout after {ms}ms"),
@@ -1599,8 +1648,8 @@ impl NGGateway {
 
         let Some((permit, total_timeout)) = permit else {
             let resp = WritePointResponse::failed(
-                req.request_id.clone(),
-                req.point_id,
+                request_id.clone(),
+                point_id,
                 device_id,
                 WritePointErrorKind::DriverError,
                 "failed to acquire channel write lock",
@@ -1613,7 +1662,7 @@ impl NGGateway {
         };
 
         // Remaining budget (best-effort): subtract queue wait time from overall timeout.
-        let remaining_timeout_ms = match req.timeout_ms {
+        let remaining_timeout_ms = match timeout_ms {
             Some(_ms) => {
                 let elapsed = start.elapsed();
                 let total = total_timeout;
@@ -1630,8 +1679,8 @@ impl NGGateway {
             None => {
                 drop(permit);
                 let resp = WritePointResponse::failed(
-                    req.request_id.clone(),
-                    req.point_id,
+                    request_id.clone(),
+                    point_id,
                     device_id,
                     WritePointErrorKind::NotFound,
                     format!("device {} not found", device_id),
@@ -1649,22 +1698,22 @@ impl NGGateway {
 
         // Execute driver write (still serialized by permit).
         let write_res = driver
-            .write_point(device_cfg, point, req.value.clone(), remaining_timeout_ms)
+            .write_point(device_cfg, point, wire_value, remaining_timeout_ms)
             .await;
 
         drop(permit);
 
         let resp = match write_res {
-            Ok(r) => WritePointResponse::success(
-                req.request_id,
-                req.point_id,
+            Ok(_r) => WritePointResponse::success(
+                request_id,
+                point_id,
                 device_id,
-                r.applied_value.or_else(|| Some(req.value.clone())),
+                Some(value),
                 Utc::now(),
             ),
             Err(e) => WritePointResponse::failed(
-                req.request_id.clone(),
-                req.point_id,
+                request_id.clone(),
+                point_id,
                 device_id,
                 WritePointErrorKind::DriverError,
                 e.to_string(),
@@ -1995,6 +2044,21 @@ async fn execute_action_direct(
     // Validate + resolve parameters into typed NGValue list (single gateway entrypoint).
     let inputs = runtime_action.input_parameters();
     let typed_params = validate_and_resolve_action_inputs(&inputs, &params)
+        .map_err(|err| NGError::DriverError(err.to_string()))?;
+
+    // Convert logical -> wire parameters with strong failure policy.
+    let typed_params = typed_params
+        .into_iter()
+        .map(|(p, v)| {
+            let wire_v = ValueCodec::logical_to_wire_value(
+                v,
+                p.logical_data_type(),
+                p.wire_data_type(),
+                p.transform(),
+            )?;
+            Ok((p, wire_v))
+        })
+        .collect::<Result<Vec<_>, DriverError>>()
         .map_err(|err| NGError::DriverError(err.to_string()))?;
 
     // Execute

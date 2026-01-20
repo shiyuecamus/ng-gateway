@@ -9,7 +9,7 @@ use ng_driver_modbus::{
     ModbusDriver,
 };
 use ng_gateway_sdk::{
-    AccessMode, DataType, Driver, NGValue, RuntimeAction, SouthwardConnectionState,
+    AccessMode, DataType, Driver, NGValue, RuntimeAction, SouthwardConnectionState, Transform,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -41,6 +41,7 @@ fn get_test_action(device_id: i32) -> ModbusAction {
             default_value: None,
             max_value: None,
             min_value: None,
+            transform: Transform::default(),
             function_code: ModbusFunctionCode::WriteSingleRegister,
             address: 0,
             quantity: 1,

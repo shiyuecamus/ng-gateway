@@ -157,12 +157,10 @@ impl SessionSupervisor {
                 ep.security_mode == desired_mode
                     && UaSecurityPolicy::from_uri(ep.security_policy_uri.as_ref()) == desired_policy
             })
-            .ok_or_else(|| {
-                DriverError::SessionError(format!(
-                    "No OPC UA endpoint matches desired security policy {:?} and mode {:?} for URL {}",
-                    desired_policy, desired_mode, url
-                ))
-            })?;
+            .ok_or(DriverError::SessionError(format!(
+                "No OPC UA endpoint matches desired security policy {:?} and mode {:?} for URL {}",
+                desired_policy, desired_mode, url
+            )))?;
 
         // In many real-world deployments (including popular demo servers), the server will
         // advertise an endpoint URL whose hostname is not directly reachable from the client

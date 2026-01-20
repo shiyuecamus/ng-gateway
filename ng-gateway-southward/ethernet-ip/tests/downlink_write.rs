@@ -5,7 +5,7 @@ use ng_driver_ethernet_ip::driver::EthernetIpDriver;
 use ng_driver_ethernet_ip::types::{EthernetIpAction, EthernetIpParameter};
 use ng_gateway_sdk::{
     validate_and_resolve_action_inputs, AccessMode, DataType, Driver, ExecuteOutcome, NGValue,
-    NorthwardData, RuntimeAction,
+    NorthwardData, RuntimeAction, Transform,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -150,6 +150,7 @@ async fn downlink_execute_action_single_param() -> anyhow::Result<()> {
                 max_value: None,
                 min_value: None,
                 tag_name: tags[0].clone(),
+                transform: Transform::default(),
             },
             EthernetIpParameter {
                 name: "myTag2".to_string(),
@@ -160,6 +161,7 @@ async fn downlink_execute_action_single_param() -> anyhow::Result<()> {
                 max_value: None,
                 min_value: None,
                 tag_name: tags[1].clone(),
+                transform: Transform::default(),
             },
         ],
     });

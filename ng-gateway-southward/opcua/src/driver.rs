@@ -391,12 +391,17 @@ impl OpcUaDriver {
                 continue;
             }
             let value_opt = dv.value.as_ref().and_then(|variant| {
-                OpcUaCodec::coerce_variant_value(variant, p.data_type(), p.scale())
+                OpcUaCodec::coerce_variant_value(variant, p.logical_data_type(), p.transform())
             });
             let value = match value_opt {
                 Some(v) => v,
                 None => {
-                    warn!(key = %p.key, expected = ?p.data_type, "OPC UA value type mismatch - dropped");
+                    warn!(
+                        key = %p.key,
+                        expected = ?p.logical_data_type(),
+                        wire = ?p.wire_data_type(),
+                        "OPC UA value type mismatch - dropped"
+                    );
                     continue;
                 }
             };
@@ -543,11 +548,12 @@ impl Driver for OpcUaDriver {
                     p.key, p.node_id
                 ))
             })?;
-            let variant = OpcUaCodec::value_to_variant(&value, p.data_type).ok_or(
+            let wire_dt = p.wire_data_type();
+            let variant = OpcUaCodec::value_to_variant(&value, wire_dt).ok_or(
                 DriverError::ValidationError(format!(
                     "OPC UA value conversion failed for parameter '{}': expected={:?}, actual={:?}, value={:?}",
                     p.key,
-                    p.data_type,
+                    wire_dt,
                     value.data_type(),
                     value
                 ))
@@ -632,26 +638,18 @@ impl Driver for OpcUaDriver {
             .max(1);
         let timeout_duration = TokioDuration::from_millis(effective_timeout_ms);
 
-        // Strict datatype guard (core should already validate, keep driver defensive).
-        if !value.validate_datatype(point.data_type) {
-            return Err(DriverError::ValidationError(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                point.data_type,
-                value.data_type()
-            )));
-        }
-
         let node_id =
             self.parse_node_id_cached(&point.node_id)
                 .ok_or(DriverError::ConfigurationError(format!(
                     "Invalid OPC UA node id for point '{}': {}",
                     point.key, point.node_id
                 )))?;
-        let variant = OpcUaCodec::value_to_variant(&value, point.data_type).ok_or(
+        let wire_dt = point.wire_data_type();
+        let variant = OpcUaCodec::value_to_variant(&value, wire_dt).ok_or(
             DriverError::ValidationError(format!(
             "OPC UA value conversion failed for point '{}': expected={:?}, actual={:?}, value={:?}",
             point.key,
-            point.data_type,
+            wire_dt,
             value.data_type(),
             value
         )),

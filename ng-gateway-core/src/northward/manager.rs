@@ -491,7 +491,7 @@ impl NGNorthwardManager {
             .app_actors
             .get(&app_id)
             .map(|entry| Arc::clone(entry.value()))
-            .ok_or_else(|| NGError::Error(format!("App {} not found for sync", app_id)))?;
+            .ok_or(NGError::Error(format!("App {} not found for sync", app_id)))?;
 
         if actor.state() != AppState::Running {
             return Err(NGError::InvalidStateError(format!(

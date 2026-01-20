@@ -30,7 +30,7 @@ impl BrandingRepository {
             .filter(BrandingColumn::Id.eq(BRANDING_SINGLETON_ID))
             .one(&db)
             .await?
-            .ok_or_else(|| StorageError::EntityNotFound("branding".into()))?
+            .ok_or(StorageError::EntityNotFound("branding".into()))?
             .into_active_model();
 
         active.app_title = Set(title);
@@ -46,7 +46,7 @@ impl BrandingRepository {
             .filter(BrandingColumn::Id.eq(BRANDING_SINGLETON_ID))
             .one(&db)
             .await?
-            .ok_or_else(|| StorageError::EntityNotFound("branding".into()))?
+            .ok_or(StorageError::EntityNotFound("branding".into()))?
             .into_active_model();
 
         active.logo_mime = Set(logo_mime);
@@ -63,7 +63,7 @@ impl BrandingRepository {
             .filter(BrandingColumn::Id.eq(BRANDING_SINGLETON_ID))
             .one(&db)
             .await?
-            .ok_or_else(|| StorageError::EntityNotFound("branding".into()))?
+            .ok_or(StorageError::EntityNotFound("branding".into()))?
             .into_active_model();
 
         active.favicon_mime = Set(favicon_mime);

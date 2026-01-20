@@ -105,9 +105,14 @@ impl Driver for EthernetIpDriver {
             return Ok(());
         }
 
-        let rx = self.reconnect_rx.lock().unwrap().take().ok_or_else(|| {
-            DriverError::ConfigurationError("Driver already started or invalid state".into())
-        })?;
+        let rx =
+            self.reconnect_rx
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or(DriverError::ConfigurationError(
+                    "Driver already started or invalid state".into(),
+                ))?;
 
         let cancel = self.cancel_token.child_token();
         let shared = Arc::clone(&self.shared);
@@ -188,26 +193,28 @@ impl Driver for EthernetIpDriver {
                     for (i, (_tag_name, res)) in results.into_iter().enumerate() {
                         let point = chunk[i];
                         match res {
-                            Ok(plc_value) => match EthernetIpCodec::to_ng_value(
-                                plc_value,
-                                point.data_type,
-                                point.scale,
-                            ) {
-                                Ok(val) => {
-                                    let pv = PointValue {
-                                        point_id: point.id,
-                                        point_key: Arc::from(point.key.as_str()),
-                                        value: val,
-                                    };
-                                    match point.r#type {
-                                        DataPointType::Telemetry => telemetry_values.push(pv),
-                                        DataPointType::Attribute => attribute_values.push(pv),
+                            Ok(plc_value) => {
+                                match EthernetIpCodec::to_ng_value(
+                                    plc_value,
+                                    point.logical_data_type(),
+                                    &point.transform,
+                                ) {
+                                    Ok(val) => {
+                                        let pv = PointValue {
+                                            point_id: point.id,
+                                            point_key: Arc::from(point.key.as_str()),
+                                            value: val,
+                                        };
+                                        match point.r#type {
+                                            DataPointType::Telemetry => telemetry_values.push(pv),
+                                            DataPointType::Attribute => attribute_values.push(pv),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Codec error for point {}: {}", point.tag_name, e);
                                     }
                                 }
-                                Err(e) => {
-                                    warn!("Codec error for point {}: {}", point.tag_name, e);
-                                }
-                            },
+                            }
                             Err(e) => {
                                 warn!("Error reading point {}: {}", point.tag_name, e);
                             }
@@ -300,7 +307,7 @@ impl Driver for EthernetIpDriver {
                 continue;
             }
 
-            let plc_value = EthernetIpCodec::to_plc_value(&value, eth_param.data_type)?;
+            let plc_value = EthernetIpCodec::to_plc_value(&value, eth_param.wire_data_type())?;
 
             let op_res = timeout(StdDuration::from_millis(self.inner.config.timeout), async {
                 let mut client = client_mutex.lock().await;
@@ -357,7 +364,7 @@ impl Driver for EthernetIpDriver {
         let client_opt = self.shared.client.load_full();
         let client_mutex = client_opt.ok_or(DriverError::ServiceUnavailable)?;
 
-        let plc_value = EthernetIpCodec::to_plc_value(&value, point.data_type)?;
+        let plc_value = EthernetIpCodec::to_plc_value(&value, point.wire_data_type())?;
         let timeout_dur = StdDuration::from_millis(timeout_ms.unwrap_or(self.inner.config.timeout));
 
         let op_res = timeout(timeout_dur, async {

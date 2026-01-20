@@ -110,7 +110,7 @@ impl DriverFactory for Dl645DriverFactory {
             unit: point.unit,
             min_value: point.min_value,
             max_value: point.max_value,
-            scale: point.scale,
+            transform: point.transform,
             di,
             decimals,
         }))
@@ -155,6 +155,7 @@ impl DriverFactory for Dl645DriverFactory {
                     default_value: input.default_value,
                     max_value: input.max_value,
                     min_value: input.min_value,
+                    transform: input.transform,
                     function_code,
                     di,
                     decimals,

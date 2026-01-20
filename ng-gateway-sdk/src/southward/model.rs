@@ -4,7 +4,7 @@ use super::{
     },
     RuntimeChannel, RuntimeDevice, RuntimePoint,
 };
-use crate::{NorthwardPublisher, RetryPolicy};
+use crate::{NorthwardPublisher, RetryPolicy, Transform};
 use chrono::{DateTime, Utc};
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
@@ -67,8 +67,15 @@ pub struct PointModel {
     pub min_value: Option<f64>,
     /// Max Value
     pub max_value: Option<f64>,
-    /// Scale
-    pub scale: Option<f64>,
+    /// Logical-layer transformation rules for this point.
+    ///
+    /// This is always present. The identity transform means:
+    /// - `datatype = None` (logical type follows wire `data_type`)
+    /// - `scale = None` (treated as 1.0)
+    /// - `offset = None` (treated as 0.0)
+    /// - `negate = false`
+    #[serde(default)]
+    pub transform: Transform,
     /// Driver configuration
     pub driver_config: serde_json::Value,
 }
@@ -102,6 +109,11 @@ pub struct Parameter {
     pub max_value: Option<f64>,
     /// Min value
     pub min_value: Option<f64>,
+    /// Logical-layer transformation rules for this parameter.
+    ///
+    /// This is always present; see `PointModel::transform` for identity semantics.
+    #[serde(default)]
+    pub transform: Transform,
     /// Driver configuration
     pub driver_config: serde_json::Value,
 }

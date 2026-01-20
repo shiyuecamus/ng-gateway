@@ -74,9 +74,9 @@ async fn main() -> NGResult<()> {
 
     // Publish ApplicationReady event to notify all subscribers
     let event_bus = ctx.event_bus()?;
-    let bus = event_bus.downcast_ref::<NGEventBus>().ok_or_else(|| {
-        NGError::from("Failed to downcast event bus to NGEventBus (unexpected context wiring)")
-    })?;
+    let bus = event_bus.downcast_ref::<NGEventBus>().ok_or(NGError::from(
+        "Failed to downcast event bus to NGEventBus (unexpected context wiring)",
+    ))?;
     bus.publish::<ApplicationReady>(ApplicationReady).await?;
 
     // Run the application until shutdown signal is received

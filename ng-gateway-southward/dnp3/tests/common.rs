@@ -5,7 +5,7 @@ use ng_driver_dnp3::types::{
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NorthwardData,
     NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -133,7 +133,7 @@ pub fn build_test_topology(
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             group: Dnp3PointGroup::BinaryInput,
             index: 0,
         },
@@ -148,7 +148,7 @@ pub fn build_test_topology(
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             group: Dnp3PointGroup::AnalogInput,
             index: 0,
         },
@@ -164,7 +164,7 @@ pub fn build_test_topology(
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             group: Dnp3PointGroup::OctetString,
             index: 0,
         },
@@ -189,6 +189,7 @@ pub fn build_test_actions(device_id: i32) -> Vec<Dnp3Action> {
                 default_value: None,
                 max_value: None,
                 min_value: None,
+                transform: Transform::default(),
                 group: Dnp3CommandType::CROB,
                 index: 0,
                 // CROB-only fields. Tests keep them empty so driver defaults are exercised.
@@ -210,6 +211,7 @@ pub fn build_test_actions(device_id: i32) -> Vec<Dnp3Action> {
                 default_value: None,
                 max_value: None,
                 min_value: None,
+                transform: Transform::default(),
                 group: Dnp3CommandType::AnalogOutputCommand,
                 index: 0,
                 // CROB-only fields. Not applicable for analog outputs.

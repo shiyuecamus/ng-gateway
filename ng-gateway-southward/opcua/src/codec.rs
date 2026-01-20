@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use chrono::Utc;
-use ng_gateway_sdk::{DataType, NGValue, ValueCodec};
+use ng_gateway_sdk::{DataType, NGValue, Transform, ValueCodec};
 use opcua::types::{ByteString, UAString, Variant};
 use std::sync::Arc;
 
@@ -38,11 +38,11 @@ impl OpcUaCodec {
     pub fn coerce_variant_value(
         value: &Variant,
         expected: DataType,
-        scale: Option<f64>,
+        t: &Transform,
     ) -> Option<NGValue> {
         match value {
             Variant::Array(_) => None,
-            Variant::Boolean(b) => ValueCodec::coerce_bool_to_value(*b, expected, scale),
+            Variant::Boolean(b) => ValueCodec::coerce_bool_to_value(*b, expected, t),
             Variant::String(s) => match expected {
                 DataType::String => Some(NGValue::String(Arc::<str>::from(s.as_ref()))),
                 DataType::Timestamp => chrono::DateTime::parse_from_rfc3339(s.as_ref())
@@ -57,7 +57,7 @@ impl OpcUaCodec {
                         .trim()
                         .parse::<f64>()
                         .ok()
-                        .and_then(|n| ValueCodec::coerce_f64_to_value(n, expected, scale))
+                        .and_then(|n| ValueCodec::coerce_f64_to_value(n, expected, t))
                 }
             },
             Variant::ByteString(b) => match expected {
@@ -74,8 +74,8 @@ impl OpcUaCodec {
             _ => {
                 // Numeric (fast) path.
                 Self::numeric_as_f64(value).and_then(|n| {
-                    ValueCodec::coerce_f64_to_value(n, expected, scale)
-                        .or_else(|| ValueCodec::coerce_bool_to_value(n != 0.0, expected, scale))
+                    ValueCodec::coerce_f64_to_value(n, expected, t)
+                        .or_else(|| ValueCodec::coerce_bool_to_value(n != 0.0, expected, t))
                 })
             }
         }

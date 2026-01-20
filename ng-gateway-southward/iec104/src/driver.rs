@@ -17,7 +17,7 @@ use ng_gateway_sdk::{
     DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
     NGValueCastError, NorthwardData, NorthwardPublisher, PointValue, RuntimeAction, RuntimeDelta,
     RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext,
-    TelemetryData, ValueCodec, WriteOutcome, WriteResult,
+    TelemetryData, Transform, ValueCodec, WriteOutcome, WriteResult,
 };
 use serde_json::json;
 use std::{
@@ -73,9 +73,27 @@ struct PointMeta {
     /// repeated `point_id -> PointMeta` lookups.
     point_key: Arc<str>,
     data_type: DataType,
-    scale: Option<f64>,
+    transform: Transform,
     /// Data point kind used to decide publishing channel
     kind: DataPointType,
+}
+
+impl PointMeta {
+    /// Get the wire data type (protocol-level, memory-layout semantics).
+    #[inline]
+    fn wire_data_type(&self) -> DataType {
+        self.data_type
+    }
+
+    /// Get the logical data type (gateway-facing semantics).
+    ///
+    /// This is derived from `transform.transform_data_type` and falls back to the
+    /// wire data type when not configured.
+    #[inline]
+    fn logical_data_type(&self) -> DataType {
+        self.transform
+            .resolve_logical_datatype(self.wire_data_type())
+    }
 }
 
 // Points keyed by packed u32: high 8 bits = type_id, low 16 bits = ioa
@@ -168,7 +186,7 @@ impl Iec104Driver {
                                     device_name: Arc::<str>::from(d.device_name.clone()),
                                     point_key: Arc::<str>::from(p.key()),
                                     data_type: ip.data_type,
-                                    scale: ip.scale,
+                                    transform: ip.transform,
                                     kind: ip.r#type,
                                 },
                             );
@@ -239,7 +257,7 @@ impl Iec104Driver {
                             if let Some(value) = ValueCodec::coerce_u64_to_value(
                                 v as u64,
                                 meta.data_type,
-                                meta.scale,
+                                &meta.transform,
                             ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
@@ -274,7 +292,7 @@ impl Iec104Driver {
                             if let Some(value) = ValueCodec::coerce_i64_to_value(
                                 v.value() as i64,
                                 meta.data_type,
-                                meta.scale,
+                                &meta.transform,
                             ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
@@ -306,9 +324,11 @@ impl Iec104Driver {
                         let ioa = info.ioa.addr().get();
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
                             let v = info.siq.spi().get();
-                            if let Some(value) =
-                                ValueCodec::coerce_bool_to_value(v, meta.data_type, meta.scale)
-                            {
+                            if let Some(value) = ValueCodec::coerce_bool_to_value(
+                                v,
+                                meta.logical_data_type(),
+                                &meta.transform,
+                            ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
                                 });
@@ -342,7 +362,7 @@ impl Iec104Driver {
                             if let Some(value) = ValueCodec::coerce_u64_to_value(
                                 v as u64,
                                 meta.data_type,
-                                meta.scale,
+                                &meta.transform,
                             ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
@@ -374,9 +394,11 @@ impl Iec104Driver {
                         let ioa = info.ioa.addr().get();
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
                             let v = info.r as f64;
-                            if let Some(value) =
-                                ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale)
-                            {
+                            if let Some(value) = ValueCodec::coerce_f64_to_value(
+                                v,
+                                meta.logical_data_type(),
+                                &meta.transform,
+                            ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
                                 });
@@ -407,9 +429,11 @@ impl Iec104Driver {
                         let ioa = info.ioa.addr().get();
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
                             let v = info.value();
-                            if let Some(value) =
-                                ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale)
-                            {
+                            if let Some(value) = ValueCodec::coerce_f64_to_value(
+                                v,
+                                meta.logical_data_type(),
+                                &meta.transform,
+                            ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
                                 });
@@ -440,9 +464,11 @@ impl Iec104Driver {
                         let ioa = info.ioa.addr().get();
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
                             let v = info.sva as f64;
-                            if let Some(value) =
-                                ValueCodec::coerce_f64_to_value(v, meta.data_type, meta.scale)
-                            {
+                            if let Some(value) = ValueCodec::coerce_f64_to_value(
+                                v,
+                                meta.logical_data_type(),
+                                &meta.transform,
+                            ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
                                 });
@@ -473,9 +499,11 @@ impl Iec104Driver {
                         let ioa = info.ioa.addr().get();
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
                             let v = info.bcr.value as i64;
-                            if let Some(value) =
-                                ValueCodec::coerce_i64_to_value(v, meta.data_type, meta.scale)
-                            {
+                            if let Some(value) = ValueCodec::coerce_i64_to_value(
+                                v,
+                                meta.logical_data_type(),
+                                &meta.transform,
+                            ) {
                                 let entry = per_device.entry(meta.device_id).or_insert_with(|| {
                                     (meta.device_name.clone(), Vec::new(), Vec::new())
                                 });
@@ -924,15 +952,6 @@ impl Driver for Iec104Driver {
                 point_type_id
             )))?;
 
-        // Strict datatype guard (core should already validate, keep driver defensive).
-        if !value.validate_datatype(point.data_type) {
-            return Err(DriverError::ValidationError(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                point.data_type,
-                value.data_type()
-            )));
-        }
-
         let effective_timeout_ms = timeout_ms
             .unwrap_or(self.inner.connection_policy.write_timeout_ms)
             .max(1);
@@ -1227,8 +1246,8 @@ impl Driver for Iec104Driver {
                                 device_id,
                                 device_name: device_name.clone(),
                                 point_key: Arc::<str>::from(p.key()),
-                                data_type: p.data_type,
-                                scale: p.scale,
+                                data_type: p.wire_data_type(),
+                                transform: p.transform,
                                 kind: p.r#type,
                             },
                         );
@@ -1263,8 +1282,8 @@ impl Driver for Iec104Driver {
                                 device_id,
                                 device_name: device_name.clone(),
                                 point_key: Arc::<str>::from(p.key()),
-                                data_type: p.data_type,
-                                scale: p.scale,
+                                data_type: p.wire_data_type(),
+                                transform: p.transform,
                                 kind: p.r#type,
                             },
                         );

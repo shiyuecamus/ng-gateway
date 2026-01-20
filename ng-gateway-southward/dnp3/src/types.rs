@@ -1,7 +1,7 @@
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimeParameter, RuntimePoint,
-    Status,
+    Status, Transform,
 };
 
 use dnp3::app::control::{
@@ -736,7 +736,8 @@ pub struct Dnp3Point {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
 
     // DNP3 specific
     pub group: Dnp3PointGroup,
@@ -774,8 +775,8 @@ impl RuntimePoint for Dnp3Point {
     fn max_value(&self) -> Option<f64> {
         self.max_value
     }
-    fn scale(&self) -> Option<f64> {
-        self.scale
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -822,6 +823,8 @@ pub struct Dnp3Parameter {
     pub default_value: Option<serde_json::Value>,
     pub max_value: Option<f64>,
     pub min_value: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
 
     // DNP3 specific for control
     pub group: Dnp3CommandType,
@@ -873,6 +876,10 @@ impl RuntimeParameter for Dnp3Parameter {
     fn min_value(&self) -> Option<f64> {
         self.min_value
     }
+
+    fn transform(&self) -> &Transform {
+        &self.transform
+    }
 }
 
 /// Runtime Metadata for Point lookup
@@ -882,7 +889,7 @@ pub struct PointMeta {
     pub point_id: i32,
     pub key: Arc<str>,
     pub data_type: DataType,
-    pub scale: Option<f64>,
+    pub transform: Transform,
     pub kind: DataPointType,
     pub device_id: i32,
     /// Device name shared across all points of the same device.
@@ -890,4 +897,21 @@ pub struct PointMeta {
     /// Using `Arc<str>` avoids cloning the device name `String` for every single
     /// point during driver initialization and reduces allocations in hot paths.
     pub device_name: Arc<str>,
+}
+
+impl PointMeta {
+    /// Get the wire data type (protocol-level, memory-layout semantics).
+    #[inline]
+    pub fn wire_data_type(&self) -> DataType {
+        self.data_type
+    }
+
+    /// Get the logical data type (gateway-facing semantics).
+    ///
+    /// This is derived from `transform.transform_data_type` and falls back to the
+    /// wire data type when not configured.
+    #[inline]
+    pub fn logical_data_type(&self) -> DataType {
+        self.transform.resolve_logical_datatype(self.data_type)
+    }
 }

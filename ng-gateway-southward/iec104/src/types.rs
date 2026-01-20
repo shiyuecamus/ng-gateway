@@ -1,7 +1,7 @@
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimeParameter, RuntimePoint,
-    Status,
+    Status, Transform,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -224,7 +224,8 @@ pub struct Iec104Point {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     /// Information object address (IOA)
     pub ioa: u16,
     /// ASDU Type ID as raw u8 (mapping handled in driver)
@@ -262,8 +263,8 @@ impl RuntimePoint for Iec104Point {
     fn max_value(&self) -> Option<f64> {
         self.max_value
     }
-    fn scale(&self) -> Option<f64> {
-        self.scale
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -311,6 +312,8 @@ pub struct Iec104Parameter {
     pub default_value: Option<serde_json::Value>,
     pub max_value: Option<f64>,
     pub min_value: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     pub ioa: u16,
     pub type_id: u8,
 }
@@ -336,5 +339,9 @@ impl RuntimeParameter for Iec104Parameter {
     }
     fn min_value(&self) -> Option<f64> {
         self.min_value
+    }
+
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }

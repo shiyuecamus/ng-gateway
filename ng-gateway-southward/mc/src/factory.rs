@@ -93,7 +93,7 @@ impl DriverFactory for McDriverFactory {
             unit: point.unit,
             min_value: point.min_value,
             max_value: point.max_value,
-            scale: point.scale,
+            transform: point.transform,
             address,
             string_len_bytes: point
                 .driver_config
@@ -113,12 +113,10 @@ impl DriverFactory for McDriverFactory {
                     .driver_config
                     .get("address")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        DriverError::ConfigurationError(format!(
-                            "address is required for MC action parameter '{}'",
-                            input.name
-                        ))
-                    })?
+                    .ok_or(DriverError::ConfigurationError(format!(
+                        "address is required for MC action parameter '{}'",
+                        input.name
+                    )))?
                     .to_string();
 
                 let logical = McLogicalAddress::parse(&raw_address).map_err(|e| {
@@ -147,6 +145,7 @@ impl DriverFactory for McDriverFactory {
                     default_value: input.default_value,
                     max_value: input.max_value,
                     min_value: input.min_value,
+                    transform: input.transform,
                     address,
                     string_len_bytes,
                 })

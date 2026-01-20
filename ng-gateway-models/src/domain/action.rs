@@ -121,6 +121,19 @@ impl FromValidatedRow for NewAction {
         let default_value = row.values.get("param_default_value").cloned();
         let min_value = row.values.get("param_min_value").and_then(|v| v.as_f64());
         let max_value = row.values.get("param_max_value").and_then(|v| v.as_f64());
+        let transform_data_type = row
+            .values
+            .get("transform_data_type")
+            .and_then(|v| v.as_i64())
+            .and_then(|n| i16::try_from(n).ok())
+            .and_then(|n| DataType::try_from(n).ok());
+        let transform_scale = row.values.get("transform_scale").and_then(|v| v.as_f64());
+        let transform_offset = row.values.get("transform_offset").and_then(|v| v.as_f64());
+        let transform_negate = row
+            .values
+            .get("transform_negate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let driver_config = row
             .values
             .get("driver_config")
@@ -139,6 +152,10 @@ impl FromValidatedRow for NewAction {
                 default_value,
                 max_value,
                 min_value,
+                transform_data_type,
+                transform_scale,
+                transform_offset,
+                transform_negate,
                 driver_config,
             }]),
         })

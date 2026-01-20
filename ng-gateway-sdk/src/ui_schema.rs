@@ -360,16 +360,60 @@ impl DriverSchemas {
                     union_case_value: None,
                     enum_items_localized: None,
                 });
-                // min_value, max_value, scale
+                // min_value, max_value
                 for (k, l_en, l_zh) in [
                     ("min_value", "Min Value", "最小值"),
                     ("max_value", "Max Value", "最大值"),
-                    ("scale", "Scale", "缩放比例"),
                 ] {
                     out.push(FlattenColumn {
                         key: k.to_string(),
                         label: Self::loc(locale, l_zh, l_en),
                         data_type: UiDataType::Float,
+                        rules: None,
+                        when: None,
+                        union_discriminator: None,
+                        union_case_value: None,
+                        enum_items_localized: None,
+                    });
+                }
+
+                // transform_* (logical datatype + affine transform)
+                out.push(FlattenColumn {
+                    key: "transform_data_type".to_string(),
+                    label: Self::loc(locale, "逻辑数据类型", "Logical Data Type"),
+                    data_type: UiDataType::Enum {
+                        items: Self::enum_items_data_type(locale),
+                    },
+                    rules: None,
+                    when: None,
+                    union_discriminator: None,
+                    union_case_value: None,
+                    enum_items_localized: None,
+                });
+                for (k, l_en, l_zh, dt) in [
+                    (
+                        "transform_scale",
+                        "Transform Scale",
+                        "缩放比例",
+                        UiDataType::Float,
+                    ),
+                    (
+                        "transform_offset",
+                        "Transform Offset",
+                        "偏移量",
+                        UiDataType::Float,
+                    ),
+                    (
+                        "transform_negate",
+                        "Transform Negate",
+                        "取反",
+                        UiDataType::Boolean,
+                    ),
+                ] {
+                    out.push(FlattenColumn {
+                        key: k.to_string(),
+                        label: Self::loc(locale, l_zh, l_en),
+                        data_type: dt,
                         rules: None,
                         when: None,
                         union_discriminator: None,
@@ -491,6 +535,51 @@ impl DriverSchemas {
                     union_case_value: None,
                     enum_items_localized: None,
                 });
+
+                // param_transform_* (logical datatype + affine transform)
+                out.push(FlattenColumn {
+                    key: "param_transform_data_type".to_string(),
+                    label: Self::loc(locale, "逻辑数据类型", "Logical Data Type"),
+                    data_type: UiDataType::Enum {
+                        items: Self::enum_items_data_type(locale),
+                    },
+                    rules: None,
+                    when: None,
+                    union_discriminator: None,
+                    union_case_value: None,
+                    enum_items_localized: None,
+                });
+                for (k, l_en, l_zh, dt) in [
+                    (
+                        "param_transform_scale",
+                        "Transform Scale",
+                        "缩放比例",
+                        UiDataType::Float,
+                    ),
+                    (
+                        "param_transform_offset",
+                        "Transform Offset",
+                        "偏移量",
+                        UiDataType::Float,
+                    ),
+                    (
+                        "param_transform_negate",
+                        "Transform Negate",
+                        "取反",
+                        UiDataType::Boolean,
+                    ),
+                ] {
+                    out.push(FlattenColumn {
+                        key: k.to_string(),
+                        label: Self::loc(locale, l_zh, l_en),
+                        data_type: dt,
+                        rules: None,
+                        when: None,
+                        union_discriminator: None,
+                        union_case_value: None,
+                        enum_items_localized: None,
+                    });
+                }
             }
             FlattenEntity::DevicePoints => {
                 // DevicePoints is handled specially in build_template() by calling
@@ -2207,7 +2296,9 @@ impl DriverEntityTemplate {
     {
         workbook
             .worksheet_range_at(0)
-            .ok_or_else(|| DriverError::ExecutionError("missing first worksheet".to_string()))
+            .ok_or(DriverError::ExecutionError(
+                "missing first worksheet".to_string(),
+            ))
             .and_then(|r| r.map_err(|e| DriverError::ExecutionError(format!("xlsx read: {e}"))))
     }
 

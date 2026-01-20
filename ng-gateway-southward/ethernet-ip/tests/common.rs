@@ -4,7 +4,7 @@ use ng_driver_ethernet_ip::types::{
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NorthwardData,
     NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -101,7 +101,7 @@ pub fn build_test_topology(
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             tag_name: tag.clone(),
         })
         .collect();

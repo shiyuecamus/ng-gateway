@@ -2,7 +2,7 @@ use super::protocol::{frame::addr::McLogicalAddress, types::McSeries};
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimeParameter, RuntimePoint,
-    Status,
+    Status, Transform,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -186,7 +186,8 @@ pub struct McPoint {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     /// MC logical address.
     pub address: McAddress,
     /// Optional string length in bytes for string data points.
@@ -233,9 +234,8 @@ impl RuntimePoint for McPoint {
     fn max_value(&self) -> Option<f64> {
         self.max_value
     }
-
-    fn scale(&self) -> Option<f64> {
-        self.scale
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -250,6 +250,8 @@ pub struct McParameter {
     pub default_value: Option<serde_json::Value>,
     pub max_value: Option<f64>,
     pub min_value: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     /// MC logical address for this parameter when writing.
     pub address: McAddress,
     /// Optional string length in bytes for string parameters.
@@ -287,6 +289,10 @@ impl RuntimeParameter for McParameter {
 
     fn min_value(&self) -> Option<f64> {
         self.min_value
+    }
+
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 

@@ -6,7 +6,7 @@ use crate::{
     enums::common::{DataType, EntityType},
 };
 use ng_gateway_macros::IntoActiveValue;
-use ng_gateway_sdk::ActionModel;
+use ng_gateway_sdk::{ActionModel, Transform};
 use sea_orm::{entity::prelude::*, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,15 @@ pub struct Parameter {
     pub max_value: Option<f64>,
     /// Min value
     pub min_value: Option<f64>,
+    /// Optional logical data type. When `None`, logical type follows wire type.
+    pub transform_data_type: Option<DataType>,
+    /// Optional scale factor \(s\). When `None`, defaults to \(1.0\).
+    pub transform_scale: Option<f64>,
+    /// Optional offset \(o\). When `None`, defaults to \(0.0\).
+    pub transform_offset: Option<f64>,
+    /// Whether to negate after affine transform.
+    #[serde(default)]
+    pub transform_negate: bool,
     /// Driver configuration
     pub driver_config: serde_json::Value,
 }
@@ -77,6 +86,12 @@ impl From<Parameter> for ng_gateway_sdk::Parameter {
             default_value: value.default_value,
             max_value: value.max_value,
             min_value: value.min_value,
+            transform: Transform {
+                transform_data_type: value.transform_data_type.map(Into::into),
+                transform_scale: value.transform_scale,
+                transform_offset: value.transform_offset,
+                transform_negate: value.transform_negate,
+            },
             driver_config: value.driver_config,
         }
     }

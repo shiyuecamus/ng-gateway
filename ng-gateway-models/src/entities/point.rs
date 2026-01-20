@@ -5,7 +5,7 @@ use crate::{
     entities::NGEntity,
     enums::common::{AccessMode, DataPointType, DataType, EntityType},
 };
-use ng_gateway_sdk::PointModel;
+use ng_gateway_sdk::{PointModel, Transform};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -32,14 +32,22 @@ pub struct Model {
     pub min_value: Option<f64>,
     /// Max Value
     pub max_value: Option<f64>,
-    /// Scale
-    pub scale: Option<f64>,
+    /// Logical data type for transform (optional).
+    pub transform_data_type: Option<DataType>,
+    /// Transform scale factor (optional).
+    pub transform_scale: Option<f64>,
+    /// Transform offset (optional).
+    pub transform_offset: Option<f64>,
+    /// Whether to negate after affine mapping.
+    pub transform_negate: bool,
     /// Driver configuration
     pub driver_config: serde_json::Value,
 }
 
 impl From<Model> for PointModel {
     fn from(value: Model) -> Self {
+        // Backward compatibility: if transform_scale is missing but legacy `scale` exists,
+        // treat it as transform.scale.
         Self {
             id: value.id,
             device_id: value.device_id,
@@ -51,7 +59,12 @@ impl From<Model> for PointModel {
             unit: value.unit,
             min_value: value.min_value,
             max_value: value.max_value,
-            scale: value.scale,
+            transform: Transform {
+                transform_data_type: value.transform_data_type.map(Into::into),
+                transform_scale: value.transform_scale,
+                transform_offset: value.transform_offset,
+                transform_negate: value.transform_negate,
+            },
             driver_config: value.driver_config,
         }
     }

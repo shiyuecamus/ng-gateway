@@ -327,14 +327,12 @@ impl DIResponse {
     /// # Errors
     /// Returns error string if the field key does not exist in the response
     pub fn extract_field(&self, key: &str) -> Result<NGValue, String> {
-        self.fields.get(key).cloned().ok_or_else(|| {
-            format!(
-                "Field '{}' not found in DI 0x{:04X} response. Available fields: {:?}",
-                key,
-                self.di,
-                self.fields.keys().collect::<Vec<_>>()
-            )
-        })
+        self.fields.get(key).cloned().ok_or(format!(
+            "Field '{}' not found in DI 0x{:04X} response. Available fields: {:?}",
+            key,
+            self.di,
+            self.fields.keys().collect::<Vec<_>>()
+        ))
     }
 
     /// Get all field keys in this response

@@ -84,7 +84,7 @@ fn build_ao_command(
     param: &Dnp3Parameter,
     value: &NGValue,
 ) -> DriverResult<()> {
-    match param.data_type {
+    match param.wire_data_type() {
         DataType::Int16 | DataType::UInt16 => {
             let value = i16::try_from(value).map_err(|e: NGValueCastError| {
                 DriverError::ValidationError(format!(
@@ -188,8 +188,8 @@ impl Dnp3Driver {
                             let meta = PointMeta {
                                 point_id: dp.id,
                                 key: Arc::from(dp.key.as_str()),
-                                data_type: dp.data_type,
-                                scale: dp.scale,
+                                data_type: dp.wire_data_type(),
+                                transform: dp.transform,
                                 kind: dp.r#type,
                                 device_id: d.id,
                                 device_name: Arc::clone(&device_name),
@@ -392,20 +392,12 @@ impl Driver for Dnp3Driver {
 
         // Product-grade constraint (Option A):
         // WritePoint for BinaryOutput only supports numeric CROB control code (UInt8).
-        if matches!(point.group, Dnp3PointGroup::BinaryOutput) && point.data_type != DataType::UInt8
+        if matches!(point.group, Dnp3PointGroup::BinaryOutput)
+            && point.wire_data_type() != DataType::UInt8
         {
             return Err(DriverError::ValidationError(format!(
                 "BinaryOutput WritePoint only supports UInt8 data_type (CROB control code), got {:?}",
-                point.data_type
-            )));
-        }
-
-        // Strict datatype guard (core should already validate, keep driver defensive).
-        if !value.validate_datatype(point.data_type) {
-            return Err(DriverError::ValidationError(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                point.data_type,
-                value.data_type()
+                point.wire_data_type()
             )));
         }
 
@@ -419,11 +411,12 @@ impl Driver for Dnp3Driver {
         let param = Dnp3Parameter {
             name: point.name.clone(),
             key: point.key.clone(),
-            data_type: point.data_type,
+            data_type: point.wire_data_type(),
             required: true,
             default_value: None,
             max_value: point.max_value,
             min_value: point.min_value,
+            transform: point.transform,
             group: command_type,
             index: point.index,
             // WritePoint path intentionally does not expose CROB timing/count knobs.
@@ -544,8 +537,8 @@ impl Driver for Dnp3Driver {
                             let meta = PointMeta {
                                 point_id: dp.id,
                                 key: Arc::from(dp.key.as_str()),
-                                data_type: dp.data_type,
-                                scale: dp.scale,
+                                data_type: dp.wire_data_type(),
+                                transform: dp.transform,
                                 kind: dp.r#type,
                                 device_id: dp.device_id,
                                 device_name: name,
@@ -575,8 +568,8 @@ impl Driver for Dnp3Driver {
                             let meta = PointMeta {
                                 point_id: dp.id,
                                 key: Arc::from(dp.key.as_str()),
-                                data_type: dp.data_type,
-                                scale: dp.scale,
+                                data_type: dp.wire_data_type(),
+                                transform: dp.transform,
                                 kind: dp.r#type,
                                 device_id: dp.device_id,
                                 device_name: name,

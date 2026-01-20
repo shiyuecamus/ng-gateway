@@ -1,7 +1,7 @@
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     DriverError, ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimeParameter,
-    RuntimePoint, Status,
+    RuntimePoint, Status, Transform,
 };
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -147,7 +147,8 @@ pub struct ModbusPoint {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     pub function_code: ModbusFunctionCode,
     pub address: u16,
     pub quantity: u16,
@@ -194,8 +195,8 @@ impl RuntimePoint for ModbusPoint {
         self.max_value
     }
 
-    fn scale(&self) -> Option<f64> {
-        self.scale
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -210,6 +211,8 @@ pub struct ModbusParameter {
     pub default_value: Option<serde_json::Value>,
     pub max_value: Option<f64>,
     pub min_value: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     pub function_code: ModbusFunctionCode,
     pub address: u16,
     pub quantity: u16,
@@ -242,6 +245,10 @@ impl RuntimeParameter for ModbusParameter {
 
     fn min_value(&self) -> Option<f64> {
         self.min_value
+    }
+
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 

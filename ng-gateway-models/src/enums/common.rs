@@ -439,6 +439,27 @@ impl From<DataType> for ng_gateway_sdk::DataType {
         }
     }
 }
+
+impl From<ng_gateway_sdk::DataType> for DataType {
+    fn from(value: ng_gateway_sdk::DataType) -> Self {
+        match value {
+            ng_gateway_sdk::DataType::Boolean => DataType::Boolean,
+            ng_gateway_sdk::DataType::Int8 => DataType::Int8,
+            ng_gateway_sdk::DataType::UInt8 => DataType::UInt8,
+            ng_gateway_sdk::DataType::Int16 => DataType::Int16,
+            ng_gateway_sdk::DataType::UInt16 => DataType::UInt16,
+            ng_gateway_sdk::DataType::Int32 => DataType::Int32,
+            ng_gateway_sdk::DataType::UInt32 => DataType::UInt32,
+            ng_gateway_sdk::DataType::Int64 => DataType::Int64,
+            ng_gateway_sdk::DataType::UInt64 => DataType::UInt64,
+            ng_gateway_sdk::DataType::Float32 => DataType::Float32,
+            ng_gateway_sdk::DataType::Float64 => DataType::Float64,
+            ng_gateway_sdk::DataType::String => DataType::String,
+            ng_gateway_sdk::DataType::Binary => DataType::Binary,
+            ng_gateway_sdk::DataType::Timestamp => DataType::Timestamp,
+        }
+    }
+}
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize_repr, Deserialize_repr,
 )]

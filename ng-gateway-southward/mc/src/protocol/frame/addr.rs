@@ -29,7 +29,7 @@ impl McLogicalAddress {
         }
 
         let (device, rest) = McDeviceType::identify_by_prefix(trimmed)
-            .ok_or_else(|| format!("unknown MC device prefix in address: {trimmed}"))?;
+            .ok_or(format!("unknown MC device prefix in address: {trimmed}"))?;
 
         // Split numeric and optional bit index, e.g. "20.2"
         let (num_part, bit_part) = match rest.split_once('.') {

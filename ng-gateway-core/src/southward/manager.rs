@@ -418,7 +418,7 @@ impl NGSouthwardManager {
             unit: point.unit().map(Arc::<str>::from),
             min_value: point.min_value(),
             max_value: point.max_value(),
-            scale: point.scale(),
+            transform: *point.transform(),
             description,
         };
         let meta = Arc::new(meta);

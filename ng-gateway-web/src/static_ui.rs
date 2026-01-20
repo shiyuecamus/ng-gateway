@@ -93,9 +93,9 @@ async fn ui_handler(
 
     match ui_cfg.ui.mode {
         WebUiMode::EmbeddedZip => {
-            let assets = req.app_data::<Data<UiAssets>>().ok_or_else(|| {
-                actix_web::error::ErrorInternalServerError("Embedded UI assets not initialized")
-            })?;
+            let assets = req.app_data::<Data<UiAssets>>().ok_or(
+                actix_web::error::ErrorInternalServerError("Embedded UI assets not initialized"),
+            )?;
             Ok(serve_from_assets(&req, assets))
         }
         WebUiMode::Filesystem => Ok(serve_from_filesystem(&req, &ui_cfg).await),

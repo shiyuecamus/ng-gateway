@@ -5,7 +5,7 @@ pub(crate) mod types;
 pub(crate) mod validation;
 pub mod wire;
 
-use crate::{DriverResult, NGValue, NorthwardData};
+use crate::{DriverResult, NGValue, NorthwardData, Transform};
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
 use model::{
@@ -203,7 +203,9 @@ macro_rules! ng_driver_factory {
 
                 let mut rx = {
                     let mut rx_opt = self.rx.lock().unwrap();
-                    rx_opt.take().ok_or_else(|| $crate::DriverError::ExecutionError("Driver already started".to_string()))?
+                    rx_opt.take().ok_or($crate::DriverError::ExecutionError(
+                        "Driver already started".to_string(),
+                    ))?
                 };
 
                 let handle = NG_RUNTIME.handle();
@@ -688,8 +690,28 @@ pub trait RuntimePoint: DowncastSync + Send + Sync + Debug {
     /// Get the data point's maximum value
     fn max_value(&self) -> Option<f64>;
 
-    /// Get the data point's scale
-    fn scale(&self) -> Option<f64>;
+    /// Get the logical-layer transform rules for this point.
+    ///
+    /// This is always present. Identity semantics are defined by `Transform`.
+    fn transform(&self) -> &Transform;
+
+    /// Get the wire data type (protocol-level, memory-layout semantics).
+    ///
+    /// This is a convenience alias for `data_type()` to improve readability
+    /// in hot-path driver code.
+    #[inline]
+    fn wire_data_type(&self) -> DataType {
+        self.data_type()
+    }
+
+    /// Get the logical data type (northward-facing semantics).
+    ///
+    /// This is derived from `transform().transform_data_type` and falls back to the
+    /// wire data type when not configured.
+    #[inline]
+    fn logical_data_type(&self) -> DataType {
+        self.transform().resolve_logical_datatype(self.data_type())
+    }
 }
 
 pub trait RuntimeParameter: DowncastSync + Send + Sync + Debug {
@@ -713,6 +735,21 @@ pub trait RuntimeParameter: DowncastSync + Send + Sync + Debug {
 
     /// Get the parameter's min value
     fn min_value(&self) -> Option<f64>;
+
+    /// Get the logical-layer transform rules for this parameter.
+    fn transform(&self) -> &Transform;
+
+    /// Get the wire data type (protocol-level, memory-layout semantics).
+    #[inline]
+    fn wire_data_type(&self) -> DataType {
+        self.data_type()
+    }
+
+    /// Get the logical data type (gateway-facing semantics).
+    #[inline]
+    fn logical_data_type(&self) -> DataType {
+        self.transform().resolve_logical_datatype(self.data_type())
+    }
 }
 
 /// Action trait for protocol-specific RPC commands

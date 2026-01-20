@@ -41,18 +41,18 @@ impl WriteDispatcher {
     ///
     /// NOTE: Proper OPC UA StatusCode mapping is done by server integration layer.
     pub async fn dispatch_write(&self, node_id: &str, value: &Variant) -> NorthwardResult<()> {
-        let point_id =
-            self.node_cache
-                .get_point_id(node_id)
-                .ok_or_else(|| NorthwardError::NotFound {
-                    entity: format!("node_id:{node_id}"),
-                })?;
-        let meta =
-            self.runtime
-                .get_point_meta(point_id)
-                .ok_or_else(|| NorthwardError::NotFound {
-                    entity: format!("point:{point_id}"),
-                })?;
+        let point_id = self
+            .node_cache
+            .get_point_id(node_id)
+            .ok_or(NorthwardError::NotFound {
+                entity: format!("node_id:{node_id}"),
+            })?;
+        let meta = self
+            .runtime
+            .get_point_meta(point_id)
+            .ok_or(NorthwardError::NotFound {
+                entity: format!("point:{point_id}"),
+            })?;
 
         ensure_writeable(meta.as_ref())?;
         let ng_value = variant_to_value(meta.as_ref(), value)?;

@@ -9,7 +9,7 @@ use ng_gateway_sdk::northward::payload::{
 };
 use ng_gateway_sdk::{
     AccessMode, DataType, NGValue, NorthwardData, NorthwardEvent, PointMeta, PointValue,
-    TelemetryData,
+    TelemetryData, Transform,
 };
 use serde_json::{json, Value};
 
@@ -32,7 +32,7 @@ fn test_uplink_mapped_json() {
         unit: None,
         min_value: None,
         max_value: None,
-        scale: None,
+        transform: Transform::default(),
         description: None,
     }));
 

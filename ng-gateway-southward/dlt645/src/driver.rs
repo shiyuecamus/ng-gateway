@@ -826,7 +826,7 @@ impl Driver for Dl645Driver {
         let param = Dl645Parameter {
             name: point.name.clone(),
             key: point.key.clone(),
-            data_type: point.data_type,
+            data_type: point.wire_data_type(),
             required: true,
             default_value: None,
             max_value: point.max_value,
@@ -834,16 +834,8 @@ impl Driver for Dl645Driver {
             decimals: point.decimals,
             function_code: Dl645FunctionCode::WriteData,
             di: Some(point.di),
+            transform: point.transform,
         };
-
-        // Strict datatype guard (core should already validate, keep driver defensive).
-        if !value.validate_datatype(point.data_type) {
-            return Err(DriverError::ValidationError(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                point.data_type,
-                value.data_type()
-            )));
-        }
 
         self.handle_write_data(
             device.security_params()?,

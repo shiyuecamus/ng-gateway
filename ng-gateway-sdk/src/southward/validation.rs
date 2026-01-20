@@ -1,4 +1,4 @@
-use crate::{DataType, DriverError, DriverResult, NGValue, RuntimeParameter};
+use crate::{DriverError, DriverResult, NGValue, RuntimeParameter};
 use std::sync::Arc;
 
 /// Validate action parameters including required presence and numeric ranges.
@@ -29,7 +29,8 @@ pub fn validate_action_parameters(
                     "Parameters is required for required parameters".to_string(),
                 ));
             }
-            return Ok(());
+            // Single-parameter actions allow scalar input; do NOT return early here because
+            // we still want to perform range checks below when configured.
         } else if params_obj.is_none() {
             return Err(DriverError::ValidationError(
                 "Parameters must be a JSON object for required parameters".to_string(),
@@ -82,21 +83,8 @@ pub fn validate_action_parameters(
         let Some(value) = value_opt else { continue };
 
         // Numeric-like types only
-        let is_numeric = matches!(
-            input.data_type(),
-            DataType::Int8
-                | DataType::UInt8
-                | DataType::Int16
-                | DataType::UInt16
-                | DataType::Int32
-                | DataType::UInt32
-                | DataType::Int64
-                | DataType::UInt64
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::Timestamp
-        );
-        if !is_numeric {
+        let expected = input.logical_data_type();
+        if !expected.is_numeric() {
             continue;
         }
 
@@ -310,8 +298,17 @@ pub fn validate_and_resolve_action_inputs(
         let key = param.key();
 
         // Resolve JSON source value (borrowed) or default (owned for optional).
-        let value_ref: Option<&serde_json::Value> = params_obj.and_then(|map| map.get(key));
-        let expected = param.data_type();
+        let value_ref: Option<&serde_json::Value> = match params_obj {
+            Some(map) => map.get(key),
+            None => {
+                if total == 1 {
+                    params_value
+                } else {
+                    None
+                }
+            }
+        };
+        let expected = param.logical_data_type();
 
         let ng: NGValue = if !required {
             match value_ref {

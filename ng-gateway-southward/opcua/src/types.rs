@@ -2,7 +2,7 @@ use super::codec::OpcUaCodec;
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     DriverError, NGValue, ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice,
-    RuntimeParameter, RuntimePoint, Status,
+    RuntimeParameter, RuntimePoint, Status, Transform,
 };
 use opcua::{
     client::{IssuedTokenWrapper, Password},
@@ -171,7 +171,8 @@ pub struct OpcUaPoint {
     pub unit: Option<String>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub scale: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     pub node_id: String,
 }
 
@@ -216,8 +217,8 @@ impl RuntimePoint for OpcUaPoint {
         self.max_value
     }
 
-    fn scale(&self) -> Option<f64> {
-        self.scale
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -232,6 +233,8 @@ pub struct OpcUaParameter {
     pub default_value: Option<serde_json::Value>,
     pub max_value: Option<f64>,
     pub min_value: Option<f64>,
+    #[serde(default)]
+    pub transform: Transform,
     pub node_id: String,
 }
 
@@ -262,6 +265,10 @@ impl RuntimeParameter for OpcUaParameter {
 
     fn min_value(&self) -> Option<f64> {
         self.min_value
+    }
+
+    fn transform(&self) -> &Transform {
+        &self.transform
     }
 }
 
@@ -428,7 +435,11 @@ impl PointMeta {
 
     #[inline]
     pub(super) fn coerce(&self, variant: &Variant) -> Option<NGValue> {
-        OpcUaCodec::coerce_variant_value(variant, self.point.data_type, self.point.scale)
+        OpcUaCodec::coerce_variant_value(
+            variant,
+            self.point.logical_data_type(),
+            &self.point.transform,
+        )
     }
 }
 

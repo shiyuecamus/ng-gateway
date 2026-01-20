@@ -74,7 +74,7 @@ impl DriverFactory for OpcUaDriverFactory {
             unit: point.unit,
             min_value: point.min_value,
             max_value: point.max_value,
-            scale: point.scale,
+            transform: point.transform,
             node_id,
         }))
     }
@@ -100,6 +100,7 @@ impl DriverFactory for OpcUaDriverFactory {
                     default_value: input.default_value,
                     max_value: input.max_value,
                     min_value: input.min_value,
+                    transform: input.transform,
                     node_id,
                 })
             })

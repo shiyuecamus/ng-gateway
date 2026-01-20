@@ -284,13 +284,15 @@ impl ModbusDriver {
                             let val = bits.get(offset).copied().unwrap_or(false);
                             match p.r#type() {
                                 DataPointType::Telemetry => {
-                                    let Some(value) =
-                                        ValueCodec::coerce_bool_to_value(val, p.data_type, p.scale)
-                                    else {
+                                    let Some(value) = ValueCodec::coerce_bool_to_value(
+                                        val,
+                                        p.logical_data_type(),
+                                        &p.transform,
+                                    ) else {
                                         warn!(
                                             point_id = p.id,
                                             key = %p.key,
-                                            expected = ?p.data_type,
+                                            expected = ?p.logical_data_type(),
                                             "Failed to coerce coil value to NGValue; dropped"
                                         );
                                         continue;
@@ -302,13 +304,15 @@ impl ModbusDriver {
                                     });
                                 }
                                 DataPointType::Attribute => {
-                                    let Some(value) =
-                                        ValueCodec::coerce_bool_to_value(val, p.data_type, p.scale)
-                                    else {
+                                    let Some(value) = ValueCodec::coerce_bool_to_value(
+                                        val,
+                                        p.logical_data_type(),
+                                        &p.transform,
+                                    ) else {
                                         warn!(
                                             point_id = p.id,
                                             key = %p.key,
-                                            expected = ?p.data_type,
+                                            expected = ?p.logical_data_type(),
                                             "Failed to coerce coil value to NGValue; dropped"
                                         );
                                         continue;
@@ -336,14 +340,17 @@ impl ModbusDriver {
                                 continue;
                             }
                             let slice = &words[offset..offset + qty];
+                            let wire_dt = p.wire_data_type();
+                            let logical_dt = p.logical_data_type();
                             match p.r#type() {
                                 DataPointType::Telemetry => {
                                     let value = match ModbusCodec::parse_register_value(
                                         slice,
-                                        p.data_type,
+                                        wire_dt,
+                                        logical_dt,
                                         self.inner.config.byte_order,
                                         self.inner.config.word_order,
-                                        p.scale,
+                                        &p.transform,
                                     ) {
                                         Ok(v) => v,
                                         Err(e) => {
@@ -365,10 +372,11 @@ impl ModbusDriver {
                                 DataPointType::Attribute => {
                                     let value = match ModbusCodec::parse_register_value(
                                         slice,
-                                        p.data_type,
+                                        wire_dt,
+                                        logical_dt,
                                         self.inner.config.byte_order,
                                         self.inner.config.word_order,
-                                        p.scale,
+                                        &p.transform,
                                     ) {
                                         Ok(v) => v,
                                         Err(e) => {
@@ -660,25 +668,16 @@ impl Driver for ModbusDriver {
             return Err(DriverError::ServiceUnavailable);
         };
 
-        // Strict datatype guard (core should already validate, keep driver defensive).
-        if !value.validate_datatype(point.data_type) {
-            return Err(DriverError::ValidationError(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                point.data_type,
-                value.data_type()
-            )));
-        }
-
         let slave = Slave(device.slave_id);
         let address = point.address;
 
         // Encode and execute exactly one write op.
         match write_fc {
             ModbusFunctionCode::WriteSingleCoil | ModbusFunctionCode::WriteMultipleCoils => {
-                if point.data_type != DataType::Boolean {
+                if point.wire_data_type() != DataType::Boolean {
                     return Err(DriverError::ValidationError(format!(
                         "coil write expects Boolean data_type, got {:?}",
-                        point.data_type
+                        point.wire_data_type()
                     )));
                 }
                 let target_len = Some(point.quantity.max(1) as usize);
@@ -720,7 +719,7 @@ impl Driver for ModbusDriver {
             | ModbusFunctionCode::WriteMultipleRegisters => {
                 let mut regs = ModbusCodec::encode_registers_from_value(
                     &value,
-                    point.data_type,
+                    point.wire_data_type(),
                     self.inner.config.byte_order,
                     self.inner.config.word_order,
                     point.quantity.max(1),

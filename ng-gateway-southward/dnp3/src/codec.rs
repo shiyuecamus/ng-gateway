@@ -18,34 +18,40 @@ impl Dnp3Codec {
     /// Convert a DNP3 boolean source into a typed `NGValue` according to `PointMeta`.
     #[inline]
     pub fn bool_to_value(value: bool, meta: &PointMeta) -> Option<NGValue> {
-        ValueCodec::coerce_bool_to_value(value, meta.data_type, meta.scale)
+        ValueCodec::coerce_bool_to_value(value, meta.logical_data_type(), &meta.transform)
     }
 
     /// Convert a DNP3 floating-point source into a typed `NGValue` according to `PointMeta`.
     #[inline]
     pub fn f64_to_value(value: f64, meta: &PointMeta) -> Option<NGValue> {
-        ValueCodec::coerce_f64_to_value(value, meta.data_type, meta.scale)
+        ValueCodec::coerce_f64_to_value(value, meta.logical_data_type(), &meta.transform)
     }
 
     /// Convert a DNP3 unsigned integer source into a typed `NGValue` according to `PointMeta`.
     #[inline]
     pub fn u64_to_value(value: u64, meta: &PointMeta) -> Option<NGValue> {
-        ValueCodec::coerce_u64_to_value(value, meta.data_type, meta.scale)
+        ValueCodec::coerce_u64_to_value(value, meta.logical_data_type(), &meta.transform)
     }
 
     /// Convert an Octet String (byte slice) into a typed `NGValue` according to `PointMeta`.
     ///
     /// Encoding rules:
-    /// - `DataType::Binary`: `NGValue::Binary(Bytes)`
-    /// - `DataType::String`: try UTF-8 decoding; if invalid UTF-8, fallback to `Binary`
+    /// - `logical_dt == DataType::Binary`: `NGValue::Binary(Bytes)`
+    /// - `logical_dt == DataType::String`: decode as UTF-8; if invalid UTF-8, use a lossy
+    ///   UTF-8 conversion to preserve the declared logical data type (never return Binary for a
+    ///   logical String point to avoid downstream type mismatches).
     #[inline]
     pub fn octets_to_value(bytes: &[u8], meta: &PointMeta) -> Option<NGValue> {
-        match meta.data_type {
+        match meta.logical_data_type() {
             DataType::Binary => Some(NGValue::Binary(Bytes::copy_from_slice(bytes))),
-            DataType::String => match std::str::from_utf8(bytes) {
-                Ok(s) => Some(NGValue::String(Arc::<str>::from(s))),
-                Err(_) => Some(NGValue::Binary(Bytes::copy_from_slice(bytes))),
-            },
+            DataType::String => std::str::from_utf8(bytes)
+                .map(|s| NGValue::String(Arc::<str>::from(s)))
+                .ok()
+                .or_else(|| {
+                    // Keep semantic correctness: still return String for logical String.
+                    let s = String::from_utf8_lossy(bytes);
+                    Some(NGValue::String(Arc::<str>::from(s.as_ref())))
+                }),
             _ => None,
         }
     }

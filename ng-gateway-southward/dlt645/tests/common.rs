@@ -5,7 +5,7 @@ use ng_driver_dlt645::{
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NorthwardData,
     NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -131,7 +131,7 @@ pub fn build_test_topology_for_version(
                 unit: Some("kWh".to_string()),
                 min_value: None,
                 max_value: None,
-                scale: None,
+                transform: Transform::default(),
                 di: di_parsed,
                 decimals: Some(2),
             }

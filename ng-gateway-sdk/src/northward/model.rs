@@ -1,5 +1,5 @@
 use super::types::{AlarmSeverity, DropPolicy, TargetType};
-use crate::{AccessMode, DataType, NGValue, PointValue};
+use crate::{AccessMode, DataType, NGValue, PointValue, Transform};
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::FromJsonQueryResult;
@@ -606,9 +606,31 @@ pub struct PointMeta {
     pub min_value: Option<f64>,
     /// Maximum allowed engineering value (optional).
     pub max_value: Option<f64>,
-    /// Scaling factor (optional). Semantics are defined by gateway core.
-    pub scale: Option<f64>,
+    /// Logical-layer transform rules for this point.
+    ///
+    /// This is always present; identity semantics are defined by `Transform`.
+    #[serde(default)]
+    pub transform: Transform,
     /// Human-readable description (optional).
     #[serde(default, with = "arc_str_serde::option")]
     pub description: Option<Arc<str>>,
+}
+
+impl PointMeta {
+    /// Get the wire data type (protocol-level, memory-layout semantics).
+    ///
+    /// For `PointMeta`, this is the configured `data_type` persisted in the gateway.
+    #[inline]
+    pub fn wire_data_type(&self) -> DataType {
+        self.data_type
+    }
+
+    /// Get the logical data type (northward-facing semantics).
+    ///
+    /// This is derived from `transform.transform_data_type` and falls back to the
+    /// wire data type when not configured.
+    #[inline]
+    pub fn logical_data_type(&self) -> DataType {
+        self.transform.resolve_logical_datatype(self.data_type)
+    }
 }

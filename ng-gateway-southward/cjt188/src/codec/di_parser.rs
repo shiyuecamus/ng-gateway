@@ -22,7 +22,7 @@ use crate::protocol::{
     frame::defs::{MeterType, Unit},
 };
 use crate::types::Cjt188Point;
-use ng_gateway_sdk::{NGValue, ValueCodec};
+use ng_gateway_sdk::{NGValue, RuntimePoint, ValueCodec};
 use std::collections::HashMap;
 
 /// Parsed field values with metadata.
@@ -99,14 +99,12 @@ impl DIResponseParser {
         points: &[&Cjt188Point],
     ) -> Result<ParsedDIResponse, ProtocolError> {
         // Get the schema for this DI and meter type
-        let schema = get_di_schema(di, meter_type).ok_or_else(|| {
-            ProtocolError::Semantic(format!(
-                "No schema found for DI 0x{:04X} with meter type 0x{:02X} ({})",
-                di,
-                meter_type.code(),
-                meter_type.family().as_str()
-            ))
-        })?;
+        let schema = get_di_schema(di, meter_type).ok_or(ProtocolError::Semantic(format!(
+            "No schema found for DI 0x{:04X} with meter type 0x{:02X} ({})",
+            di,
+            meter_type.code(),
+            meter_type.family().as_str()
+        )))?;
 
         // Build an index: field_key -> points interested in this field.
         //
@@ -231,15 +229,17 @@ impl DIResponseParser {
         let mut values: HashMap<i32, NGValue> = HashMap::with_capacity(points.len().max(1));
 
         for point in points {
+            let wire_dt = point.wire_data_type();
+            let logical_dt = point.logical_data_type();
             let coerced = match decoded {
                 DecodedScalar::F64(v) => {
-                    ValueCodec::coerce_f64_to_value(v, point.data_type, point.scale)
+                    ValueCodec::coerce_f64_to_value(v, logical_dt, &point.transform)
                 }
                 DecodedScalar::U64(v) => {
-                    ValueCodec::coerce_u64_to_value(v, point.data_type, point.scale)
+                    ValueCodec::coerce_u64_to_value(v, logical_dt, &point.transform)
                 }
                 DecodedScalar::I64(v) => {
-                    ValueCodec::coerce_i64_to_value(v, point.data_type, point.scale)
+                    ValueCodec::coerce_i64_to_value(v, logical_dt, &point.transform)
                 }
             };
 
@@ -254,8 +254,9 @@ impl DIResponseParser {
                         point_id = point.id,
                         point_key = %point.key,
                         field_key = %point.field_key,
-                        expected = ?point.data_type,
-                        scale = ?point.scale,
+                        wire_dt = ?wire_dt,
+                        logical_dt = ?logical_dt,
+                        transform = ?point.transform,
                         di = format!("0x{:04X}", point.di),
                         "Failed to coerce decoded field value into point data_type"
                     );
@@ -269,6 +270,8 @@ impl DIResponseParser {
 
 #[cfg(test)]
 mod tests {
+    use ng_gateway_sdk::Transform;
+
     use super::*;
 
     #[test]
@@ -302,7 +305,7 @@ mod tests {
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             di: 0x901F,
             field_key: "current_flow".to_string(),
         };
@@ -317,7 +320,7 @@ mod tests {
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             di: 0x901F,
             field_key: "datetime".to_string(),
         };
@@ -332,7 +335,7 @@ mod tests {
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             di: 0x901F,
             field_key: "status".to_string(),
         };
@@ -397,7 +400,7 @@ mod tests {
             unit: None,
             min_value: None,
             max_value: None,
-            scale: None,
+            transform: Transform::default(),
             di: 0x907F,
             field_key: "datetime".to_string(),
         };

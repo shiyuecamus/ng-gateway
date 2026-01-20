@@ -65,8 +65,14 @@ pub struct PointInfo {
     pub min_value: Option<f64>,
     /// Max value
     pub max_value: Option<f64>,
-    /// Scale
-    pub scale: Option<f64>,
+    /// Logical data type for transform (optional).
+    pub transform_data_type: Option<DataType>,
+    /// Transform scale factor (optional).
+    pub transform_scale: Option<f64>,
+    /// Transform offset (optional).
+    pub transform_offset: Option<f64>,
+    /// Whether to negate after affine mapping.
+    pub transform_negate: bool,
     /// Driver configuration payload
     pub driver_config: Json,
 }
@@ -93,8 +99,14 @@ pub struct NewPoint {
     pub min_value: Option<f64>,
     /// Max value
     pub max_value: Option<f64>,
-    /// Scale
-    pub scale: Option<f64>,
+    /// Logical data type for transform (optional).
+    pub transform_data_type: Option<DataType>,
+    /// Transform scale factor (optional).
+    pub transform_scale: Option<f64>,
+    /// Transform offset (optional).
+    pub transform_offset: Option<f64>,
+    /// Whether to negate after affine mapping.
+    pub transform_negate: bool,
     /// Driver configuration payload
     pub driver_config: Json,
 }
@@ -168,7 +180,19 @@ impl FromValidatedRow for NewPoint {
             .map(|s| s.to_string());
         let min_value = row.values.get("min_value").and_then(|v| v.as_f64());
         let max_value = row.values.get("max_value").and_then(|v| v.as_f64());
-        let scale = row.values.get("scale").and_then(|v| v.as_f64());
+        let transform_data_type = row
+            .values
+            .get("transform_data_type")
+            .and_then(|v| v.as_i64())
+            .and_then(|n| i16::try_from(n).ok())
+            .and_then(|n| DataType::try_from(n).ok());
+        let transform_scale = row.values.get("transform_scale").and_then(|v| v.as_f64());
+        let transform_offset = row.values.get("transform_offset").and_then(|v| v.as_f64());
+        let transform_negate = row
+            .values
+            .get("transform_negate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let driver_config = row
             .values
@@ -186,7 +210,10 @@ impl FromValidatedRow for NewPoint {
             unit,
             min_value,
             max_value,
-            scale,
+            transform_data_type,
+            transform_scale,
+            transform_offset,
+            transform_negate,
             driver_config,
         })
     }
@@ -216,8 +243,14 @@ pub struct UpdatePoint {
     pub min_value: Option<Option<f64>>,
     /// Max value (use Some(None) to clear)
     pub max_value: Option<Option<f64>>,
-    /// Scale (use Some(None) to clear)
-    pub scale: Option<Option<f64>>,
+    /// Logical data type for transform (optional).
+    pub transform_data_type: Option<DataType>,
+    /// Transform scale factor (optional).
+    pub transform_scale: Option<f64>,
+    /// Transform offset (optional).
+    pub transform_offset: Option<f64>,
+    /// Whether to negate after affine mapping.
+    pub transform_negate: bool,
     /// Driver configuration payload
     pub driver_config: Json,
 }

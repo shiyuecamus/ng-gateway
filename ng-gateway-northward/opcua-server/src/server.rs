@@ -268,7 +268,7 @@ impl OpcuaServerRuntime {
         let node_manager = handle
             .node_managers()
             .get_of_type::<NgGatewayNodeManager>()
-            .ok_or_else(|| NorthwardError::GatewayError {
+            .ok_or(NorthwardError::GatewayError {
                 reason: "failed to locate NG-Gateway node manager".to_string(),
             })?;
 

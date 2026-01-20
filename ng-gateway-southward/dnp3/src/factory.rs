@@ -83,7 +83,7 @@ impl DriverFactory for Dnp3DriverFactory {
             unit: point.unit,
             min_value: point.min_value,
             max_value: point.max_value,
-            scale: point.scale,
+            transform: point.transform,
             group,
             index,
         }))
@@ -164,6 +164,7 @@ impl DriverFactory for Dnp3DriverFactory {
                     default_value: input.default_value,
                     max_value: input.max_value,
                     min_value: input.min_value,
+                    transform: input.transform,
                     group,
                     index,
                     crob_count,

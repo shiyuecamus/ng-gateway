@@ -6,7 +6,10 @@ use crate::{
     types::{Dl645Parameter, Dl645Point, Dl645Version},
 };
 use bytes::Bytes;
-use ng_gateway_sdk::{DataType, DriverError, DriverResult, NGValue, NGValueCastError, ValueCodec};
+use ng_gateway_sdk::{
+    DataType, DriverError, DriverResult, NGValue, NGValueCastError, RuntimeParameter, RuntimePoint,
+    ValueCodec,
+};
 use std::sync::Arc;
 
 /// High-level DL/T 645 value codec.
@@ -67,11 +70,14 @@ impl Dl645Codec {
 
         let payload = &data[di_len..];
 
-        match point.data_type {
+        let wire_dt = point.wire_data_type();
+        let logical_dt = point.logical_data_type();
+
+        match wire_dt {
             DataType::Float32 | DataType::Float64 => {
                 let decimals = point.decimals.unwrap_or(2);
                 let v = decode_bcd_to_f64(payload, decimals, true)?;
-                ValueCodec::coerce_f64_to_value(v, point.data_type, point.scale).ok_or(
+                ValueCodec::coerce_f64_to_value(v, logical_dt, &point.transform).ok_or(
                     DriverError::CodecError(
                         "DL/T 645 value out of range after scaling".to_string(),
                     ),
@@ -80,7 +86,7 @@ impl Dl645Codec {
             DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
                 let decimals = point.decimals.unwrap_or(0);
                 let v = decode_bcd_to_f64(payload, decimals, true)?;
-                ValueCodec::coerce_f64_to_value(v, point.data_type, point.scale).ok_or(
+                ValueCodec::coerce_f64_to_value(v, logical_dt, &point.transform).ok_or(
                     DriverError::CodecError(
                         "DL/T 645 value out of range after scaling".to_string(),
                     ),
@@ -89,7 +95,7 @@ impl Dl645Codec {
             DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
                 let decimals = point.decimals.unwrap_or(0);
                 let v = decode_bcd_to_f64(payload, decimals, false)?;
-                ValueCodec::coerce_f64_to_value(v, point.data_type, point.scale).ok_or(
+                ValueCodec::coerce_f64_to_value(v, logical_dt, &point.transform).ok_or(
                     DriverError::CodecError(
                         "DL/T 645 value out of range after scaling".to_string(),
                     ),
@@ -97,9 +103,10 @@ impl Dl645Codec {
             }
             DataType::Boolean => {
                 let b = payload.first().copied().unwrap_or(0);
-                ValueCodec::coerce_bool_to_value((b & 0x01) != 0, DataType::Boolean, None).ok_or(
-                    DriverError::CodecError("DL/T 645 bool coercion failed".to_string()),
-                )
+                ValueCodec::coerce_bool_to_value((b & 0x01) != 0, logical_dt, &point.transform)
+                    .ok_or(DriverError::CodecError(
+                        "DL/T 645 bool coercion failed".to_string(),
+                    ))
             }
             DataType::String => {
                 // Best-effort: treat payload as ASCII/UTF-8, trim trailing zeros.
@@ -115,12 +122,10 @@ impl Dl645Codec {
             DataType::Timestamp => {
                 let decimals = point.decimals.unwrap_or(0);
                 let v = decode_bcd_to_f64(payload, decimals, false)?;
-                ValueCodec::coerce_f64_to_value(v, DataType::Timestamp, point.scale).ok_or_else(
-                    || {
-                        DriverError::CodecError(
-                            "DL/T 645 value out of range for timestamp".to_string(),
-                        )
-                    },
+                ValueCodec::coerce_f64_to_value(v, logical_dt, &point.transform).ok_or(
+                    DriverError::CodecError(
+                        "DL/T 645 value out of range for timestamp".to_string(),
+                    ),
                 )
             }
             DataType::Binary => Ok(NGValue::Binary(Bytes::copy_from_slice(payload))),
@@ -136,7 +141,7 @@ impl Dl645Codec {
         param: &Dl645Parameter,
         value: &NGValue,
     ) -> DriverResult<Vec<u8>> {
-        match param.data_type {
+        match param.wire_data_type() {
             DataType::Float32 | DataType::Float64 => {
                 let v = f64::try_from(value).map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!(
@@ -187,7 +192,7 @@ impl Dl645Codec {
             }
             _ => Err(DriverError::ConfigurationError(format!(
                 "Unsupported parameter data type for DL/T 645 action: {:?}",
-                param.data_type
+                param.wire_data_type()
             ))),
         }
     }

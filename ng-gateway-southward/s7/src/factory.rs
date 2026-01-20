@@ -69,7 +69,7 @@ impl DriverFactory for S7DriverFactory {
             unit: point.unit,
             min_value: point.min_value,
             max_value: point.max_value,
-            scale: point.scale,
+            transform: point.transform,
             address: point
                 .driver_config
                 .get("address")
@@ -95,6 +95,7 @@ impl DriverFactory for S7DriverFactory {
                     default_value: input.default_value,
                     max_value: input.max_value,
                     min_value: input.min_value,
+                    transform: input.transform,
                     address: input
                         .driver_config
                         .get("address")

@@ -1,4 +1,6 @@
-use ng_gateway_sdk::{DataType, DriverError, DriverResult, NGValue, NGValueCastError, ValueCodec};
+use ng_gateway_sdk::{
+    DataType, DriverError, DriverResult, NGValue, NGValueCastError, Transform, ValueCodec,
+};
 use rust_ethernet_ip::PlcValue;
 use std::sync::Arc;
 
@@ -14,12 +16,12 @@ pub struct EthernetIpCodec;
 
 impl EthernetIpCodec {
     /// Convert a CIP `PlcValue` into an `NGValue` according to the declared logical `DataType`
-    /// and optional point `scale`.
+    /// and logical-layer `Transform`.
     ///
     /// # Best practice
     /// This is the recommended API for uplink value conversions, because it allows:
     /// - PLC actual scalar type != point declared `DataType` (e.g. PLC UDINT -> point Int32)
-    /// - optional numeric scaling (`scale`) applied at the edge
+    /// - optional numeric affine mapping applied at the edge (via `Transform`)
     ///
     /// # Limitations
     /// - Complex CIP containers (arrays/structures) are currently not mapped.
@@ -31,7 +33,7 @@ impl EthernetIpCodec {
     pub fn to_ng_value(
         value: PlcValue,
         expected: DataType,
-        scale: Option<f64>,
+        t: &Transform,
     ) -> DriverResult<NGValue> {
         // Reject binary early: for EtherNet/IP, binary usually means SINT[]/BYTE[] which is not
         // represented as a scalar `PlcValue` here.
@@ -42,17 +44,17 @@ impl EthernetIpCodec {
         }
 
         let coerced = match value {
-            PlcValue::Bool(b) => ValueCodec::coerce_bool_to_value(b, expected, scale),
-            PlcValue::Sint(v) => ValueCodec::coerce_i64_to_value(v as i64, expected, scale),
-            PlcValue::Int(v) => ValueCodec::coerce_i64_to_value(v as i64, expected, scale),
-            PlcValue::Dint(v) => ValueCodec::coerce_i64_to_value(v as i64, expected, scale),
-            PlcValue::Lint(v) => ValueCodec::coerce_i64_to_value(v, expected, scale),
-            PlcValue::Usint(v) => ValueCodec::coerce_u64_to_value(v as u64, expected, scale),
-            PlcValue::Uint(v) => ValueCodec::coerce_u64_to_value(v as u64, expected, scale),
-            PlcValue::Udint(v) => ValueCodec::coerce_u64_to_value(v as u64, expected, scale),
-            PlcValue::Ulint(v) => ValueCodec::coerce_u64_to_value(v, expected, scale),
-            PlcValue::Real(v) => ValueCodec::coerce_f64_to_value(v as f64, expected, scale),
-            PlcValue::Lreal(v) => ValueCodec::coerce_f64_to_value(v, expected, scale),
+            PlcValue::Bool(b) => ValueCodec::coerce_bool_to_value(b, expected, t),
+            PlcValue::Sint(v) => ValueCodec::coerce_i64_to_value(v as i64, expected, t),
+            PlcValue::Int(v) => ValueCodec::coerce_i64_to_value(v as i64, expected, t),
+            PlcValue::Dint(v) => ValueCodec::coerce_i64_to_value(v as i64, expected, t),
+            PlcValue::Lint(v) => ValueCodec::coerce_i64_to_value(v, expected, t),
+            PlcValue::Usint(v) => ValueCodec::coerce_u64_to_value(v as u64, expected, t),
+            PlcValue::Uint(v) => ValueCodec::coerce_u64_to_value(v as u64, expected, t),
+            PlcValue::Udint(v) => ValueCodec::coerce_u64_to_value(v as u64, expected, t),
+            PlcValue::Ulint(v) => ValueCodec::coerce_u64_to_value(v, expected, t),
+            PlcValue::Real(v) => ValueCodec::coerce_f64_to_value(v as f64, expected, t),
+            PlcValue::Lreal(v) => ValueCodec::coerce_f64_to_value(v, expected, t),
             PlcValue::String(s) => match expected {
                 DataType::String => Some(NGValue::String(Arc::<str>::from(s))),
                 DataType::Timestamp => {
@@ -62,7 +64,7 @@ impl EthernetIpCodec {
                         .map(|dt| NGValue::Timestamp(dt.timestamp_millis()))
                         .or_else(|| {
                             s.trim().parse::<f64>().ok().and_then(|n| {
-                                ValueCodec::coerce_f64_to_value(n, DataType::Timestamp, scale)
+                                ValueCodec::coerce_f64_to_value(n, DataType::Timestamp, t)
                             })
                         })
                 }
@@ -76,7 +78,7 @@ impl EthernetIpCodec {
                     .trim()
                     .parse::<f64>()
                     .ok()
-                    .and_then(|n| ValueCodec::coerce_f64_to_value(n, expected, scale)),
+                    .and_then(|n| ValueCodec::coerce_f64_to_value(n, expected, t)),
             },
             _ => {
                 return Err(DriverError::CodecError(format!(
@@ -86,11 +88,9 @@ impl EthernetIpCodec {
             }
         };
 
-        coerced.ok_or_else(|| {
-            DriverError::CodecError(format!(
-                "EtherNet/IP typed conversion failed: expected={expected:?}, scale={scale:?}"
-            ))
-        })
+        coerced.ok_or(DriverError::CodecError(format!(
+            "EtherNet/IP typed conversion failed: expected={expected:?}, transform={t:?}"
+        )))
     }
 
     /// Convert an `NGValue` into a CIP `PlcValue` according to the declared logical `DataType`.
