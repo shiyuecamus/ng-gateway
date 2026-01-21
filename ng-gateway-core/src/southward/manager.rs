@@ -1790,7 +1790,7 @@ impl NGSouthwardManager {
 
     #[inline]
     /// Get collectable device IDs for a specific channel
-    pub fn get_channel_collectable_device_ids(&self, channel_id: i32) -> Vec<i32> {
+    pub fn get_collectable_device_ids(&self, channel_id: i32) -> Vec<i32> {
         self.index
             .channel_devices
             .get(&channel_id)

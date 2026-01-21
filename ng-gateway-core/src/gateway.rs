@@ -90,7 +90,7 @@ impl WriteSerializers {
     fn semaphore_for(&self, channel_id: i32) -> Arc<Semaphore> {
         self.per_channel
             .entry(channel_id)
-            .or_insert_with(|| Arc::new(Semaphore::new(1)))
+            .or_insert(Arc::new(Semaphore::new(1)))
             .clone()
     }
 }

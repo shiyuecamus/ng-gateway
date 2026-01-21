@@ -6,13 +6,14 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ng_gateway_sdk::{
-    AccessMode, AttributeData, DataPointType, Driver, DriverError, DriverHealth, DriverResult,
-    ExecuteOutcome, ExecuteResult, HealthStatus, NGValue, NorthwardData, PointValue, RuntimeAction,
-    RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext,
-    TelemetryData, WriteOutcome, WriteResult,
+    AccessMode, CollectItem, CollectionGroupKey, DeviceBuffers, Driver, DriverError, DriverHealth,
+    DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue, NorthwardData, PointValue,
+    RuntimeAction, RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardConnectionState,
+    SouthwardInitContext, WriteOutcome, WriteResult,
 };
 use serde_json::json;
 use std::{
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -48,6 +49,11 @@ pub struct EthernetIpDriver {
 }
 
 impl EthernetIpDriver {
+    /// Collection group key namespace for grouping by channel.
+    ///
+    /// ASCII: "ENCH"
+    const KIND_ETH_CHANNEL: u32 = 0x454E_4348;
+
     pub fn with_context(ctx: SouthwardInitContext) -> DriverResult<Self> {
         let inner = ctx
             .runtime_channel
@@ -134,47 +140,57 @@ impl Driver for EthernetIpDriver {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip_all)]
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
-        let device =
-            device
-                .downcast_ref::<EthernetIpDevice>()
-                .ok_or(DriverError::ConfigurationError(
-                    "RuntimeDevice is not EthernetIpDevice".to_string(),
-                ))?;
+    #[inline]
+    fn collection_group_key(&self, device: &dyn RuntimeDevice) -> Option<CollectionGroupKey> {
+        device
+            .downcast_ref::<EthernetIpDevice>()
+            .map(|d| CollectionGroupKey::from_u64(Self::KIND_ETH_CHANNEL, d.channel_id as u64))
+    }
 
-        if data_points.is_empty() {
-            return Ok(Vec::new());
+    #[instrument(level = "debug", skip_all)]
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
+        if items.is_empty() {
+            return Err(DriverError::ValidationError(
+                "collect_data called with empty items".to_string(),
+            ));
         }
 
-        // Use shared session directly (No lazy loading)
-        let client_opt = self.shared.client.load_full();
-        let client_mutex = match client_opt {
-            Some(c) => c,
-            None => {
-                return Err(DriverError::ServiceUnavailable);
-            }
-        };
+        // Prepare per-device output buffers and build a merged point list.
+        let mut buffers = HashMap::with_capacity(items.len());
+        let mut points = Vec::new();
 
-        // Prepare tags
-        let points: Vec<&EthernetIpPoint> = data_points
-            .iter()
-            .filter_map(|p| p.downcast_ref::<EthernetIpPoint>())
-            // Filter readable points
-            .filter(|p| matches!(p.access_mode, AccessMode::Read | AccessMode::ReadWrite))
-            .collect();
+        for (dev_any, points_any) in items.iter() {
+            let dev = dev_any.downcast_ref::<EthernetIpDevice>().ok_or_else(|| {
+                DriverError::ConfigurationError("RuntimeDevice is not EthernetIpDevice".to_string())
+            })?;
+
+            buffers
+                .entry(dev.id)
+                .or_insert_with(|| DeviceBuffers::new(dev.device_name.clone()));
+
+            for p_any in points_any.iter() {
+                let Ok(p) = Arc::clone(p_any).downcast_arc::<EthernetIpPoint>() else {
+                    continue;
+                };
+                if !matches!(p.access_mode, AccessMode::Read | AccessMode::ReadWrite) {
+                    continue;
+                }
+                points.push(p);
+            }
+        }
 
         if points.is_empty() {
             return Ok(Vec::new());
         }
 
+        // Use shared session directly (No lazy loading)
+        let client_mutex = self
+            .shared
+            .client
+            .load_full()
+            .ok_or(DriverError::ServiceUnavailable)?;
+
         const BATCH_SIZE: usize = 50;
-        let mut telemetry_values = Vec::with_capacity(points.len());
-        let mut attribute_values = Vec::with_capacity(points.len());
 
         let start_ts = Instant::now();
         let mut overall_success = true;
@@ -191,30 +207,28 @@ impl Driver for EthernetIpDriver {
             match op_res {
                 Ok(Ok(results)) => {
                     for (i, (_tag_name, res)) in results.into_iter().enumerate() {
-                        let point = chunk[i];
+                        let point = &chunk[i];
+                        let Some(buf) = buffers.get_mut(&point.device_id) else {
+                            continue;
+                        };
                         match res {
-                            Ok(plc_value) => {
-                                match EthernetIpCodec::to_ng_value(
-                                    plc_value,
-                                    point.logical_data_type(),
-                                    &point.transform,
-                                ) {
-                                    Ok(val) => {
-                                        let pv = PointValue {
-                                            point_id: point.id,
-                                            point_key: Arc::from(point.key.as_str()),
-                                            value: val,
-                                        };
-                                        match point.r#type {
-                                            DataPointType::Telemetry => telemetry_values.push(pv),
-                                            DataPointType::Attribute => attribute_values.push(pv),
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("Codec error for point {}: {}", point.tag_name, e);
-                                    }
+                            Ok(plc_value) => match EthernetIpCodec::to_ng_value(
+                                plc_value,
+                                point.logical_data_type(),
+                                &point.transform,
+                            ) {
+                                Ok(val) => {
+                                    let pv = PointValue {
+                                        point_id: point.id,
+                                        point_key: Arc::from(point.key.as_str()),
+                                        value: val,
+                                    };
+                                    buf.push(point.r#type, pv);
                                 }
-                            }
+                                Err(e) => {
+                                    warn!("Codec error for point {}: {}", point.tag_name, e);
+                                }
+                            },
                             Err(e) => {
                                 warn!("Error reading point {}: {}", point.tag_name, e);
                             }
@@ -241,28 +255,24 @@ impl Driver for EthernetIpDriver {
 
         self.update_metrics(overall_success, start_ts.elapsed().as_millis() as u64);
 
-        if !overall_success && telemetry_values.is_empty() && attribute_values.is_empty() {
+        // If the whole cycle failed and we produced no data, surface an error.
+        let any_data = buffers.values().any(|b| !b.is_empty());
+        if !overall_success && !any_data {
             return Err(DriverError::ExecutionError(
                 "All batch reads failed".to_string(),
             ));
         }
 
-        let mut out = Vec::new();
-        if !telemetry_values.is_empty() {
-            out.push(NorthwardData::Telemetry(TelemetryData::new(
-                device.id,
-                device.device_name.clone(),
-                telemetry_values,
-            )));
-        }
-        if !attribute_values.is_empty() {
-            out.push(NorthwardData::Attributes(
-                AttributeData::new_client_attributes(
-                    device.id,
-                    device.device_name.clone(),
-                    attribute_values,
-                ),
-            ));
+        let ts = Utc::now();
+        let mut device_ids: Vec<i32> = buffers.keys().copied().collect();
+        device_ids.sort_unstable();
+
+        let mut out = Vec::with_capacity(device_ids.len() * 2);
+        for device_id in device_ids {
+            let Some(buf) = buffers.remove(&device_id) else {
+                continue;
+            };
+            out.extend(buf.into_northward(device_id, ts));
         }
 
         Ok(out)

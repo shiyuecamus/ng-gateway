@@ -10,8 +10,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use ng_gateway_sdk::{
-    AttributeData, DataPointType, Driver, DriverError, DriverHealth, DriverResult, ExecuteResult,
-    HealthStatus, NGValue, NorthwardData, PointValue, RuntimeAction, RuntimeDevice,
+    AttributeData, CollectItem, DataPointType, Driver, DriverError, DriverHealth, DriverResult,
+    ExecuteResult, HealthStatus, NGValue, NorthwardData, PointValue, RuntimeAction, RuntimeDevice,
     RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, TelemetryData,
     WriteResult,
 };
@@ -219,11 +219,16 @@ impl Driver for Cjt188Driver {
         Ok(())
     }
 
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
+        let (device, data_points) = items.first().ok_or(DriverError::ValidationError(
+            "collect_data called with empty items".to_string(),
+        ))?;
+        if items.len() != 1 {
+            return Err(DriverError::ConfigurationError(
+                "CJ/T 188 driver does not support grouped collection".to_string(),
+            ));
+        }
+
         let d = device
             .downcast_ref::<Cjt188Device>()
             .ok_or(DriverError::InvalidEntity(

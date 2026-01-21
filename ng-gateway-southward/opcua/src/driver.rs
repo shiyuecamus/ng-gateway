@@ -12,10 +12,10 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, AttributeData, CollectionType, DataPointType, Driver,
-    DriverError, DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
-    NorthwardData, PointValue, RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimeParameter,
-    RuntimePoint, SouthwardConnectionState, SouthwardInitContext, Status, TelemetryData,
+    downcast_parameters, AccessMode, CollectItem, CollectionGroupKey, CollectionType,
+    DeviceBuffers, Driver, DriverError, DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult,
+    HealthStatus, NGValue, NorthwardData, PointValue, RuntimeAction, RuntimeDelta, RuntimeDevice,
+    RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, Status,
     WriteOutcome, WriteResult,
 };
 use opcua::{
@@ -67,6 +67,11 @@ pub struct OpcUaDriver {
 }
 
 impl OpcUaDriver {
+    /// Collection group key namespace for grouping by channel.
+    ///
+    /// ASCII: "OPCH"
+    const KIND_OPCUA_CHANNEL: u32 = 0x4F50_4348;
+
     #[inline]
     fn build_initial_snapshot(&self, ctx: &SouthwardInitContext) -> Arc<ArcSwap<PointSnapshot>> {
         let mut node_to_meta = HashMap::new();
@@ -234,8 +239,7 @@ impl OpcUaDriver {
         }
         if let Ok(parsed) = NodeId::from_str(node_id_str) {
             if let Ok(mut w) = self.node_id_cache.write() {
-                w.entry(node_id_str.to_string())
-                    .or_insert_with(|| parsed.clone());
+                w.entry(node_id_str.to_string()).or_insert(parsed.clone());
             }
             return Some(parsed);
         }
@@ -295,152 +299,6 @@ impl OpcUaDriver {
             }
         }
         self.shared.healthy.store(false, Ordering::Release);
-    }
-
-    async fn read_points(
-        &self,
-        device: &OpcUaDevice,
-        points_any: &[Arc<dyn RuntimePoint>],
-    ) -> DriverResult<Vec<NorthwardData>> {
-        if points_any.is_empty() {
-            return Ok(Vec::new());
-        }
-        // Single pass: downcast + access_mode filter + NodeId parse.
-        // This keeps `(points[i], nodes_to_read[i])` aligned without allocating an intermediate Vec<(..,..)>.
-        let mut points: Vec<Arc<OpcUaPoint>> = Vec::new();
-        let mut nodes_to_read: Vec<ReadValueId> = Vec::new();
-        for p_any in points_any.iter() {
-            let Ok(p) = Arc::clone(p_any).downcast_arc::<OpcUaPoint>() else {
-                continue;
-            };
-            if !matches!(p.access_mode(), AccessMode::Read | AccessMode::ReadWrite) {
-                continue;
-            }
-            let Some(id) = self.parse_node_id_cached(&p.node_id) else {
-                continue;
-            };
-            points.push(p);
-            nodes_to_read.push(ReadValueId::new_value(id));
-        }
-        if nodes_to_read.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let timeout_ms = self.inner.connection_policy.read_timeout_ms.max(1);
-
-        let start_ts = Instant::now();
-        let session_opt = self.shared.session.load_full();
-        let timeout_duration = TokioDuration::from_millis(timeout_ms);
-        let results: DriverResult<Vec<DataValue>> = match session_opt {
-            None => Err(DriverError::ServiceUnavailable),
-            Some(session) => {
-                let session = Arc::clone(&session);
-                match tokio::time::timeout(
-                    timeout_duration,
-                    session.read(&nodes_to_read, TimestampsToReturn::Both, 0.0),
-                )
-                .await
-                {
-                    Ok(Ok(values)) => Ok(values),
-                    Ok(Err(sc)) => {
-                        let msg = format!("OPC UA read status: {sc}");
-                        Err(DriverError::ExecutionError(msg))
-                    }
-                    Err(_elapsed) => Err(DriverError::Timeout(timeout_duration)),
-                }
-            }
-        };
-
-        // Update unified metrics for read path
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let elapsed_ms = start_ts.elapsed().as_millis() as u64;
-        match &results {
-            Ok(_) => {
-                self.successful_requests.fetch_add(1, Ordering::Relaxed);
-                let prev = self.last_avg_response_time_ms.load(Ordering::Acquire);
-                let new_avg = if prev == 0 {
-                    elapsed_ms
-                } else {
-                    (prev.saturating_mul(9) + elapsed_ms) / 10
-                };
-                self.last_avg_response_time_ms
-                    .store(new_avg, Ordering::Release);
-            }
-            Err(_) => {
-                self.failed_requests.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        let values = results?;
-        if values.len() != points.len() {
-            // Defensive: OPC UA servers *should* return one DataValue per requested node, in order.
-            // If not, avoid out-of-bounds and surface a signal for troubleshooting.
-            warn!(
-                device_id = device.id,
-                requested = points.len(),
-                returned = values.len(),
-                "OPC UA read returned unexpected value count"
-            );
-        }
-        let mut telemetry_values: Vec<PointValue> = Vec::with_capacity(points.len());
-        let mut attribute_values: Vec<PointValue> = Vec::with_capacity(points.len());
-
-        for (p, dv) in points.iter().zip(values.iter()) {
-            if dv.status.as_ref().map(|s| s.is_bad()).unwrap_or(false) {
-                warn!(key = %p.key, status = ?dv.status, "OPC UA value status is bad");
-                continue;
-            }
-            let value_opt = dv.value.as_ref().and_then(|variant| {
-                OpcUaCodec::coerce_variant_value(variant, p.logical_data_type(), p.transform())
-            });
-            let value = match value_opt {
-                Some(v) => v,
-                None => {
-                    warn!(
-                        key = %p.key,
-                        expected = ?p.logical_data_type(),
-                        wire = ?p.wire_data_type(),
-                        "OPC UA value type mismatch - dropped"
-                    );
-                    continue;
-                }
-            };
-            match p.r#type() {
-                DataPointType::Telemetry => {
-                    telemetry_values.push(PointValue {
-                        point_id: p.id,
-                        point_key: Arc::<str>::from(p.key.as_str()),
-                        value,
-                    });
-                }
-                DataPointType::Attribute => {
-                    attribute_values.push(PointValue {
-                        point_id: p.id,
-                        point_key: Arc::<str>::from(p.key.as_str()),
-                        value,
-                    });
-                }
-            }
-        }
-
-        let mut out = Vec::with_capacity(2);
-        if !telemetry_values.is_empty() {
-            out.push(NorthwardData::Telemetry(TelemetryData::new(
-                device.id,
-                device.device_name.clone(),
-                telemetry_values,
-            )));
-        }
-        if !attribute_values.is_empty() {
-            out.push(NorthwardData::Attributes(
-                AttributeData::new_client_attributes(
-                    device.id,
-                    device.device_name.clone(),
-                    attribute_values,
-                ),
-            ));
-        }
-        Ok(out)
     }
 }
 
@@ -502,18 +360,155 @@ impl Driver for OpcUaDriver {
     }
 
     #[inline]
+    fn collection_group_key(&self, device: &dyn RuntimeDevice) -> Option<CollectionGroupKey> {
+        device
+            .downcast_ref::<OpcUaDevice>()
+            .map(|d| CollectionGroupKey::from_u64(Self::KIND_OPCUA_CHANNEL, d.channel_id as u64))
+    }
+
+    #[inline]
     #[instrument(level = "debug", skip_all)]
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
-        if let Some(d) = device.downcast_ref::<OpcUaDevice>() {
-            return self.read_points(d, data_points.as_ref()).await;
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
+        if items.is_empty() {
+            return Err(DriverError::ValidationError(
+                "collect_data called with empty items".to_string(),
+            ));
         }
-        Err(DriverError::ConfigurationError(
-            "RuntimeDevice is not OpcUaDevice for OpcUaDriver".to_string(),
-        ))
+
+        let mut buffers = HashMap::with_capacity(items.len());
+        let mut points = Vec::new();
+        let mut nodes_to_read = Vec::new();
+
+        // Merge readable points across business devices into one OPC UA Read call.
+        for (dev_any, points_any) in items.iter() {
+            let dev = dev_any.downcast_ref::<OpcUaDevice>().ok_or_else(|| {
+                DriverError::ConfigurationError(
+                    "RuntimeDevice is not OpcUaDevice for OpcUaDriver".to_string(),
+                )
+            })?;
+
+            buffers
+                .entry(dev.id)
+                .or_insert_with(|| DeviceBuffers::new(dev.device_name.clone()));
+
+            for p_any in points_any.iter() {
+                let Ok(p) = Arc::clone(p_any).downcast_arc::<OpcUaPoint>() else {
+                    continue;
+                };
+                if !matches!(p.access_mode(), AccessMode::Read | AccessMode::ReadWrite) {
+                    continue;
+                }
+                let Some(id) = self.parse_node_id_cached(&p.node_id) else {
+                    continue;
+                };
+                points.push(p);
+                nodes_to_read.push(ReadValueId::new_value(id));
+            }
+        }
+
+        if nodes_to_read.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let timeout_ms = self.inner.connection_policy.read_timeout_ms.max(1);
+        let timeout_duration = TokioDuration::from_millis(timeout_ms);
+
+        let start_ts = Instant::now();
+        let session_opt = self.shared.session.load_full();
+        let results: DriverResult<Vec<DataValue>> = match session_opt {
+            None => Err(DriverError::ServiceUnavailable),
+            Some(session) => {
+                let session = Arc::clone(&session);
+                match tokio::time::timeout(
+                    timeout_duration,
+                    session.read(&nodes_to_read, TimestampsToReturn::Both, 0.0),
+                )
+                .await
+                {
+                    Ok(Ok(values)) => Ok(values),
+                    Ok(Err(sc)) => Err(DriverError::ExecutionError(format!(
+                        "OPC UA read status: {sc}"
+                    ))),
+                    Err(_elapsed) => Err(DriverError::Timeout(timeout_duration)),
+                }
+            }
+        };
+
+        // Unified metrics for read path.
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let elapsed_ms = start_ts.elapsed().as_millis() as u64;
+        match &results {
+            Ok(_) => {
+                self.successful_requests.fetch_add(1, Ordering::Relaxed);
+                let prev = self.last_avg_response_time_ms.load(Ordering::Acquire);
+                let new_avg = if prev == 0 {
+                    elapsed_ms
+                } else {
+                    (prev.saturating_mul(9) + elapsed_ms) / 10
+                };
+                self.last_avg_response_time_ms
+                    .store(new_avg, Ordering::Release);
+            }
+            Err(_) => {
+                self.failed_requests.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let values = results?;
+        if values.len() != points.len() {
+            warn!(
+                requested = points.len(),
+                returned = values.len(),
+                "OPC UA read returned unexpected value count"
+            );
+        }
+
+        for (p, dv) in points.iter().zip(values.iter()) {
+            if dv.status.as_ref().map(|s| s.is_bad()).unwrap_or(false) {
+                warn!(key = %p.key, status = ?dv.status, "OPC UA value status is bad");
+                continue;
+            }
+            let value_opt = dv.value.as_ref().and_then(|variant| {
+                OpcUaCodec::coerce_variant_value(variant, p.logical_data_type(), p.transform())
+            });
+            let value = match value_opt {
+                Some(v) => v,
+                None => {
+                    warn!(
+                        key = %p.key,
+                        expected = ?p.logical_data_type(),
+                        wire = ?p.wire_data_type(),
+                        "OPC UA value type mismatch - dropped"
+                    );
+                    continue;
+                }
+            };
+            let Some(buf) = buffers.get_mut(&p.device_id) else {
+                continue;
+            };
+            buf.push(
+                p.r#type(),
+                PointValue {
+                    point_id: p.id,
+                    point_key: Arc::<str>::from(p.key.as_str()),
+                    value,
+                },
+            );
+        }
+
+        let ts = Utc::now();
+        let mut device_ids: Vec<i32> = buffers.keys().copied().collect();
+        device_ids.sort_unstable();
+
+        let mut out: Vec<NorthwardData> = Vec::with_capacity(device_ids.len() * 2);
+        for device_id in device_ids {
+            let Some(buf) = buffers.remove(&device_id) else {
+                continue;
+            };
+            out.extend(buf.into_northward(device_id, ts));
+        }
+
+        Ok(out)
     }
 
     #[inline]

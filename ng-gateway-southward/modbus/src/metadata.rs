@@ -115,6 +115,39 @@ fn build_channel_nodes() -> Vec<Node> {
                                 ui: None,
                                 when: None,
                             })),
+                            Node::Field(Box::new(Field {
+                                path: "tcpPoolSize".into(),
+                                label: ui_text!(en = "TCP Pool Size", zh = "TCP 连接池大小"),
+                                data_type: UiDataType::Integer,
+                                rules: Some(Rules {
+                                    required: Some(RuleValue::WithMessage {
+                                        value: true,
+                                        message: Some(ui_text!(
+                                            en = "TCP Pool Size is required",
+                                            zh = "TCP 连接池大小是必填项"
+                                        )),
+                                    }),
+                                    min: Some(RuleValue::WithMessage {
+                                        value: 1.0,
+                                        message: Some(ui_text!(
+                                            en = "TCP Pool Size must be at least 1",
+                                            zh = "TCP 连接池大小必须至少为 1"
+                                        )),
+                                    }),
+                                    max: Some(RuleValue::WithMessage {
+                                        value: 8.0,
+                                        message: Some(ui_text!(
+                                            en = "TCP Pool Size should not exceed 8",
+                                            zh = "TCP 连接池大小建议不超过 8"
+                                        )),
+                                    }),
+                                    ..Default::default()
+                                }),
+                                default_value: Some(json!(1)),
+                                order: Some(2),
+                                ui: None,
+                                when: None,
+                            })),
                         ],
                     },
                     UnionCase {
@@ -339,25 +372,25 @@ fn build_channel_nodes() -> Vec<Node> {
                 when: None,
             })),
             Node::Field(Box::new(Field {
-                path: "maxGap".into(),
-                label: ui_text!(en = "Max Gap", zh = "最大间隙"),
+                path: "maxBatchRegisters".into(),
+                label: ui_text!(en = "Max Registers Batch", zh = "最大寄存器批量"),
                 data_type: UiDataType::Integer,
-                default_value: Some(json!(10)),
+                default_value: Some(json!(120)),
                 order: Some(8),
                 ui: None,
                 rules: Some(Rules {
                     min: Some(RuleValue::WithMessage {
-                        value: 0.0,
+                        value: 1.0,
                         message: Some(ui_text!(
-                            en = "Max Gap must be greater than 0",
-                            zh = "最大间隙必须大于0"
+                            en = "Register batch size must be greater than 0",
+                            zh = "寄存器批量必须大于0"
                         )),
                     }),
                     max: Some(RuleValue::WithMessage {
-                        value: 2000.0,
+                        value: 125.0,
                         message: Some(ui_text!(
-                            en = "Max Gap must be less than 2000",
-                            zh = "最大间隙必须小于2000"
+                            en = "Register batch size must be less than or equal to 125",
+                            zh = "寄存器批量必须小于等于125"
                         )),
                     }),
                     ..Default::default()
@@ -365,25 +398,77 @@ fn build_channel_nodes() -> Vec<Node> {
                 when: None,
             })),
             Node::Field(Box::new(Field {
-                path: "maxBatch".into(),
-                label: ui_text!(en = "Max Batch", zh = "最大批量"),
+                path: "maxGapRegisters".into(),
+                label: ui_text!(en = "Max Registers Gap", zh = "最大寄存器间隙"),
                 data_type: UiDataType::Integer,
-                default_value: Some(json!(100)),
+                default_value: Some(json!(1)),
                 order: Some(9),
                 ui: None,
                 rules: Some(Rules {
                     min: Some(RuleValue::WithMessage {
                         value: 1.0,
                         message: Some(ui_text!(
-                            en = "Max Batch must be greater than 1",
-                            zh = "最大批量必须大于1"
+                            en = "Register merge gap must be greater than 0",
+                            zh = "寄存器合并间隙必须大于0"
                         )),
                     }),
                     max: Some(RuleValue::WithMessage {
-                        value: 125.0,
+                        value: 2000.0,
                         message: Some(ui_text!(
-                            en = "Max Batch must be less than 125",
-                            zh = "最大批量必须小于125"
+                            en = "Register merge gap must be less than 2000",
+                            zh = "寄存器合并间隙必须小于2000"
+                        )),
+                    }),
+                    ..Default::default()
+                }),
+                when: None,
+            })),
+            Node::Field(Box::new(Field {
+                path: "maxBatchBits".into(),
+                label: ui_text!(en = "Max Bits Batch", zh = "最大位批量"),
+                data_type: UiDataType::Integer,
+                default_value: Some(json!(2000)),
+                order: Some(10),
+                ui: None,
+                rules: Some(Rules {
+                    min: Some(RuleValue::WithMessage {
+                        value: 1.0,
+                        message: Some(ui_text!(
+                            en = "Bit batch size must be greater than 0",
+                            zh = "位批量必须大于0"
+                        )),
+                    }),
+                    max: Some(RuleValue::WithMessage {
+                        value: 2000.0,
+                        message: Some(ui_text!(
+                            en = "Bit batch size must be less than or equal to 2000",
+                            zh = "位批量必须小于等于2000"
+                        )),
+                    }),
+                    ..Default::default()
+                }),
+                when: None,
+            })),
+            Node::Field(Box::new(Field {
+                path: "maxGapBits".into(),
+                label: ui_text!(en = "Max Bits Gap", zh = "最大位间隙"),
+                data_type: UiDataType::Integer,
+                default_value: Some(json!(500)),
+                order: Some(11),
+                ui: None,
+                rules: Some(Rules {
+                    min: Some(RuleValue::WithMessage {
+                        value: 1.0,
+                        message: Some(ui_text!(
+                            en = "Bit merge gap must be greater than 0",
+                            zh = "位合并间隙必须大于0"
+                        )),
+                    }),
+                    max: Some(RuleValue::WithMessage {
+                        value: 2000.0,
+                        message: Some(ui_text!(
+                            en = "Bit merge gap must be less than 2000",
+                            zh = "位合并间隙必须小于2000"
                         )),
                     }),
                     ..Default::default()

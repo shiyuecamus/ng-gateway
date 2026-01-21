@@ -68,7 +68,7 @@ async fn downlink_write_point() -> anyhow::Result<()> {
     // Optional read-back verification.
     if assert_readback {
         let out = driver
-            .collect_data(Arc::clone(&device_arc), runtime_points.clone())
+            .collect_data(&[(Arc::clone(&device_arc), runtime_points.clone())])
             .await
             .map_err(|e| anyhow::anyhow!("collect_data after write failed: {e}"))?;
 

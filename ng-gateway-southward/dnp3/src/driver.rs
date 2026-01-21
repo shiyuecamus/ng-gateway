@@ -17,10 +17,11 @@ use dnp3::{
     master::{CommandBuilder, CommandMode, CommandSupport, ReadHeader, ReadRequest},
 };
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, DataType, Driver, DriverError, DriverHealth, DriverResult,
-    ExecuteOutcome, ExecuteResult, HealthStatus, NGValue, NGValueCastError, NorthwardData,
-    NorthwardPublisher, RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimeParameter, RuntimePoint,
-    SouthwardConnectionState, SouthwardInitContext, WriteOutcome, WriteResult,
+    downcast_parameters, AccessMode, CollectItem, DataType, Driver, DriverError, DriverHealth,
+    DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue, NGValueCastError,
+    NorthwardData, NorthwardPublisher, RuntimeAction, RuntimeDelta, RuntimeDevice,
+    RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, WriteOutcome,
+    WriteResult,
 };
 use serde_json::json;
 use std::sync::{
@@ -273,11 +274,7 @@ impl Driver for Dnp3Driver {
         Ok(())
     }
 
-    async fn collect_data(
-        &self,
-        _device: Arc<dyn RuntimeDevice>,
-        _data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
+    async fn collect_data(&self, _items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
         // TODO: Report-only; collector shouldn't call into this for DNP3
         Ok(Vec::new())
     }

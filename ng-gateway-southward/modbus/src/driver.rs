@@ -8,14 +8,15 @@ use crate::types::ModbusChannel;
 use async_trait::async_trait;
 use chrono::Utc;
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, AttributeData, DataPointType, DataType, Driver, DriverError,
-    DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
-    NorthwardData, PointValue, RuntimeAction, RuntimeDevice, RuntimeParameter, RuntimePoint,
-    SouthwardConnectionState, SouthwardInitContext, TelemetryData, ValueCodec, WriteOutcome,
-    WriteResult,
+    downcast_parameters, AccessMode, CollectItem, CollectionGroupKey, DataPointType, DataType,
+    DeviceBuffers, Driver, DriverError, DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult,
+    HealthStatus, NGValue, NorthwardData, PointValue, RuntimeAction, RuntimeDevice,
+    RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, ValueCodec,
+    WriteOutcome, WriteResult,
 };
 use serde_json::json;
 use std::{
+    collections::HashMap,
     future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -28,7 +29,7 @@ use tokio::{
     time::{timeout, Duration as TokioDuration},
 };
 use tokio_modbus::{
-    client::{Client as _, Context, Reader, Writer},
+    client::{Context, Reader, Writer},
     slave::{Slave, SlaveContext as _},
     ExceptionCode,
 };
@@ -48,7 +49,7 @@ use tracing::{instrument, warn};
 pub struct ModbusDriver {
     /// Driver configuration
     inner: Arc<ModbusChannel>,
-    /// Shared single session
+    /// Shared session pool state (TCP: N contexts, RTU: 1 context).
     session: SharedSession,
     /// Deferred reconnect receiver, created during init and consumed once in start
     reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
@@ -67,6 +68,54 @@ pub struct ModbusDriver {
 }
 
 impl ModbusDriver {
+    /// Collection group key namespace for Modbus slave ID grouping.
+    ///
+    /// ASCII: "MODB"
+    const KIND_MODBUS_SLAVE: u32 = 0x4D4F_4442;
+
+    /// Return the effective pool size for this channel configuration.
+    ///
+    /// # Notes
+    /// - For RTU, this always returns `1` to preserve single-flight semantics.
+    /// - For TCP, we clamp the configured `tcpPoolSize` to a conservative upper bound.
+    #[inline]
+    fn effective_pool_size(&self) -> usize {
+        match &self.inner.config.connection {
+            crate::types::ModbusConnection::Tcp { .. } => {
+                self.inner.config.tcp_pool_size.clamp(1, 8) as usize
+            }
+            crate::types::ModbusConnection::Rtu { .. } => 1,
+        }
+    }
+
+    /// Pick a Modbus context from the current session pool (round-robin).
+    ///
+    /// This helper is allocation-free and triggers a reconnect when no pool is available.
+    #[inline]
+    fn pick_ctx(&self) -> DriverResult<Arc<tokio::sync::Mutex<Context>>> {
+        let pool = self.session.pool.load_full();
+        let Some(pool) = pool else {
+            self.session.healthy.store(false, Ordering::Release);
+            let _ = self
+                .session
+                .last_error
+                .lock()
+                .map(|mut g| *g = Some("no session pool".to_string()));
+            let _ = self.session.reconnect_tx.try_send(());
+            return Err(DriverError::ServiceUnavailable);
+        };
+        pool.pick().ok_or_else(|| {
+            self.session.healthy.store(false, Ordering::Release);
+            let _ = self
+                .session
+                .last_error
+                .lock()
+                .map(|mut g| *g = Some("empty session pool".to_string()));
+            let _ = self.session.reconnect_tx.try_send(());
+            DriverError::ServiceUnavailable
+        })
+    }
+
     /// Run a Modbus operation with timeout, unified error handling, reconnection notify and metrics.
     /// The closure receives a mutable context and should return a future producing
     /// tokio_modbus::Result<Result<T, tokio_modbus::ExceptionCode>>.
@@ -173,52 +222,75 @@ impl ModbusDriver {
         })
     }
 
-    #[inline]
-    /// Collect data with specified Modbus slave id for all points
-    async fn collect_with_slave(
+    /// Collect for a Modbus "physical group" (same slave id) and return northward payloads
+    /// grouped by **business device**.
+    ///
+    /// # Notes
+    /// - This method enforces the Modbus single-flight semantics on the underlying `Context`.
+    /// - The read planner merges points across *all* business devices in the group.
+    async fn collect_group_with_slave(
         &self,
-        device_id: i32,
-        device_name: &str,
         slave_id: u8,
-        points_any: &[Arc<dyn RuntimePoint>],
+        items: &[CollectItem],
     ) -> DriverResult<Vec<NorthwardData>> {
-        // Downcast points to ModbusPoint and build batches
-        let modbus_points: Vec<&ModbusPoint> = points_any
-            .iter()
-            .filter_map(|p| p.downcast_ref::<ModbusPoint>())
-            .filter(|mp| matches!(mp.access_mode(), AccessMode::Read | AccessMode::ReadWrite))
-            .collect();
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Prepare per-device output buffers and build a merged point list.
+        let mut buffers = HashMap::with_capacity(items.len());
+        let mut modbus_points = Vec::new();
+
+        for (dev, points_any) in items.iter() {
+            let md = dev.downcast_ref::<ModbusDevice>().ok_or_else(|| {
+                DriverError::ConfigurationError(
+                    "RuntimeDevice is not ModbusDevice for ModbusDriver".to_string(),
+                )
+            })?;
+            if md.slave_id != slave_id {
+                return Err(DriverError::ConfigurationError(
+                    "collect_data items contain mixed slaveId".to_string(),
+                ));
+            }
+
+            buffers
+                .entry(md.id)
+                .or_insert_with(|| DeviceBuffers::new(md.device_name.clone()));
+
+            for p in points_any.iter() {
+                let Some(mp) = p.downcast_ref::<ModbusPoint>() else {
+                    continue;
+                };
+                if !matches!(mp.access_mode(), AccessMode::Read | AccessMode::ReadWrite) {
+                    continue;
+                }
+                modbus_points.push(mp);
+            }
+        }
 
         if modbus_points.is_empty() {
             return Ok(Vec::new());
         }
 
-        let batches = ModbusPlanner::plan_read_batches(
-            ModbusPlannerConfig {
-                max_gap: self.inner.config.max_gap,
-                max_batch: self.inner.config.max_batch.max(1),
-            },
-            &modbus_points,
-        );
-
-        let mut telemetry_values: Vec<PointValue> = Vec::with_capacity(modbus_points.len());
-        let mut attribute_values: Vec<PointValue> = Vec::with_capacity(modbus_points.len());
-
-        // Acquire context once for the collection cycle
-        let ctx_arc = self.session.ctx.load_full();
-        let Some(ctx_arc) = ctx_arc else {
-            self.session.healthy.store(false, Ordering::Release);
-            let _ = self
-                .session
-                .last_error
-                .lock()
-                .map(|mut g| *g = Some("no context".to_string()));
-            let _ = self.session.reconnect_tx.try_send(());
-            return Err(DriverError::ServiceUnavailable);
+        // Clamp batch parameters by Modbus hard limits.
+        let cfg = ModbusPlannerConfig {
+            max_gap_registers: self.inner.config.max_gap_registers,
+            max_batch_registers: self.inner.config.max_batch_registers.clamp(1, 125),
+            max_gap_bits: self.inner.config.max_gap_bits,
+            max_batch_bits: self.inner.config.max_batch_bits.clamp(1, 2000),
         };
+
+        let batches = ModbusPlanner::plan_read_batches(cfg, &modbus_points);
+
+        // Pick one context for the whole collection cycle.
+        //
+        // - TCP: spreads different groups across pool contexts (higher throughput).
+        // - RTU: pool size is effectively 1, so semantics are unchanged.
+        let ctx_arc = self.pick_ctx()?;
 
         let slave = Slave(slave_id);
         let timeout_ms = self.inner.connection_policy.read_timeout_ms.max(1);
+        let ts = Utc::now();
 
         for batch in batches {
             let op_label = match batch.function {
@@ -229,7 +301,7 @@ impl ModbusDriver {
                 _ => "UnknownRead",
             };
 
-            // Validate function
+            // Validate function (defensive)
             match batch.function {
                 ModbusFunctionCode::ReadCoils
                 | ModbusFunctionCode::ReadDiscreteInputs
@@ -282,6 +354,9 @@ impl ModbusDriver {
                         for p in &batch.points {
                             let offset = p.address.saturating_sub(batch.start_addr) as usize;
                             let val = bits.get(offset).copied().unwrap_or(false);
+                            let Some(buf) = buffers.get_mut(&p.device_id) else {
+                                continue;
+                            };
                             match p.r#type() {
                                 DataPointType::Telemetry => {
                                     let Some(value) = ValueCodec::coerce_bool_to_value(
@@ -297,11 +372,14 @@ impl ModbusDriver {
                                         );
                                         continue;
                                     };
-                                    telemetry_values.push(PointValue {
-                                        point_id: p.id,
-                                        point_key: Arc::<str>::from(p.key.as_str()),
-                                        value,
-                                    });
+                                    buf.push(
+                                        DataPointType::Telemetry,
+                                        PointValue {
+                                            point_id: p.id,
+                                            point_key: Arc::<str>::from(p.key.as_str()),
+                                            value,
+                                        },
+                                    );
                                 }
                                 DataPointType::Attribute => {
                                     let Some(value) = ValueCodec::coerce_bool_to_value(
@@ -317,11 +395,14 @@ impl ModbusDriver {
                                         );
                                         continue;
                                     };
-                                    attribute_values.push(PointValue {
-                                        point_id: p.id,
-                                        point_key: Arc::<str>::from(p.key.as_str()),
-                                        value,
-                                    });
+                                    buf.push(
+                                        DataPointType::Attribute,
+                                        PointValue {
+                                            point_id: p.id,
+                                            point_key: Arc::<str>::from(p.key.as_str()),
+                                            value,
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -339,61 +420,51 @@ impl ModbusDriver {
                                 );
                                 continue;
                             }
+                            let Some(buf) = buffers.get_mut(&p.device_id) else {
+                                continue;
+                            };
                             let slice = &words[offset..offset + qty];
                             let wire_dt = p.wire_data_type();
                             let logical_dt = p.logical_data_type();
+                            let value = match ModbusCodec::parse_register_value(
+                                slice,
+                                wire_dt,
+                                logical_dt,
+                                self.inner.config.byte_order,
+                                self.inner.config.word_order,
+                                &p.transform,
+                            ) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(
+                                        point_id = p.id,
+                                        key = %p.key,
+                                        err = %e,
+                                        "Parse register to NGValue failed; dropped"
+                                    );
+                                    continue;
+                                }
+                            };
                             match p.r#type() {
                                 DataPointType::Telemetry => {
-                                    let value = match ModbusCodec::parse_register_value(
-                                        slice,
-                                        wire_dt,
-                                        logical_dt,
-                                        self.inner.config.byte_order,
-                                        self.inner.config.word_order,
-                                        &p.transform,
-                                    ) {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            warn!(
-                                                point_id = p.id,
-                                                key = %p.key,
-                                                err = %e,
-                                                "Parse register to NGValue failed; dropped"
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                    telemetry_values.push(PointValue {
-                                        point_id: p.id,
-                                        point_key: Arc::<str>::from(p.key.as_str()),
-                                        value,
-                                    });
+                                    buf.push(
+                                        DataPointType::Telemetry,
+                                        PointValue {
+                                            point_id: p.id,
+                                            point_key: Arc::<str>::from(p.key.as_str()),
+                                            value,
+                                        },
+                                    );
                                 }
                                 DataPointType::Attribute => {
-                                    let value = match ModbusCodec::parse_register_value(
-                                        slice,
-                                        wire_dt,
-                                        logical_dt,
-                                        self.inner.config.byte_order,
-                                        self.inner.config.word_order,
-                                        &p.transform,
-                                    ) {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            warn!(
-                                                point_id = p.id,
-                                                key = %p.key,
-                                                err = %e,
-                                                "Parse register to NGValue failed; dropped"
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                    attribute_values.push(PointValue {
-                                        point_id: p.id,
-                                        point_key: Arc::<str>::from(p.key.as_str()),
-                                        value,
-                                    });
+                                    buf.push(
+                                        DataPointType::Attribute,
+                                        PointValue {
+                                            point_id: p.id,
+                                            point_key: Arc::<str>::from(p.key.as_str()),
+                                            value,
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -403,22 +474,16 @@ impl ModbusDriver {
             }
         }
 
-        let mut out: Vec<NorthwardData> = Vec::with_capacity(2);
-        if !telemetry_values.is_empty() {
-            out.push(NorthwardData::Telemetry(TelemetryData::new(
-                device_id,
-                device_name.to_string(),
-                telemetry_values,
-            )));
-        }
-        if !attribute_values.is_empty() {
-            out.push(NorthwardData::Attributes(
-                AttributeData::new_client_attributes(
-                    device_id,
-                    device_name.to_string(),
-                    attribute_values,
-                ),
-            ));
+        // Build stable, per-business-device outputs with a single group timestamp.
+        let mut device_ids: Vec<i32> = buffers.keys().copied().collect();
+        device_ids.sort_unstable();
+
+        let mut out: Vec<NorthwardData> = Vec::with_capacity(device_ids.len() * 2);
+        for device_id in device_ids {
+            let Some(buf) = buffers.remove(&device_id) else {
+                continue;
+            };
+            out.extend(buf.into_northward(device_id, ts));
         }
 
         Ok(out)
@@ -454,31 +519,36 @@ impl Driver for ModbusDriver {
     async fn stop(&self) -> DriverResult<()> {
         self.cancel_token.cancel();
         self.session.shutdown.store(true, Ordering::Release);
-        if let Some(ctx) = self.session.ctx.swap(None) {
-            let _ = timeout(TokioDuration::from_secs(2), async move {
-                let mut guard = ctx.lock().await;
-                guard.disconnect().await
-            })
-            .await;
+        if let Some(pool) = self.session.pool.swap(None) {
+            pool.disconnect_all(StdDuration::from_secs(2)).await;
         }
         Ok(())
     }
 
     #[inline]
+    fn collection_group_key(&self, device: &dyn RuntimeDevice) -> Option<CollectionGroupKey> {
+        device
+            .downcast_ref::<ModbusDevice>()
+            .map(|d| CollectionGroupKey::from_u64(Self::KIND_MODBUS_SLAVE, d.slave_id as u64))
+    }
+
+    #[inline]
     #[instrument(level = "debug", skip_all)]
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
-        if let Some(md) = device.downcast_ref::<ModbusDevice>() {
-            return self
-                .collect_with_slave(md.id, &md.device_name, md.slave_id, data_points.as_ref())
-                .await;
-        }
-        Err(DriverError::ConfigurationError(
-            "RuntimeDevice is not ModbusDevice for ModbusDriver".to_string(),
-        ))
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
+        let (device0, _points0) = items.first().ok_or(DriverError::ValidationError(
+            "collect_data called with empty items".to_string(),
+        ))?;
+        let md0 = device0.downcast_ref::<ModbusDevice>().ok_or_else(|| {
+            DriverError::ConfigurationError(
+                "RuntimeDevice is not ModbusDevice for ModbusDriver".to_string(),
+            )
+        })?;
+        self.collect_group_with_slave(md0.slave_id, items).await
+    }
+
+    #[inline]
+    fn collect_max_inflight(&self) -> usize {
+        self.effective_pool_size()
     }
 
     #[inline]
@@ -503,18 +573,8 @@ impl Driver for ModbusDriver {
             self.inner.config.word_order,
         )?;
 
-        // Execute write plans sequentially using a single acquired context to preserve ordering
-        let ctx_arc = self.session.ctx.load_full();
-        let Some(ctx_arc) = ctx_arc else {
-            self.session.healthy.store(false, Ordering::Release);
-            let _ = self
-                .session
-                .last_error
-                .lock()
-                .map(|mut g| *g = Some("no context".to_string()));
-            let _ = self.session.reconnect_tx.try_send(());
-            return Err(DriverError::ServiceUnavailable);
-        };
+        // Execute write plans sequentially using a single picked context to preserve ordering.
+        let ctx_arc = self.pick_ctx()?;
 
         let timeout_ms = self.inner.connection_policy.write_timeout_ms.max(1);
         let slave = Slave(device.slave_id);
@@ -655,18 +715,8 @@ impl Driver for ModbusDriver {
             | ModbusFunctionCode::WriteMultipleRegisters => point.function_code,
         };
 
-        // Acquire context snapshot.
-        let ctx_arc = self.session.ctx.load_full();
-        let Some(ctx_arc) = ctx_arc else {
-            self.session.healthy.store(false, Ordering::Release);
-            let _ = self
-                .session
-                .last_error
-                .lock()
-                .map(|mut g| *g = Some("no context".to_string()));
-            let _ = self.session.reconnect_tx.try_send(());
-            return Err(DriverError::ServiceUnavailable);
-        };
+        // Acquire a context snapshot from the session pool.
+        let ctx_arc = self.pick_ctx()?;
 
         let slave = Slave(device.slave_id);
         let address = point.address;

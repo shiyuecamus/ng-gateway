@@ -112,7 +112,7 @@ async fn test_modbus_tcp_collect() {
 
         tracing::info!("Collecting data...");
         let res = driver
-            .collect_data(Arc::clone(&device_arc), runtime_points.clone())
+            .collect_data(&[(Arc::clone(&device_arc), runtime_points.clone())])
             .await;
 
         match res {

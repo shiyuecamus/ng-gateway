@@ -11,10 +11,14 @@ use std::{collections::HashMap, sync::Arc};
 /// Only soft limits defined by driver configuration are used here; no protocol hard limits.
 #[derive(Debug, Clone, Copy)]
 pub struct ModbusPlannerConfig {
-    /// Maximum address gap (inclusive) allowed when coalescing adjacent points.
-    pub max_gap: u16,
-    /// Maximum quantity (span) allowed per merged batch.
-    pub max_batch: u16,
+    /// Maximum address gap (inclusive) allowed when coalescing register points (0x03/0x04).
+    pub max_gap_registers: u16,
+    /// Maximum quantity/span allowed per merged register batch (0x03/0x04).
+    pub max_batch_registers: u16,
+    /// Maximum address gap (inclusive) allowed when coalescing bit points (0x01/0x02).
+    pub max_gap_bits: u16,
+    /// Maximum quantity/span allowed per merged bit batch (0x01/0x02).
+    pub max_batch_bits: u16,
 }
 
 /// High-performance Modbus request planner for batching reads.
@@ -50,6 +54,24 @@ impl ModbusPlanner {
         for (_fc_u8, mut vecp) in groups {
             // Sort by address ascending
             vecp.sort_by_key(|p| p.address);
+            let function = vecp
+                .first()
+                .map(|p| p.function_code)
+                .unwrap_or(ModbusFunctionCode::ReadHoldingRegisters);
+
+            // Select batch limits by function code.
+            let (max_gap, max_batch) = match function {
+                ModbusFunctionCode::ReadCoils | ModbusFunctionCode::ReadDiscreteInputs => {
+                    (cfg.max_gap_bits, cfg.max_batch_bits)
+                }
+                ModbusFunctionCode::ReadHoldingRegisters
+                | ModbusFunctionCode::ReadInputRegisters => {
+                    (cfg.max_gap_registers, cfg.max_batch_registers)
+                }
+                // Defensive fallback for unexpected function codes.
+                _ => (cfg.max_gap_registers, cfg.max_batch_registers),
+            };
+
             let mut i = 0usize;
             while i < vecp.len() {
                 let first = vecp[i];
@@ -65,9 +87,9 @@ impl ModbusPlanner {
                     let next_end = next.address.saturating_add(next.quantity.max(1) - 1);
 
                     let span_if_merged = next_end.saturating_sub(batch_start) + 1;
-                    let gap_ok = next_start.saturating_sub(batch_end) <= cfg.max_gap;
+                    let gap_ok = next_start.saturating_sub(batch_end) <= max_gap;
 
-                    if gap_ok && span_if_merged <= cfg.max_batch {
+                    if gap_ok && span_if_merged <= max_batch {
                         batch_points.push(next);
                         batch_end = batch_end.max(next_end);
                         i += 1;

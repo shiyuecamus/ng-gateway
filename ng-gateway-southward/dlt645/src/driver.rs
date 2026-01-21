@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, AttributeData, DataPointType, Driver, DriverError,
-    DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
+    downcast_parameters, AccessMode, AttributeData, CollectItem, DataPointType, Driver,
+    DriverError, DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
     NGValueCastError, NorthwardData, PointValue, RuntimeAction, RuntimeDevice, RuntimeParameter,
     RuntimePoint, SouthwardConnectionState, SouthwardInitContext, TelemetryData, WriteOutcome,
     WriteResult,
@@ -594,11 +594,16 @@ impl Driver for Dl645Driver {
         Ok(())
     }
 
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
+        let (device, data_points) = items.first().ok_or(DriverError::ValidationError(
+            "collect_data called with empty items".to_string(),
+        ))?;
+        if items.len() != 1 {
+            return Err(DriverError::ConfigurationError(
+                "DL/T 645 driver does not support grouped collection".to_string(),
+            ));
+        }
+
         let d = device
             .downcast_ref::<Dl645Device>()
             .ok_or(DriverError::InvalidEntity(

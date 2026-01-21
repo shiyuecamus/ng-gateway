@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, AttributeData, DataPointType, DataType, Driver, DriverError,
-    DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
+    downcast_parameters, AccessMode, AttributeData, CollectItem, DataPointType, DataType, Driver,
+    DriverError, DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
     NGValueCastError, NorthwardData, NorthwardPublisher, PointValue, RuntimeAction, RuntimeDelta,
     RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext,
     TelemetryData, Transform, ValueCodec, WriteOutcome, WriteResult,
@@ -259,9 +259,11 @@ impl Iec104Driver {
                                 meta.data_type,
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    Arc::clone(&meta.device_name),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -294,9 +296,11 @@ impl Iec104Driver {
                                 meta.data_type,
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    Arc::clone(&meta.device_name),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -329,9 +333,11 @@ impl Iec104Driver {
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    Arc::clone(&meta.device_name),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -364,9 +370,11 @@ impl Iec104Driver {
                                 meta.data_type,
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    meta.device_name.clone(),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -399,9 +407,11 @@ impl Iec104Driver {
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    meta.device_name.clone(),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -434,9 +444,11 @@ impl Iec104Driver {
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    meta.device_name.clone(),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -469,9 +481,11 @@ impl Iec104Driver {
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    meta.device_name.clone(),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -504,9 +518,11 @@ impl Iec104Driver {
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert_with(|| {
-                                    (meta.device_name.clone(), Vec::new(), Vec::new())
-                                });
+                                let entry = per_device.entry(meta.device_id).or_insert((
+                                    meta.device_name.clone(),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ));
                                 match meta.kind {
                                     DataPointType::Telemetry => {
                                         entry.1.push(PointValue {
@@ -713,11 +729,7 @@ impl Driver for Iec104Driver {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn collect_data(
-        &self,
-        _device: Arc<dyn RuntimeDevice>,
-        _data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
+    async fn collect_data(&self, _items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
         // TODO: Report-only; collector shouldn't call into this for IEC104
         Ok(Vec::new())
     }
@@ -1216,12 +1228,13 @@ impl Driver for Iec104Driver {
                     };
 
                 // Get or create snapshot for this CA
-                let snapshot_swap = self.ca_to_snapshot.entry(ca).or_insert_with(|| {
-                    ArcSwap::from_pointee(CaSnapshot {
+                let snapshot_swap = self
+                    .ca_to_snapshot
+                    .entry(ca)
+                    .or_insert(ArcSwap::from_pointee(CaSnapshot {
                         points: HashMap::new(),
                         id_index: HashMap::new(),
-                    })
-                });
+                    }));
 
                 snapshot_swap.rcu(|snap| {
                     let mut new_snap = snap.as_ref().clone();

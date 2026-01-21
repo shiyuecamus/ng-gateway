@@ -8,6 +8,7 @@ use ng_gateway_sdk::{
 use std::{
     net::SocketAddr,
     sync::{
+        atomic::AtomicUsize,
         atomic::{AtomicBool, Ordering},
         Arc,
     },
@@ -21,11 +22,59 @@ use tokio_modbus::client::{rtu, tcp, Client as _, Context};
 use tokio_serial::SerialPortBuilderExt;
 use tokio_util::sync::CancellationToken;
 
-/// Shared Modbus session entry guarded by a single async mutex.
+/// A pool of Modbus contexts (each is single-flight via `Mutex<Context>`).
+///
+/// # Design
+/// - Each `Context` is **NOT** safe for concurrent requests, hence the per-context mutex.
+/// - The pool allows parallelism across different collection groups (e.g. different slave IDs)
+///   on Modbus TCP, where multiple independent TCP connections can increase throughput.
+pub(super) struct SessionPool {
+    contexts: Vec<Arc<Mutex<Context>>>,
+    rr: AtomicUsize,
+}
+
+impl SessionPool {
+    /// Create a new session pool from connected contexts.
+    pub fn new(contexts: Vec<Context>) -> Self {
+        let contexts = contexts
+            .into_iter()
+            .map(|c| Arc::new(Mutex::new(c)))
+            .collect::<Vec<_>>();
+        Self {
+            contexts,
+            rr: AtomicUsize::new(0),
+        }
+    }
+
+    /// Pick one context using round-robin.
+    #[inline]
+    pub fn pick(&self) -> Option<Arc<Mutex<Context>>> {
+        let n = self.contexts.len();
+        if n == 0 {
+            return None;
+        }
+        let i = self.rr.fetch_add(1, Ordering::Relaxed) % n;
+        Some(Arc::clone(&self.contexts[i]))
+    }
+
+    /// Disconnect all contexts best-effort with a per-context timeout.
+    pub async fn disconnect_all(self: Arc<Self>, timeout_each: StdDuration) {
+        for ctx in &self.contexts {
+            let ctx = Arc::clone(ctx);
+            let _ = timeout(timeout_each, async move {
+                let mut g = ctx.lock().await;
+                g.disconnect().await
+            })
+            .await;
+        }
+    }
+}
+
+/// Shared Modbus session entry guarded by pool selection + per-context async mutex.
 /// The supervisor owns lifecycle and reconnection.
 pub(super) struct SessionEntry {
-    /// Underlying Modbus context protected by an async mutex
-    pub ctx: ArcSwapOption<Mutex<Context>>,
+    /// Underlying Modbus context pool (TCP: N, RTU: 1).
+    pub pool: ArcSwapOption<SessionPool>,
     /// Health flag indicating the current connectivity
     pub healthy: AtomicBool,
     /// Shutdown flag to prevent further reconnects
@@ -40,7 +89,7 @@ impl SessionEntry {
     /// Create a new empty session entry
     pub fn new_empty(reconnect_tx: mpsc::Sender<()>) -> Self {
         Self {
-            ctx: ArcSwapOption::from(None),
+            pool: ArcSwapOption::from(None),
             healthy: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             last_error: std::sync::Mutex::new(None),
@@ -76,7 +125,7 @@ impl SessionSupervisor {
         }
     }
 
-    async fn connect_once(cfg: &ModbusChannelConfig) -> DriverResult<Context> {
+    async fn connect_pool(cfg: &ModbusChannelConfig) -> DriverResult<SessionPool> {
         match &cfg.connection {
             ModbusConnection::Tcp { host, port } => {
                 let addr = format!("{}:{}", host, port)
@@ -84,9 +133,16 @@ impl SessionSupervisor {
                     .map_err(|e| {
                         DriverError::ConfigurationError(format!("Invalid socket address: {}", e))
                     })?;
-                tcp::connect(addr).await.map_err(|e| {
-                    DriverError::SessionError(format!("Modbus TCP connect error: {e}"))
-                })
+                // Pool size is only meaningful for TCP; clamp to [1, 8] for safety.
+                let size = cfg.tcp_pool_size.clamp(1, 8) as usize;
+                let mut contexts = Vec::with_capacity(size);
+                for _ in 0..size {
+                    let ctx = tcp::connect(addr).await.map_err(|e| {
+                        DriverError::SessionError(format!("Modbus TCP connect error: {e}"))
+                    })?;
+                    contexts.push(ctx);
+                }
+                Ok(SessionPool::new(contexts))
             }
             ModbusConnection::Rtu {
                 port,
@@ -100,7 +156,7 @@ impl SessionSupervisor {
                     .stop_bits((*stop_bits).into())
                     .parity((*parity).into());
                 match builder.open_native_async() {
-                    Ok(stream) => Ok(rtu::attach(stream)),
+                    Ok(stream) => Ok(SessionPool::new(vec![rtu::attach(stream)])),
                     Err(e) => Err(DriverError::SessionError(format!(
                         "Failed to open serial port {port}: {e}"
                     ))),
@@ -127,7 +183,7 @@ impl SessionSupervisor {
                 let mut bo: ExponentialBackoff =
                     build_exponential_backoff(&channel.connection_policy.backoff);
                 let mut attempt: u32 = 0;
-                let ctx: Context = loop {
+                let pool: SessionPool = loop {
                     if cancel.is_cancelled() {
                         shared.shutdown.store(true, Ordering::Release);
                         shared.healthy.store(false, Ordering::Release);
@@ -135,8 +191,8 @@ impl SessionSupervisor {
                             .send(SouthwardConnectionState::Failed("cancelled".to_string()));
                         return;
                     }
-                    match Self::connect_once(&channel.config).await {
-                        Ok(ctx) => break ctx,
+                    match Self::connect_pool(&channel.config).await {
+                        Ok(pool) => break pool,
                         Err(e) => {
                             shared.healthy.store(false, Ordering::Relaxed);
                             let _ = state_tx.send(SouthwardConnectionState::Failed(e.to_string()));
@@ -163,14 +219,10 @@ impl SessionSupervisor {
                     }
                 };
 
-                // Store context and mark healthy
-                let ctx = Arc::new(Mutex::new(ctx));
-                if let Some(old) = shared.ctx.swap(Some(Arc::clone(&ctx))) {
-                    let _ = timeout(StdDuration::from_secs(2), async move {
-                        let mut old_guard = old.lock().await;
-                        old_guard.disconnect().await
-                    })
-                    .await;
+                // Store pool and mark healthy
+                let pool = Arc::new(pool);
+                if let Some(old) = shared.pool.swap(Some(Arc::clone(&pool))) {
+                    old.disconnect_all(StdDuration::from_secs(2)).await;
                 }
                 shared.healthy.store(true, Ordering::Release);
                 let _ = state_tx.send(SouthwardConnectionState::Connected);
@@ -184,12 +236,8 @@ impl SessionSupervisor {
                         shared.shutdown.store(true, Ordering::Release);
                         let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
                         // Best-effort disconnect
-                        if let Some(c) = shared.ctx.swap(None) {
-                            let _ = timeout(StdDuration::from_secs(2), async move {
-                                let mut cg = c.lock().await;
-                                cg.disconnect().await
-                            })
-                            .await;
+                        if let Some(p) = shared.pool.swap(None) {
+                            p.disconnect_all(StdDuration::from_secs(2)).await;
                         }
                         return;
                     }
@@ -197,12 +245,8 @@ impl SessionSupervisor {
                         // Drop connection and restart loop
                         shared.healthy.store(false, Ordering::Release);
                         let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
-                        if let Some(c) = shared.ctx.swap(None) {
-                            let _ = timeout(StdDuration::from_secs(2), async move {
-                                let mut cg = c.lock().await;
-                                cg.disconnect().await
-                            })
-                            .await;
+                        if let Some(p) = shared.pool.swap(None) {
+                            p.disconnect_all(StdDuration::from_secs(2)).await;
                         }
                         // continue outer loop
                     }

@@ -58,7 +58,7 @@ impl Dnp3SoeHandler {
                     DataPointType::Telemetry => {
                         let entry = telemetry_buffer
                             .entry(meta.device_id)
-                            .or_insert_with(|| (Arc::clone(&meta.device_name), Vec::new()));
+                            .or_insert((Arc::clone(&meta.device_name), Vec::new()));
                         entry.1.push(PointValue {
                             point_id: meta.point_id,
                             point_key: Arc::clone(&meta.key),
@@ -68,7 +68,7 @@ impl Dnp3SoeHandler {
                     DataPointType::Attribute => {
                         let entry = attribute_buffer
                             .entry(meta.device_id)
-                            .or_insert_with(|| (Arc::clone(&meta.device_name), Vec::new()));
+                            .or_insert((Arc::clone(&meta.device_name), Vec::new()));
                         entry.1.push(PointValue {
                             point_id: meta.point_id,
                             point_key: Arc::clone(&meta.key),

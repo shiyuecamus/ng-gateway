@@ -85,8 +85,12 @@ pub fn build_modbus_tcp_topology(
         },
         byte_order: Endianness::BigEndian, // Standard Modbus is Big Endian
         word_order: Endianness::BigEndian,
-        max_gap: 10,
-        max_batch: 100,
+        // Use the new split batching semantics (registers vs bits).
+        max_batch_registers: 120,
+        max_gap_registers: 1,
+        max_batch_bits: 512,
+        max_gap_bits: 16,
+        tcp_pool_size: 1,
     };
 
     let channel = ModbusChannel {

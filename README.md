@@ -199,9 +199,9 @@ sequenceDiagram
     T-->>Col: 周期 tick(channel)
     Col->>SW: 获取可采集设备列表
 
-    par 每设备并发采集（受 Semaphore 限流）
-        Col->>Dvr: collect_data(device, points)
-        Dvr-->>Col: Vec<NorthwardData>（已按协议批量优化）
+    par 每分组并发采集（受 Semaphore 限流）
+        Col->>Dvr: collect_data(items_in_group)
+        Dvr-->>Col: Vec<NorthwardData>（按业务设备输出；driver 内部做物理分组聚合）
     end
 
     Col->>Q: 发送 Arc<NorthwardData>（有界队列）

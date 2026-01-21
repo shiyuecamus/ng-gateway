@@ -4,15 +4,37 @@ use chrono::Utc;
 use futures::{future::join_all, StreamExt};
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{core::metrics::CollectorMetrics, settings::CollectorConfig};
-use ng_gateway_sdk::{CollectionType, NorthwardData};
+use ng_gateway_sdk::{
+    CollectItem, CollectionGroupKey, CollectionType, NorthwardData, RuntimeDevice, RuntimePoint,
+};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, RwLock, Semaphore},
     task::JoinHandle,
-    time::{interval, sleep, timeout},
+    time::{interval, sleep, timeout, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
+
+/// A flattened device entry used by the collector hot path.
+///
+/// The collector first builds a list of device entries, then re-groups them by
+/// `(driver instance, group key)` to maximize batching and throughput.
+#[derive(Clone)]
+struct DeviceEntry {
+    device_id: i32,
+    runtime_device: Arc<dyn RuntimeDevice>,
+    points: Arc<[Arc<dyn RuntimePoint>]>,
+}
+
+/// A single driver group call containing a batch of collect items.
+///
+/// Each group should share the same physical session semantics (e.g. Modbus slave ID)
+/// so the southward driver can execute the batch efficiently.
+#[derive(Clone)]
+struct GroupCall {
+    items: Vec<CollectItem>,
+}
 
 /// Collection engine with enhanced performance and reliability
 #[derive(Clone)]
@@ -151,6 +173,7 @@ impl Collector {
 
         let task = tokio::spawn(async move {
             let mut interval = interval(Duration::from_millis(period_ms as u64));
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let channel_name = channel_name.clone();
 
             // Add jitter to prevent thundering herd effect
@@ -214,7 +237,7 @@ impl Collector {
             return Ok(());
         }
 
-        let device_ids = southward_manager.get_channel_collectable_device_ids(channel_id);
+        let device_ids = southward_manager.get_collectable_device_ids(channel_id);
         if device_ids.is_empty() {
             return Ok(());
         }
@@ -226,7 +249,88 @@ impl Collector {
 
         let start_time = Utc::now();
 
-        // Process results concurrently without spawning per-device tasks.
+        // In this gateway architecture, a channel tick should never mix multiple driver
+        // instances: devices within the channel share the same `Arc<dyn Driver>`.
+        //
+        // Keep this as a debug assertion to detect unexpected topology bugs without
+        // paying HashMap overhead on the hot path.
+        let mut driver_handle = None;
+        let mut entries = Vec::with_capacity(device_ids.len());
+
+        for device_id in device_ids.into_iter() {
+            let (driver, runtime_device) = {
+                let dev = southward_manager
+                    .get_device(device_id)
+                    .ok_or(NGError::Error(format!("Device {} not found", device_id)))?;
+                (dev.driver.clone(), dev.config.clone())
+            };
+
+            let points = southward_manager.get_device_points(device_id);
+            if points.is_empty() {
+                continue;
+            }
+
+            if let Some(existing) = &driver_handle {
+                debug_assert!(
+                    Arc::ptr_eq(existing, &driver),
+                    "Collector observed multiple driver instances in one channel tick"
+                );
+            } else {
+                driver_handle = Some(Arc::clone(&driver));
+            }
+
+            entries.push(DeviceEntry {
+                device_id,
+                runtime_device,
+                points,
+            });
+        }
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut groups: Vec<GroupCall> = Vec::new();
+        let driver = match driver_handle {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        // Second-level grouping by driver-provided group key.
+        let mut keyed: HashMap<CollectionGroupKey, Vec<DeviceEntry>> = HashMap::new();
+        let mut singles: Vec<DeviceEntry> = Vec::new();
+
+        for e in entries.into_iter() {
+            match driver.collection_group_key(e.runtime_device.as_ref()) {
+                Some(k) => keyed.entry(k).or_default().push(e),
+                None => singles.push(e),
+            }
+        }
+
+        for (_k, mut vec) in keyed {
+            vec.sort_by_key(|e| e.device_id);
+            let items: Vec<CollectItem> = vec
+                .into_iter()
+                .map(|e| (e.runtime_device, e.points))
+                .collect();
+            if !items.is_empty() {
+                groups.push(GroupCall { items });
+            }
+        }
+
+        for e in singles.into_iter() {
+            groups.push(GroupCall {
+                items: vec![(e.runtime_device, e.points)],
+            });
+        }
+
+        debug!(
+            "📦 Channel [{channel_name}] built {} collection groups",
+            groups.len(),
+        );
+        let driver = Arc::new(driver);
+
+        // Execute groups concurrently without spawning per-device tasks.
         //
         // Why: per-device `tokio::spawn` creates significant scheduling overhead at scale.
         // We keep concurrency via `buffer_unordered` + a shared semaphore (global bound).
@@ -234,35 +338,31 @@ impl Collector {
         let mut failed = 0;
         let mut timeouts = 0;
 
-        let mut stream = futures::stream::iter(device_ids.into_iter())
-            .map(|device_id| {
-                let southward_manager = Arc::clone(southward_manager);
+        let mut stream = futures::stream::iter(groups.into_iter())
+            .map(|group| {
+                let driver = Arc::clone(&driver);
                 let token = cancellation_token.clone();
                 async move {
                     // Make semaphore acquire cancellable (owned permit)
                     let acquired = tokio::select! {
                         _ = token.cancelled() => {
-                            return Err(NGError::Error("Device collection cancelled".to_string()));
+                            return Err(NGError::Error("Group collection cancelled".to_string()));
                         }
                         p = Arc::clone(semaphore).acquire_owned() => p.map_err(|_| NGError::Error("Semaphore closed".to_string())),
                     }?;
 
                     let _permit = acquired;
 
-                    // Per-device timeout; collect immediately when done
+                    // Per-group timeout (NOT per-device) to preserve batching semantics.
                     tokio::select! {
                         _ = token.cancelled() => {
-                            Err(NGError::Error("Device collection cancelled".to_string()))
+                            Err(NGError::Error("Group collection cancelled".to_string()))
                         }
                         result = async {
-                            let per_device_timeout = Duration::from_millis(config.collection_timeout_ms);
-                            match timeout(per_device_timeout, Self::collect_single_device(
-                                device_id,
-                                &southward_manager,
-                                config,
-                            )).await {
-                                Ok(inner) => inner,
-                                Err(_) => Err(NGError::Error("Device collection timeout".to_string())),
+                            let group_timeout = Duration::from_millis(config.collection_timeout_ms);
+                            match timeout(group_timeout, driver.collect_data(&group.items)).await {
+                                Ok(inner) => inner.map_err(|e| NGError::DriverError(e.to_string())),
+                                Err(_) => Err(NGError::Error("Group collection timeout".to_string())),
                             }
                         } => result,
                     }
@@ -273,11 +373,10 @@ impl Collector {
 
         while let Some(result) = stream.next().await {
             match result {
-                Ok(device_data) => {
+                Ok(group_data) => {
                     successful += 1;
-                    // Stream data immediately to reduce latency and memory usage
-                    if !device_data.is_empty() {
-                        Self::send_data(data_tx, device_data).await;
+                    if !group_data.is_empty() {
+                        Self::send_data(data_tx, group_data).await;
                     }
                 }
                 Err(e) => {
@@ -305,46 +404,9 @@ impl Collector {
         )
         .await;
 
-        debug!(
-            "📈 Channel [{channel_name}] collection completed: {successful} successful, {failed} failed, {timeouts} timeouts, duration in {collection_duration}ms",
-        );
+        debug!("📈 Channel [{channel_name}] collection completed: {successful} successful, {failed} failed, {timeouts} timeouts, duration in {collection_duration}ms");
 
         Ok(())
-    }
-
-    #[instrument(name = "device-collection", skip_all)]
-    /// Collect data from a single device
-    async fn collect_single_device(
-        device_id: i32,
-        southward_manager: &Arc<NGSouthwardManager>,
-        _config: CollectorConfig,
-    ) -> NGResult<Vec<NorthwardData>> {
-        let (device_name, driver_handle, runtime_device) = {
-            let dev = southward_manager
-                .get_device(device_id)
-                .ok_or(NGError::Error(format!("Device {} not found", device_id)))?;
-            (
-                dev.config.device_name().to_string(),
-                dev.driver.clone(),
-                dev.config.clone(),
-            )
-        };
-
-        let points = southward_manager.get_device_points(device_id);
-        if points.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Prefer device-aware collection when implemented by driver (direct call)
-        let device_data = driver_handle
-            .collect_data(runtime_device, points)
-            .await
-            .map_err(|e| {
-                error!(error=%e, "Failed to collect data for device [{device_name}]");
-                NGError::DriverError(e.to_string())
-            })?;
-
-        Ok(device_data)
     }
 
     /// Send data for improved throughput

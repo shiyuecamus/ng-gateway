@@ -34,23 +34,52 @@ pub struct ModbusChannelConfig {
     pub byte_order: Endianness,
     /// Word order
     pub word_order: Endianness,
-    /// Maximum address gap for batch merging
-    #[serde(default = "ModbusChannelConfig::default_max_gap")]
-    pub max_gap: u16,
-    /// Maximum batch size (number of registers/coils)
-    #[serde(default = "ModbusChannelConfig::default_max_batch")]
-    pub max_batch: u16,
+    /// Maximum batch span for register reads (0x03/0x04), clamped by protocol hard-limit (<=125).
+    #[serde(default = "ModbusChannelConfig::default_max_batch_registers")]
+    pub max_batch_registers: u16,
+    /// Maximum address gap for coalescing register reads (0x03/0x04).
+    #[serde(default = "ModbusChannelConfig::default_max_gap_registers")]
+    pub max_gap_registers: u16,
+    /// Maximum batch span for bit reads (0x01/0x02), UI-recommended upper bound <=2000.
+    #[serde(default = "ModbusChannelConfig::default_max_batch_bits")]
+    pub max_batch_bits: u16,
+    /// Maximum address gap for coalescing bit reads (0x01/0x02).
+    #[serde(default = "ModbusChannelConfig::default_max_gap_bits")]
+    pub max_gap_bits: u16,
+    /// TCP connection pool size (best practice: default 1, recommended max 8).
+    ///
+    /// # Notes
+    /// - This only applies to `connection.kind = tcp`.
+    /// - For RTU, the driver will clamp the effective pool size to `1` to preserve
+    ///   the required single-flight semantics on a serial bus.
+    #[serde(default = "ModbusChannelConfig::default_tcp_pool_size")]
+    pub tcp_pool_size: u16,
 }
 
 impl ModbusChannelConfig {
-    /// Default value for max_gap (10 registers/coils)
-    fn default_max_gap() -> u16 {
-        10
+    /// Default value for register batch size (best practice: 120, protocol limit: 125).
+    fn default_max_batch_registers() -> u16 {
+        120
     }
 
-    /// Default value for max_batch (100 registers/coils)
-    fn default_max_batch() -> u16 {
-        100
+    /// Default value for register merge gap (best practice: 1).
+    fn default_max_gap_registers() -> u16 {
+        1
+    }
+
+    /// Default value for bit batch size (best practice: 512).
+    fn default_max_batch_bits() -> u16 {
+        2000
+    }
+
+    /// Default value for bit merge gap (best practice: 16).
+    fn default_max_gap_bits() -> u16 {
+        500
+    }
+
+    /// Default TCP pool size (best practice: 1).
+    fn default_tcp_pool_size() -> u16 {
+        1
     }
 }
 

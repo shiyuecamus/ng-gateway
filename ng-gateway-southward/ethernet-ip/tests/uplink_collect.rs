@@ -33,7 +33,7 @@ async fn uplink_collect_data_once() -> anyhow::Result<()> {
     wait_connected(driver.subscribe_connection_state(), Duration::from_secs(10)).await?;
 
     let res = driver
-        .collect_data(Arc::clone(&device_arc), runtime_points.clone())
+        .collect_data(&[(Arc::clone(&device_arc), runtime_points.clone())])
         .await;
 
     match res {

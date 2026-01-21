@@ -8,16 +8,19 @@ use crate::types::S7Channel;
 use async_trait::async_trait;
 use chrono::Utc;
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, AttributeData, DataPointType, Driver, DriverError,
-    DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
+    downcast_parameters, AccessMode, CollectItem, CollectionGroupKey, DeviceBuffers, Driver,
+    DriverError, DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
     NorthwardData, PointValue, RuntimeAction, RuntimeDevice, RuntimeParameter, RuntimePoint,
-    SouthwardConnectionState, SouthwardInitContext, TelemetryData, WriteOutcome, WriteResult,
+    SouthwardConnectionState, SouthwardInitContext, WriteOutcome, WriteResult,
 };
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration as StdDuration, Instant},
 };
-use std::time::{Duration as StdDuration, Instant};
 use tokio::{sync::watch, time::timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -46,6 +49,11 @@ pub struct S7Driver {
 }
 
 impl S7Driver {
+    /// Collection group key namespace for grouping by channel.
+    ///
+    /// ASCII: "S7CH"
+    const KIND_S7_CHANNEL: u32 = 0x5337_4348;
+
     pub fn with_context(ctx: SouthwardInitContext) -> DriverResult<Self> {
         let (tx, rx) = watch::channel(SouthwardConnectionState::Disconnected);
 
@@ -98,106 +106,115 @@ impl Driver for S7Driver {
     }
 
     #[inline]
+    fn collection_group_key(&self, device: &dyn RuntimeDevice) -> Option<CollectionGroupKey> {
+        device
+            .downcast_ref::<S7Device>()
+            .map(|d| CollectionGroupKey::from_u64(Self::KIND_S7_CHANNEL, d.channel_id as u64))
+    }
+
+    #[inline]
     #[instrument(level = "debug", skip_all)]
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
-        if let Some(md) = device.downcast_ref::<S7Device>() {
-            // Downcast points to S7Point and collect readable
-            let s7_points = data_points
-                .iter()
-                .filter_map(|p| Arc::clone(p).downcast_arc::<S7Point>().ok())
-                .filter(|mp| matches!(mp.access_mode(), AccessMode::Read | AccessMode::ReadWrite))
-                .collect::<Vec<_>>();
-            if s7_points.is_empty() {
-                return Ok(Vec::new());
-            }
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
+        if items.is_empty() {
+            return Err(DriverError::ValidationError(
+                "collect_data called with empty items".to_string(),
+            ));
+        }
 
-            // Acquire active session
-            let session = self
-                .shared
-                .session
-                .load_full()
-                .ok_or(DriverError::ServiceUnavailable)?;
+        // Prepare per-device output buffers and build a merged point list.
+        let mut buffers = HashMap::with_capacity(items.len());
+        let mut s7_points = Vec::new();
 
-            // Batch read
-            let addresses = s7_points.iter().map(|p| &p.address).collect::<Vec<_>>();
-            let start_ts = Instant::now();
-            let results = match session.read_addresses_typed(&addresses).await {
-                Ok(r) => {
-                    self.total_requests.fetch_add(1, Ordering::Relaxed);
-                    let elapsed_ms = start_ts.elapsed().as_millis() as u64;
-                    self.successful_requests.fetch_add(1, Ordering::Relaxed);
-                    let prev = self.last_avg_response_time_ms.load(Ordering::Relaxed);
-                    let new_avg = if prev == 0 {
-                        elapsed_ms
-                    } else {
-                        (prev.saturating_mul(9) + elapsed_ms) / 10
-                    };
-                    self.last_avg_response_time_ms
-                        .store(new_avg, Ordering::Relaxed);
-                    r
-                }
-                Err(e) => {
-                    self.total_requests.fetch_add(1, Ordering::Relaxed);
-                    self.failed_requests.fetch_add(1, Ordering::Relaxed);
-                    return Err(DriverError::ExecutionError(e.to_string()));
-                }
-            };
+        for (dev_any, points_any) in items.iter() {
+            let dev = dev_any.downcast_ref::<S7Device>().ok_or_else(|| {
+                DriverError::ConfigurationError("RuntimeDevice is not S7Device for S7Driver".into())
+            })?;
 
-            let mut telemetry_values: Vec<PointValue> = Vec::with_capacity(s7_points.len());
-            let mut attribute_values: Vec<PointValue> = Vec::with_capacity(s7_points.len());
+            buffers
+                .entry(dev.id)
+                .or_insert_with(|| DeviceBuffers::new(dev.device_name.clone()));
 
-            for (p, it) in s7_points.iter().zip(results.into_iter()) {
-                if it.value.is_none() {
+            for p_any in points_any.iter() {
+                let Ok(p) = Arc::clone(p_any).downcast_arc::<S7Point>() else {
+                    continue;
+                };
+                if !matches!(p.access_mode(), AccessMode::Read | AccessMode::ReadWrite) {
                     continue;
                 }
-                let v = it.value.unwrap();
-                if let Some(value) = S7Codec::to_value(&v, p.logical_data_type(), &p.transform) {
-                    match p.r#type() {
-                        DataPointType::Telemetry => {
-                            telemetry_values.push(PointValue {
-                                point_id: p.id,
-                                point_key: Arc::<str>::from(p.key.as_str()),
-                                value,
-                            });
-                        }
-                        DataPointType::Attribute => {
-                            attribute_values.push(PointValue {
-                                point_id: p.id,
-                                point_key: Arc::<str>::from(p.key.as_str()),
-                                value,
-                            });
-                        }
-                    }
-                }
+                s7_points.push(p);
             }
-
-            let mut out: Vec<NorthwardData> = Vec::with_capacity(2);
-            if !telemetry_values.is_empty() {
-                out.push(NorthwardData::Telemetry(TelemetryData::new(
-                    md.id,
-                    md.device_name.clone(),
-                    telemetry_values,
-                )));
-            }
-            if !attribute_values.is_empty() {
-                out.push(NorthwardData::Attributes(
-                    AttributeData::new_client_attributes(
-                        md.id,
-                        md.device_name.clone(),
-                        attribute_values,
-                    ),
-                ));
-            }
-
-            return Ok(out);
         }
-        Err(DriverError::ConfigurationError(
-            "RuntimeDevice is not S7Device for S7Driver".to_string(),
-        ))
+
+        if s7_points.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Acquire active session.
+        let session = self
+            .shared
+            .session
+            .load_full()
+            .ok_or(DriverError::ServiceUnavailable)?;
+
+        // Batch read across all points once.
+        let addresses = s7_points.iter().map(|p| &p.address).collect::<Vec<_>>();
+        let start_ts = Instant::now();
+        let results = match session.read_addresses_typed(&addresses).await {
+            Ok(r) => {
+                self.total_requests.fetch_add(1, Ordering::Relaxed);
+                let elapsed_ms = start_ts.elapsed().as_millis() as u64;
+                self.successful_requests.fetch_add(1, Ordering::Relaxed);
+                let prev = self.last_avg_response_time_ms.load(Ordering::Relaxed);
+                let new_avg = if prev == 0 {
+                    elapsed_ms
+                } else {
+                    (prev.saturating_mul(9) + elapsed_ms) / 10
+                };
+                self.last_avg_response_time_ms
+                    .store(new_avg, Ordering::Relaxed);
+                r
+            }
+            Err(e) => {
+                self.total_requests.fetch_add(1, Ordering::Relaxed);
+                self.failed_requests.fetch_add(1, Ordering::Relaxed);
+                return Err(DriverError::ExecutionError(e.to_string()));
+            }
+        };
+
+        for (p, it) in s7_points.iter().zip(results.into_iter()) {
+            let Some(v) = it.value else {
+                continue;
+            };
+            let Some(value) = S7Codec::to_value(&v, p.logical_data_type(), &p.transform) else {
+                continue;
+            };
+            let Some(buf) = buffers.get_mut(&p.device_id) else {
+                continue;
+            };
+            buf.push(
+                p.r#type(),
+                PointValue {
+                    point_id: p.id,
+                    point_key: Arc::<str>::from(p.key.as_str()),
+                    value,
+                },
+            );
+        }
+
+        // Build stable, per-business-device outputs with a single group timestamp.
+        let ts = Utc::now();
+        let mut device_ids: Vec<i32> = buffers.keys().copied().collect();
+        device_ids.sort_unstable();
+
+        let mut out: Vec<NorthwardData> = Vec::with_capacity(device_ids.len() * 2);
+        for device_id in device_ids {
+            let Some(buf) = buffers.remove(&device_id) else {
+                continue;
+            };
+            out.extend(buf.into_northward(device_id, ts));
+        }
+
+        Ok(out)
     }
 
     #[inline]

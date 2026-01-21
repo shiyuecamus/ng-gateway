@@ -71,7 +71,7 @@ async fn reconnect_and_collect() {
     while start.elapsed() < duration {
         iteration = iteration.saturating_add(1);
         let res = driver
-            .collect_data(Arc::clone(&device_arc), runtime_points.clone())
+            .collect_data(&[(Arc::clone(&device_arc), runtime_points.clone())])
             .await;
         match res {
             Ok(values) => {

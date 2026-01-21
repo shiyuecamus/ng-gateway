@@ -12,7 +12,7 @@ use model::{
     ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverHealth, PointModel,
     SouthwardInitContext,
 };
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt, fmt::Debug, sync::Arc};
 use tokio::sync::watch::Receiver;
 use types::{
     AccessMode, CollectionType, DataPointType, DataType, ReportType, SouthwardConnectionState,
@@ -155,8 +155,7 @@ macro_rules! ng_driver_factory {
         // Internal message definition: Convert function calls to messages
         enum DriverMessage {
             Collect {
-                device: std::sync::Arc<dyn $crate::RuntimeDevice>,
-                points: std::sync::Arc<[std::sync::Arc<dyn $crate::RuntimePoint>]>,
+                items: std::sync::Arc<[$crate::CollectItem]>,
                 reply: tokio::sync::oneshot::Sender<$crate::DriverResult<Vec<$crate::NorthwardData>>>,
             },
             Execute {
@@ -178,11 +177,13 @@ macro_rules! ng_driver_factory {
             },
         }
 
-        // Wrapper types to ensure runtime context isolation
+        // Wrapper types to ensure runtime context isolation and safe concurrency control.
         struct RuntimeAwareDriver {
             inner: std::sync::Arc<Box<dyn $crate::Driver>>,
             tx: tokio::sync::mpsc::Sender<DriverMessage>,
             cancel_token: $crate::export::tokio_util::sync::CancellationToken,
+            /// Bounded in-flight `collect_data` calls (per driver instance).
+            collect_sem: std::sync::Arc<tokio::sync::Semaphore>,
             // Only used during start() to take ownership of the receiver
             rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<DriverMessage>>>,
         }
@@ -200,6 +201,7 @@ macro_rules! ng_driver_factory {
             async fn start(&self) -> $crate::DriverResult<()> {
                 let inner = self.inner.clone();
                 let cancel_token = self.cancel_token.clone();
+                let collect_sem = std::sync::Arc::clone(&self.collect_sem);
 
                 let mut rx = {
                     let mut rx_opt = self.rx.lock().unwrap();
@@ -218,7 +220,22 @@ macro_rules! ng_driver_factory {
                     }
                     let _ = tx_res.send(Ok(()));
 
-                    // Driver Actor Loop: Strictly serialized execution, naturally thread-safe
+                    // Initialize collection concurrency budget after `start()`.
+                    //
+                    // Why after start: drivers may derive concurrency from runtime channel config
+                    // that becomes available only after construction and initialization.
+                    //
+                    // Default is 1 to preserve legacy "fully serialized" behavior.
+                    let collect_max = inner.collect_max_inflight().max(1);
+                    // We initialized the semaphore with 1 permit; add the remaining permits here.
+                    if collect_max > 1 {
+                        collect_sem.add_permits(collect_max.saturating_sub(1));
+                    }
+
+                    // Driver Actor Loop:
+                    // - All operations are executed concurrently (spawn per message).
+                    // - Collection is additionally bounded by a per-driver semaphore.
+                    // - Cancellation is propagated by selecting on `cancel_token`.
                     use $crate::export::tracing::debug;
                     debug!("Driver actor loop started");
 
@@ -232,21 +249,65 @@ macro_rules! ng_driver_factory {
                                 match maybe_msg {
                                     Some(msg) => {
                                         match msg {
-                                            DriverMessage::Collect { device, points, reply } => {
-                                                let res = inner.collect_data(device, points).await;
-                                                let _ = reply.send(res);
+                                            DriverMessage::Collect { items, reply } => {
+                                                let inner = inner.clone();
+                                                let sem = std::sync::Arc::clone(&collect_sem);
+                                                let cancel = cancel_token.clone();
+                                                // Spawn so that multiple collections can be in-flight concurrently.
+                                                tokio::spawn(async move {
+                                                    let res = tokio::select! {
+                                                        _ = cancel.cancelled() => {
+                                                            Err($crate::DriverError::ExecutionError("Driver cancelled".to_string()))
+                                                        }
+                                                        r = async {
+                                                            // Bound concurrency to avoid unbounded memory/polling load.
+                                                            let _permit = sem.acquire_owned().await.map_err(|_| {
+                                                                $crate::DriverError::ExecutionError("Driver collect semaphore closed".to_string())
+                                                            })?;
+                                                            inner.collect_data(items.as_ref()).await
+                                                        } => r,
+                                                    };
+                                                    let _ = reply.send(res);
+                                                });
                                             }
                                             DriverMessage::Execute { device, action, parameters, reply } => {
-                                                let res = inner.execute_action(device, action, parameters).await;
-                                                let _ = reply.send(res);
+                                                let inner = inner.clone();
+                                                let cancel = cancel_token.clone();
+                                                tokio::spawn(async move {
+                                                    let res = tokio::select! {
+                                                        _ = cancel.cancelled() => {
+                                                            Err($crate::DriverError::ExecutionError("Driver cancelled".to_string()))
+                                                        }
+                                                        r = inner.execute_action(device, action, parameters) => r,
+                                                    };
+                                                    let _ = reply.send(res);
+                                                });
                                             }
                                             DriverMessage::Write { device, point, value, timeout_ms, reply } => {
-                                                let res = inner.write_point(device, point, value, timeout_ms).await;
-                                                let _ = reply.send(res);
+                                                let inner = inner.clone();
+                                                let cancel = cancel_token.clone();
+                                                tokio::spawn(async move {
+                                                    let res = tokio::select! {
+                                                        _ = cancel.cancelled() => {
+                                                            Err($crate::DriverError::ExecutionError("Driver cancelled".to_string()))
+                                                        }
+                                                        r = inner.write_point(device, point, value, timeout_ms) => r,
+                                                    };
+                                                    let _ = reply.send(res);
+                                                });
                                             }
                                             DriverMessage::ApplyDelta { delta, reply } => {
-                                                let res = inner.apply_runtime_delta(delta).await;
-                                                let _ = reply.send(res);
+                                                let inner = inner.clone();
+                                                let cancel = cancel_token.clone();
+                                                tokio::spawn(async move {
+                                                    let res = tokio::select! {
+                                                        _ = cancel.cancelled() => {
+                                                            Err($crate::DriverError::ExecutionError("Driver cancelled".to_string()))
+                                                        }
+                                                        r = inner.apply_runtime_delta(delta) => r,
+                                                    };
+                                                    let _ = reply.send(res);
+                                                });
                                             }
                                         }
                                     }
@@ -270,17 +331,38 @@ macro_rules! ng_driver_factory {
                 Ok(())
             }
 
+            #[inline]
+            fn collection_group_key(
+                &self,
+                device: &dyn $crate::RuntimeDevice,
+            ) -> Option<$crate::CollectionGroupKey> {
+                // IMPORTANT:
+                // The Collector performs physical grouping by calling `Driver::collection_group_key()`.
+                // When a driver is wrapped by this runtime-aware actor, we must delegate this method
+                // to the underlying driver; otherwise the default `None` would force per-device
+                // collection and completely disable batching (e.g. Modbus slaveId grouping).
+                self.inner.collection_group_key(device)
+            }
+
             async fn collect_data(
                 &self,
-                device: std::sync::Arc<dyn $crate::RuntimeDevice>,
-                data_points: std::sync::Arc<[std::sync::Arc<dyn $crate::RuntimePoint>]>,
+                items: &[$crate::CollectItem],
             ) -> $crate::DriverResult<Vec<$crate::NorthwardData>> {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                let msg = DriverMessage::Collect { device, points: data_points, reply: reply_tx };
+                let msg = DriverMessage::Collect {
+                    items: std::sync::Arc::from(items.to_vec().into_boxed_slice()),
+                    reply: reply_tx,
+                };
 
                 self.tx.send(msg).await.map_err(|_| $crate::DriverError::ExecutionError("Driver runtime closed".to_string()))?;
 
                 reply_rx.await.map_err(|_| $crate::DriverError::ExecutionError("Driver task cancelled".to_string()))?
+            }
+
+            #[inline]
+            fn collect_max_inflight(&self) -> usize {
+                // Delegate so external scheduling decisions can observe the driver's real budget.
+                self.inner.collect_max_inflight()
             }
 
             async fn execute_action(
@@ -344,6 +426,9 @@ macro_rules! ng_driver_factory {
                     inner: std::sync::Arc::new(inner_driver),
                     tx,
                     cancel_token,
+                    // Start with 1 permit; additional permits are added in `start()`
+                    // after reading `Driver::collect_max_inflight()`.
+                    collect_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
                     rx: std::sync::Mutex::new(Some(rx)),
                 }))
             }
@@ -563,12 +648,46 @@ pub trait Driver: DowncastSync + Send + Sync {
     /// in `Arc` without requiring mutable access.
     async fn stop(&self) -> DriverResult<()>;
 
-    /// Collect data from specified points
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>>;
+    /// Return a "physical collection group" key for a business device.
+    ///
+    /// When this returns `Some(key)`, the Collector will group devices by this key and call
+    /// `collect_data()` once per group, passing multiple items in a single call.
+    ///
+    /// When this returns `None`, the Collector will call `collect_data()` with exactly one item.
+    ///
+    /// # Performance note
+    /// This method must be **fast** and should avoid allocations.
+    #[inline]
+    fn collection_group_key(&self, _device: &dyn RuntimeDevice) -> Option<CollectionGroupKey> {
+        None
+    }
+
+    /// Collect data from specified devices and points (group-aware batch API).
+    ///
+    /// # Input invariants (enforced by the Collector)
+    /// - The Collector will never call this with an empty slice.
+    /// - If `collection_group_key()` returns `None` for a device, the Collector guarantees
+    ///   `items.len() == 1`.
+    /// - If `collection_group_key()` returns `Some(k)`, the Collector guarantees all items
+    ///   in the slice belong to the same `k`.
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>>;
+
+    /// Maximum number of in-flight `collect_data()` calls allowed for this driver instance.
+    ///
+    /// # Design notes
+    /// - Default is `1` to preserve strict serialization for legacy and third-party drivers.
+    /// - Drivers that maintain a **TCP connection pool** (or other parallel I/O lanes) should
+    ///   override this to match their pool size to unlock collection concurrency.
+    /// - The SDK runtime wrapper does **not** enforce ordering between `collect_data` and
+    ///   control-plane operations. Drivers must enforce any required serialization at the
+    ///   physical link/session/connection layer (e.g., via `Mutex` or per-connection workers).
+    ///
+    /// # Performance
+    /// This method must be **fast** and must not allocate.
+    #[inline]
+    fn collect_max_inflight(&self) -> usize {
+        1
+    }
 
     /// Execute an action/command
     async fn execute_action(
@@ -769,3 +888,102 @@ pub trait RuntimeAction: DowncastSync + Send + Sync + Debug {
     /// Get input parameters for this action
     fn input_parameters(&self) -> Vec<Arc<dyn RuntimeParameter>>;
 }
+
+/// A stable "physical collection group" identifier for grouping devices within a protocol driver.
+///
+/// # Design goals
+/// - **Fixed-size value type**: safe to use as a `HashMap` key with zero allocations.
+/// - **Object-safe**: usable from `dyn Driver` without generics/lifetimes.
+/// - **Cross-protocol safe**: callers should set a `kind` namespace to avoid collisions.
+///
+/// # Wire format
+/// The key is 16 bytes:
+/// - Bytes `[0..4)`: `kind` (big-endian `u32`)
+/// - Bytes `[4..16)`: protocol-defined payload (12 bytes)
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct CollectionGroupKey(pub [u8; 16]);
+
+impl CollectionGroupKey {
+    /// Build a key from a `kind` namespace and a `u64` value.
+    ///
+    /// Layout: `[kind:4][0:4][v:8]` (big-endian).
+    #[inline]
+    pub fn from_u64(kind: u32, v: u64) -> Self {
+        let mut out = [0u8; 16];
+        out[0..4].copy_from_slice(&kind.to_be_bytes());
+        out[8..16].copy_from_slice(&v.to_be_bytes());
+        Self(out)
+    }
+
+    /// Build a key from a `kind` namespace and two `u64` values.
+    ///
+    /// Layout: `[kind:4][a_low48:6][b_low48:6]` (big-endian).
+    ///
+    /// Note: this intentionally truncates both inputs to 48 bits to fit 12 bytes payload.
+    /// For full-width identity, prefer `from_bytes` or `from_hash128`.
+    #[inline]
+    pub fn from_pair_u64(kind: u32, a: u64, b: u64) -> Self {
+        #[inline]
+        fn write_u48_be(dst: &mut [u8], v: u64) {
+            let x = v & 0x0000_FFFF_FFFF_FFFF;
+            dst[0] = ((x >> 40) & 0xFF) as u8;
+            dst[1] = ((x >> 32) & 0xFF) as u8;
+            dst[2] = ((x >> 24) & 0xFF) as u8;
+            dst[3] = ((x >> 16) & 0xFF) as u8;
+            dst[4] = ((x >> 8) & 0xFF) as u8;
+            dst[5] = (x & 0xFF) as u8;
+        }
+
+        let mut out = [0u8; 16];
+        out[0..4].copy_from_slice(&kind.to_be_bytes());
+        write_u48_be(&mut out[4..10], a);
+        write_u48_be(&mut out[10..16], b);
+        Self(out)
+    }
+
+    /// Build a key from a `kind` namespace and an arbitrary 12-byte payload.
+    #[inline]
+    pub fn from_bytes(kind: u32, payload: [u8; 12]) -> Self {
+        let mut out = [0u8; 16];
+        out[0..4].copy_from_slice(&kind.to_be_bytes());
+        out[4..16].copy_from_slice(&payload);
+        Self(out)
+    }
+
+    /// Build a key from a `kind` namespace and a stable 128-bit hash.
+    ///
+    /// The payload stores the first 12 bytes of the hash; callers should choose a
+    /// stable hash function and seed to keep grouping keys consistent across restarts.
+    #[inline]
+    pub fn from_hash128(kind: u32, hash: [u8; 16]) -> Self {
+        let mut payload = [0u8; 12];
+        payload.copy_from_slice(&hash[0..12]);
+        Self::from_bytes(kind, payload)
+    }
+
+    /// Return the `kind` namespace embedded in this key.
+    #[inline]
+    pub fn kind(&self) -> u32 {
+        u32::from_be_bytes([self.0[0], self.0[1], self.0[2], self.0[3]])
+    }
+}
+
+impl fmt::Debug for CollectionGroupKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "CollectionGroupKey(kind=0x{:08X}, payload=0x",
+            self.kind()
+        )?;
+        for b in &self.0[4..16] {
+            write!(f, "{:02X}", b)?;
+        }
+        write!(f, ")")
+    }
+}
+
+/// A single collection item passed from the Collector to a driver.
+///
+/// Each item represents a business device with its points. Drivers may aggregate multiple
+/// items that belong to the same physical session/group (e.g., Modbus slave ID).
+pub type CollectItem = (Arc<dyn RuntimeDevice>, Arc<[Arc<dyn RuntimePoint>]>);

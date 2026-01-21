@@ -15,13 +15,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, AttributeData, DataPointType, DataType, Driver, DriverError,
-    DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus, NGValue,
-    NGValueCastError, NorthwardData, PointValue, RuntimeAction, RuntimeDevice, RuntimeParameter,
-    RuntimePoint, SouthwardConnectionState, SouthwardInitContext, TelemetryData, ValueCodec,
+    downcast_parameters, AccessMode, CollectItem, CollectionGroupKey, DataType, DeviceBuffers,
+    Driver, DriverError, DriverHealth, DriverResult, ExecuteOutcome, ExecuteResult, HealthStatus,
+    NGValue, NGValueCastError, NorthwardData, PointValue, RuntimeAction, RuntimeDevice,
+    RuntimeParameter, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, ValueCodec,
     WriteOutcome, WriteResult,
 };
 use std::{
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -56,6 +57,11 @@ pub struct McDriver {
 }
 
 impl McDriver {
+    /// Collection group key namespace for grouping by channel.
+    ///
+    /// ASCII: "MCCH"
+    const KIND_MC_CHANNEL: u32 = 0x4D43_4348;
+
     /// Create a new MC driver from initialization context.
     ///
     /// This performs type downcast checks and initializes shared session state
@@ -228,27 +234,49 @@ impl Driver for McDriver {
         Ok(())
     }
 
+    #[inline]
+    fn collection_group_key(&self, device: &dyn RuntimeDevice) -> Option<CollectionGroupKey> {
+        device
+            .downcast_ref::<McDevice>()
+            .map(|d| CollectionGroupKey::from_u64(Self::KIND_MC_CHANNEL, d.channel_id as u64))
+    }
+
     /// Collect data from specified points.
     ///
     #[inline]
     #[instrument(level = "debug", skip_all)]
-    async fn collect_data(
-        &self,
-        device: Arc<dyn RuntimeDevice>,
-        data_points: Arc<[Arc<dyn RuntimePoint>]>,
-    ) -> DriverResult<Vec<NorthwardData>> {
-        let md = device
-            .downcast_ref::<McDevice>()
-            .ok_or(DriverError::ConfigurationError(
-                "RuntimeDevice is not McDevice for McDriver".to_string(),
-            ))?;
+    async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
+        if items.is_empty() {
+            return Err(DriverError::ValidationError(
+                "collect_data called with empty items".to_string(),
+            ));
+        }
 
-        // Downcast points to McPoint and collect readable ones.
-        let mc_points: Vec<Arc<McPoint>> = data_points
-            .iter()
-            .filter_map(|p| Arc::clone(p).downcast_arc::<McPoint>().ok())
-            .filter(|p| matches!(p.access_mode, AccessMode::Read | AccessMode::ReadWrite))
-            .collect();
+        // Prepare per-device output buffers and build a merged point list.
+        let mut buffers = HashMap::with_capacity(items.len());
+        let mut mc_points = Vec::new();
+        let mut point_device_ids = Vec::new();
+
+        for (dev_any, points_any) in items.iter() {
+            let dev = dev_any.downcast_ref::<McDevice>().ok_or_else(|| {
+                DriverError::ConfigurationError("RuntimeDevice is not McDevice for McDriver".into())
+            })?;
+
+            buffers
+                .entry(dev.id)
+                .or_insert_with(|| DeviceBuffers::new(dev.device_name.clone()));
+
+            for p_any in points_any.iter() {
+                let Ok(p) = Arc::clone(p_any).downcast_arc::<McPoint>() else {
+                    continue;
+                };
+                if !matches!(p.access_mode, AccessMode::Read | AccessMode::ReadWrite) {
+                    continue;
+                }
+                point_device_ids.push(dev.id);
+                mc_points.push(p);
+            }
+        }
 
         if mc_points.is_empty() {
             return Ok(Vec::new());
@@ -343,9 +371,6 @@ impl Driver for McDriver {
             }
         }
 
-        let mut telemetry_values: Vec<PointValue> = Vec::with_capacity(mc_points.len());
-        let mut attribute_values: Vec<PointValue> = Vec::with_capacity(mc_points.len());
-
         // Execute typed read via session; update metrics once per collect cycle,
         // aligned with S7 driver behaviour.
         let series_max = self.inner.config.series.device_batch_in_word_points_max();
@@ -422,33 +447,31 @@ impl Driver for McDriver {
                 }
             };
 
-            let target = match point.r#type {
-                DataPointType::Telemetry => &mut telemetry_values,
-                DataPointType::Attribute => &mut attribute_values,
+            let device_id = point_device_ids[item.index];
+            let Some(buf) = buffers.get_mut(&device_id) else {
+                continue;
             };
-            target.push(PointValue {
-                point_id: point.id,
-                point_key: Arc::<str>::from(point.key.as_str()),
-                value,
-            });
+            buf.push(
+                point.r#type,
+                PointValue {
+                    point_id: point.id,
+                    point_key: Arc::<str>::from(point.key.as_str()),
+                    value,
+                },
+            );
         }
 
-        let mut out = Vec::with_capacity(2);
-        if !telemetry_values.is_empty() {
-            out.push(NorthwardData::Telemetry(TelemetryData::new(
-                md.id,
-                md.device_name.clone(),
-                telemetry_values,
-            )));
-        }
-        if !attribute_values.is_empty() {
-            out.push(NorthwardData::Attributes(
-                AttributeData::new_client_attributes(
-                    md.id,
-                    md.device_name.clone(),
-                    attribute_values,
-                ),
-            ));
+        // Build stable, per-business-device outputs with a single group timestamp.
+        let ts = Utc::now();
+        let mut device_ids: Vec<i32> = buffers.keys().copied().collect();
+        device_ids.sort_unstable();
+
+        let mut out: Vec<NorthwardData> = Vec::with_capacity(device_ids.len() * 2);
+        for device_id in device_ids {
+            let Some(buf) = buffers.remove(&device_id) else {
+                continue;
+            };
+            out.extend(buf.into_northward(device_id, ts));
         }
 
         Ok(out)

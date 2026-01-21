@@ -25,6 +25,7 @@ pub use bin_inspect::{
     BinaryArch, BinaryInfo, BinaryOsType,
 };
 pub use error::{DriverError, NorthwardError};
+pub use northward::buffer::DeviceBuffers;
 /// Northward envelope protocol types (re-exported at crate root).
 pub use northward::{
     envelope,
@@ -62,9 +63,9 @@ pub use southward::{
         validate_and_resolve_action_inputs,
     },
     wire::{WireDecode, WireEncode},
-    Driver, DriverConfig, DriverFactory, ExecuteOutcome, ExecuteResult, RuntimeAction,
-    RuntimeChannel, RuntimeDelta, RuntimeDevice, RuntimeParameter, RuntimePoint, WriteOutcome,
-    WriteResult,
+    CollectItem, CollectionGroupKey, Driver, DriverConfig, DriverFactory, ExecuteOutcome,
+    ExecuteResult, RuntimeAction, RuntimeChannel, RuntimeDelta, RuntimeDevice, RuntimeParameter,
+    RuntimePoint, WriteOutcome, WriteResult,
 };
 pub use transform::Transform;
 pub use ui_schema::{
