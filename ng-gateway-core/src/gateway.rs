@@ -19,7 +19,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
-use ng_gateway_common::NGAppContext;
+use ng_gateway_common::{
+    instrumented_mpsc::{InstrumentedReceiver, InstrumentedSender},
+    NGAppContext,
+};
 use ng_gateway_error::{init::InitContextError, storage::StorageError, NGError, NGResult};
 use ng_gateway_models::{
     core::metrics::{GatewayMetrics, GatewayStatus, SystemInfo},
@@ -59,17 +62,17 @@ use std::{
 use sysinfo::{Disks, System};
 use tokio::{
     fs,
-    sync::{mpsc, RwLock, Semaphore},
+    sync::{RwLock, Semaphore},
     time::{interval, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
 // --- Type aliases to reduce type complexity and improve readability ---
-type DataSender = mpsc::Sender<Arc<NorthwardData>>;
-type DataReceiver = mpsc::Receiver<Arc<NorthwardData>>;
-type EventsSender = mpsc::Sender<(i32, NorthwardEvent)>;
-type EventsReceiver = mpsc::Receiver<(i32, NorthwardEvent)>;
+type DataSender = InstrumentedSender<Arc<NorthwardData>>;
+type DataReceiver = InstrumentedReceiver<Arc<NorthwardData>>;
+type EventsSender = InstrumentedSender<(i32, NorthwardEvent)>;
+type EventsReceiver = InstrumentedReceiver<(i32, NorthwardEvent)>;
 type Shared<T> = Arc<RwLock<T>>;
 type SharedReceiver = Shared<Option<DataReceiver>>;
 type SharedEventsReceiver = Shared<Option<EventsReceiver>>;
@@ -163,11 +166,27 @@ impl Gateway for NGGateway {
 
         // Create bounded data batch channel (single consumer) to propagate backpressure
         let (data_tx, data_rx): (DataSender, DataReceiver) =
-            mpsc::channel(settings.general.collector.outbound_queue_capacity);
+            ng_gateway_common::instrumented_mpsc::channel(
+                "collector_outbound",
+                settings.general.collector.outbound_queue_capacity,
+            )
+            .map_err(|e| {
+                InitContextError::Primitive(format!(
+                    "Failed to create instrumented queue collector_outbound: {e}"
+                ))
+            })?;
 
         // Create bounded northward events channel (single consumer) for event routing
         let (northward_events_tx, northward_events_rx): (EventsSender, EventsReceiver) =
-            mpsc::channel(settings.general.northward.queue_capacity);
+            ng_gateway_common::instrumented_mpsc::channel(
+                "northward_events",
+                settings.general.northward.queue_capacity,
+            )
+            .map_err(|e| {
+                InitContextError::Primitive(format!(
+                    "Failed to create instrumented queue northward_events: {e}"
+                ))
+            })?;
 
         // Initialize driver system
         let driver_registry = Arc::new(DashMap::new());

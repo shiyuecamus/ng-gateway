@@ -143,19 +143,5 @@ data:
   {{- end }}
   {{- end }}
   {{- end }}
-  {{- if $config.metrics }}
-  {{- if hasKey $config.metrics "enabled" }}
-  NG__METRICS__ENABLED: {{ $config.metrics.enabled | quote }}
-  {{- end }}
-  {{- if $config.metrics.endpoint }}
-  NG__METRICS__ENDPOINT: {{ $config.metrics.endpoint | quote }}
-  {{- end }}
-  {{- if $config.metrics.exportInterval }}
-  NG__METRICS__EXPORT_INTERVAL: {{ $config.metrics.exportInterval | quote }}
-  {{- end }}
-  {{- if $config.metrics.serviceName }}
-  NG__METRICS__SERVICE_NAME: {{ $config.metrics.serviceName | quote }}
-  {{- end }}
-  {{- end }}
 {{- end }}
 

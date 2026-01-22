@@ -42,9 +42,6 @@ workspace = true
 [dependencies.sea-query]
 workspace = true
 
-# OpenTelemetry
-[dependencies.opentelemetry_sdk]
-workspace = true
 
 # Async trait
 [dependencies.async-trait]
@@ -83,10 +80,6 @@ workspace = true
 
 # Configuration Management
 [dependencies.config]
-workspace = true
-
-# Metrics
-[dependencies.opentelemetry]
 workspace = true
 
 # UUID

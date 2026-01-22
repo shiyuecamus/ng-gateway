@@ -16,6 +16,7 @@ use super::{
 use crate::lifecycle::{start_with_policy, StartPolicy};
 use crate::southward::manager::NGSouthwardManager;
 use dashmap::DashMap;
+use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
     core::metrics::{
@@ -87,7 +88,7 @@ impl NGNorthwardManager {
         &self,
         topology: Vec<(AppModel, Option<AppSubModel>)>,
         db: &DatabaseConnection,
-        global_events_tx: &mpsc::Sender<(i32, NorthwardEvent)>,
+        global_events_tx: &InstrumentedSender<(i32, NorthwardEvent)>,
     ) -> NGResult<()> {
         info!(
             "Initializing northward topology with {} apps",
@@ -397,7 +398,7 @@ impl NGNorthwardManager {
         app: &AppModel,
         sub: Option<AppSubModel>,
         db: &DatabaseConnection,
-        global_events_tx: mpsc::Sender<(i32, NorthwardEvent)>,
+        global_events_tx: InstrumentedSender<(i32, NorthwardEvent)>,
         shutdown_token: CancellationToken,
         timeout_ms: u64,
     ) -> NGResult<()> {
@@ -427,7 +428,7 @@ impl NGNorthwardManager {
         app: &AppModel,
         sub: Option<AppSubModel>,
         db: &DatabaseConnection,
-        global_events_tx: mpsc::Sender<(i32, NorthwardEvent)>,
+        global_events_tx: InstrumentedSender<(i32, NorthwardEvent)>,
         shutdown_token: CancellationToken,
         timeout_ms: u64,
     ) -> NGResult<()> {
@@ -827,7 +828,7 @@ impl NGNorthwardManager {
         &self,
         app_id: i32,
         actor: &Arc<AppActor>,
-        global_events_tx: mpsc::Sender<(i32, NorthwardEvent)>,
+        global_events_tx: InstrumentedSender<(i32, NorthwardEvent)>,
     ) {
         let Some(mut app_events_rx) = actor.take_events_rx() else {
             warn!(

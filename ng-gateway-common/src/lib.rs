@@ -10,8 +10,9 @@
 //! - **Metrics & Logging**: Comprehensive observability with structured logging
 pub mod casbin;
 pub mod event;
+pub mod instrumented_mpsc;
 mod logger;
-// pub mod metrics;
+pub mod metrics;
 
 // Re-export error types
 pub use ng_gateway_error::{NGError, NGResult};
@@ -27,12 +28,6 @@ use ng_gateway_models::{
     WebServer,
 };
 use once_cell::sync::OnceCell;
-use opentelemetry::{global, metrics::MeterProvider, KeyValue};
-use opentelemetry_otlp::{MetricExporter, WithExportConfig};
-use opentelemetry_sdk::{
-    metrics::{PeriodicReader, SdkMeterProvider},
-    Resource,
-};
 use std::{
     future::Future,
     path::Path,
@@ -40,9 +35,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
 };
-use sysinfo::{Disks, System};
 #[cfg(windows)]
 use tokio::signal::ctrl_c;
 #[cfg(unix)]
@@ -135,10 +128,6 @@ impl NGAppContext {
         let span = span!(Level::INFO, "init-app");
         let _guard = span.enter();
 
-        if settings.metrics.enabled {
-            Self::init_metrics(&settings);
-        }
-
         // Ensure required runtime directories exist before subsystems start.
         // This must run after settings are loaded so paths can be configured.
         ensure_runtime_directories()?;
@@ -225,75 +214,6 @@ impl NGAppContext {
         self.gateway = Some(G::init(self.settings()?, self.db_manager()?).await?);
         info!("Northward manager initialized successfully.");
         Ok(())
-    }
-
-    fn init_metrics(settings: &Settings) {
-        let exporter = MetricExporter::builder()
-            .with_tonic()
-            .with_endpoint(&settings.metrics.endpoint)
-            .build()
-            .expect("Failed to create metric exporter");
-
-        let provider = SdkMeterProvider::builder()
-            .with_reader(
-                PeriodicReader::builder(exporter)
-                    .with_interval(Duration::from_millis(settings.metrics.export_interval))
-                    .build(),
-            )
-            .with_resource(
-                Resource::builder()
-                    .with_service_name(settings.metrics.service_name.to_string())
-                    .build(),
-            )
-            .build();
-
-        let meter = provider.meter("system_metrics");
-        let _cpu_usage = meter
-            .f64_observable_up_down_counter("system.cpu.usage")
-            .with_description("CPU usage percentage")
-            .with_callback(|observer| {
-                let mut sys = System::new_all();
-                sys.refresh_all();
-
-                observer.observe(
-                    sys.global_cpu_usage() as f64,
-                    &[KeyValue::new("type", "cpu")],
-                );
-            })
-            .build();
-        let _memory_usage = meter
-            .f64_observable_up_down_counter("system.memory.usage")
-            .with_description("Memory usage percentage")
-            .with_callback(|observer| {
-                let mut sys = System::new_all();
-                sys.refresh_all();
-
-                observer.observe(
-                    ((sys.used_memory() as f64) / (sys.total_memory() as f64)) * 100.0,
-                    &[KeyValue::new("type", "memory")],
-                );
-            })
-            .build();
-        let _disk_usage = meter
-            .f64_observable_up_down_counter("system.disk.usage")
-            .with_description("Disk usage percentage")
-            .with_callback(|observer| {
-                let disks = Disks::new_with_refreshed_list();
-                if let Some(root_disk) = disks
-                    .list()
-                    .iter()
-                    .find(|d| d.mount_point() == Path::new("/"))
-                {
-                    let total = root_disk.total_space();
-                    let available = root_disk.available_space();
-                    observer.observe(
-                        (((total - available) as f64) / (total as f64)) * 100.0,
-                        &[KeyValue::new("type", "disk")],
-                    );
-                }
-            })
-            .build();
-        global::set_meter_provider(provider);
     }
 
     #[inline]

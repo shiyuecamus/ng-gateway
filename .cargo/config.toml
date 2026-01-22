@@ -8,6 +8,13 @@ ng-gateway-xtask = "run --package ng-gateway-xtask --"
 build-with-drivers = "xtask build --profile release"
 deploy-drivers = "xtask deploy --profile release"
 
+# Bench aliases (best practice):
+# Hide feature toggles needed to avoid release+LTO duplicate symbols when benchmarking different drivers.
+# IMPORTANT: these aliases already include the `--` separator for binary arguments,
+# so you should pass bench args directly (do NOT add another `--`).
+bench-modbus = "run --package ng-gateway-bench --release -- --protocol modbus"
+bench-opcua = "run --package ng-gateway-bench --release --no-default-features --features opcua -- --protocol opcua"
+
 [build]
 # Shared build configuration
 

@@ -9,6 +9,7 @@
 
 mod branding;
 mod health;
+mod metrics;
 
 use actix_web::web;
 
@@ -16,5 +17,6 @@ use actix_web::web;
 #[inline]
 pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     cfg.configure(health::configure_health_routes)
+        .configure(metrics::configure_metrics_routes)
         .configure(branding::configure_public_branding_routes);
 }

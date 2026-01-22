@@ -1,11 +1,12 @@
 use crate::southward::index::RuntimeIndex;
 use chrono::Utc;
 use dashmap::DashMap;
+use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
 use ng_gateway_sdk::{
     DeviceConnectedData, DeviceDisconnectedData, NorthwardData, SouthwardConnectionState,
 };
 use std::sync::Arc;
-use tokio::{sync::mpsc::Sender, task::JoinHandle};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -27,7 +28,7 @@ impl ChannelMonitor {
     }
 
     /// Spawn a connection monitor for a specific channel
-    pub fn spawn(&self, channel_id: i32, data_tx: &Sender<Arc<NorthwardData>>) {
+    pub fn spawn(&self, channel_id: i32, data_tx: &InstrumentedSender<Arc<NorthwardData>>) {
         if self.tasks.contains_key(&channel_id) {
             return;
         }
@@ -160,7 +161,11 @@ impl ChannelMonitor {
     }
 
     /// Spawn monitors for all channel ids
-    pub fn spawn_all(&self, channel_ids: Vec<i32>, data_tx: &Sender<Arc<NorthwardData>>) {
+    pub fn spawn_all(
+        &self,
+        channel_ids: Vec<i32>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+    ) {
         for id in channel_ids.into_iter() {
             self.spawn(id, data_tx);
         }

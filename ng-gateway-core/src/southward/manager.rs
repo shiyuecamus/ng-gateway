@@ -13,9 +13,10 @@ use futures::{
     future::join_all,
     stream::{self, StreamExt},
 };
+use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
-    core::metrics::{ChannelMetrics, DeviceMetrics, SouthwardManagerMetrics},
+    core::metrics::{ChannelMetrics, ChannelStats, DeviceMetrics, SouthwardManagerMetrics},
     entities::prelude::{ActionModel, ChannelModel, DeviceModel, PointModel},
     SouthwardManager,
 };
@@ -34,10 +35,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{
-    sync::{mpsc::Sender, Mutex},
-    time::timeout,
-};
+use tokio::{sync::Mutex, time::timeout};
 use tracing::{error, info, warn};
 
 /// Build a reverse-lookup key for `(channel_name, device_name, point_key)`.
@@ -459,7 +457,7 @@ impl NGSouthwardManager {
     pub async fn initialize_topology(
         &self,
         topology: Vec<ChannelInitEntry>,
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
     ) -> NGResult<()> {
         let successful_channels = Arc::new(AtomicUsize::new(0));
         let failed_channels = Arc::new(AtomicUsize::new(0));
@@ -596,7 +594,7 @@ impl NGSouthwardManager {
     pub async fn start_channel(
         &self,
         channel_id: i32,
-        _data_tx: &Sender<Arc<NorthwardData>>,
+        _data_tx: &InstrumentedSender<Arc<NorthwardData>>,
         policy: StartPolicy,
     ) -> NGResult<()> {
         // Driver should already be created at instance creation time
@@ -635,7 +633,7 @@ impl NGSouthwardManager {
     pub async fn create_and_start_channel(
         &self,
         config: &ChannelModel,
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
         policy: StartPolicy,
     ) -> NGResult<()> {
         // Prepare instance (driver created but not started) and commit
@@ -678,7 +676,7 @@ impl NGSouthwardManager {
         &self,
         config: ChannelModel,
         dev_triples: &[DeviceInitTriple],
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
     ) -> NGResult<()> {
         let instance = self
             .create_channel_instance_with_topology(&config, dev_triples, data_tx)
@@ -694,7 +692,7 @@ impl NGSouthwardManager {
     pub async fn create_channel_instance(
         &self,
         config: &ChannelModel,
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
     ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id
         let driver_factory = self
@@ -745,7 +743,7 @@ impl NGSouthwardManager {
         &self,
         config: &ChannelModel,
         dev_triples: &[DeviceInitTriple],
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
     ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id
         let driver_factory = self
@@ -919,7 +917,7 @@ impl NGSouthwardManager {
     fn build_channel_runtime_context(
         &self,
         runtime_channel: Arc<dyn RuntimeChannel>,
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
     ) -> SouthwardInitContext {
         let channel_id = runtime_channel.id();
         // Collect device ids already bound to this channel in indexes (if any)
@@ -993,7 +991,10 @@ impl NGSouthwardManager {
     }
 
     /// Start all channels by constructing runtime contexts and injecting a high-performance publisher
-    pub async fn start_channels(&self, data_tx: &Sender<Arc<NorthwardData>>) -> NGResult<()> {
+    pub async fn start_channels(
+        &self,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+    ) -> NGResult<()> {
         // Collect channel ids first to avoid holding iter_mut guards across await
         let ids = self.get_enabled_channel_ids();
         // Spawn monitors up-front to capture transitions uniformly
@@ -1068,7 +1069,7 @@ impl NGSouthwardManager {
     pub async fn replace_channel_instance(
         &self,
         config: &ChannelModel,
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
     ) -> NGResult<()> {
         let instance = self.create_channel_instance(config, data_tx).await?;
         self.index.channels.insert(instance.config.id(), instance);
@@ -1081,7 +1082,7 @@ impl NGSouthwardManager {
     pub async fn restart_channel(
         &self,
         config: &ChannelModel,
-        data_tx: &Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
         timeout_ms: u64,
     ) -> NGResult<()> {
         let channel_id = config.id;
@@ -1889,6 +1890,45 @@ impl NGSouthwardManager {
     pub async fn get_metrics(&self) -> SouthwardManagerMetrics {
         self.update_metrics().await;
         self.metrics.lock().await.clone()
+    }
+
+    /// Get a best-effort snapshot of a channel's runtime statistics.
+    ///
+    /// # Notes
+    /// - This method is designed for **control-plane and observability** use cases (REST/WS/UI),
+    ///   not for the hot-path data pipeline.
+    /// - `driver_name` is currently populated as a stable placeholder (`driver_id`) because the
+    ///   runtime layer does not guarantee a human-readable driver name without querying the DB.
+    #[inline]
+    pub fn get_channel_stats(&self, channel_id: i32) -> Option<ChannelStats> {
+        let entry = self.index.channels.get(&channel_id)?;
+        let channel_name = entry.config.name().to_string();
+        let driver_name = entry.config.driver_id().to_string();
+        let state = entry.state.clone();
+        let health = entry.health.as_ref().map(|h| h.status);
+        let metrics = entry.metrics;
+        let created_at = entry.created_at;
+        let last_activity = entry.last_activity;
+        drop(entry);
+
+        let device_count = self
+            .index
+            .channel_devices
+            .get(&channel_id)
+            .map(|e| e.value().len())
+            .unwrap_or(0);
+
+        Some(ChannelStats {
+            channel_id,
+            name: channel_name,
+            driver_name,
+            state,
+            health,
+            device_count,
+            metrics,
+            created_at,
+            last_activity,
+        })
     }
 
     /// Shutdown the data manager

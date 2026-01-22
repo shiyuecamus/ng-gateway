@@ -1,7 +1,7 @@
 use crate::gateway::NGGateway;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use ng_gateway_error::NGResult;
+use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::core::metrics::GatewayStatus;
 use ng_gateway_sdk::Command;
 use once_cell::sync::Lazy;
@@ -43,7 +43,10 @@ impl GatewayCommandHandler for GetStatusHandler {
     async fn handle(&self, _cmd: &Command) -> NGResult<Value> {
         let status: GatewayStatus = self.gateway.get_status().await;
         let snapshot = status.get_snapshot();
-        let json = serde_json::to_value(&snapshot).unwrap();
-        Ok(json)
+        serde_json::to_value(&snapshot).map_err(|e| {
+            NGError::from(format!(
+                "Failed to serialize gateway status snapshot to JSON: {e}"
+            ))
+        })
     }
 }

@@ -1,6 +1,7 @@
+use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
 use ng_gateway_sdk::{NorthwardData, NorthwardError, NorthwardPublisher, NorthwardResult};
 use std::sync::Arc;
-use tokio::sync::mpsc::{error::TrySendError, Sender};
+use tokio::sync::mpsc::error::TrySendError;
 
 /// High-performance publisher backed by a bounded mpsc channel.
 ///
@@ -10,12 +11,12 @@ use tokio::sync::mpsc::{error::TrySendError, Sender};
 /// on saturation without blocking async tasks.
 #[derive(Debug)]
 pub struct MpscNorthwardPublisher {
-    tx: Sender<Arc<NorthwardData>>,
+    tx: InstrumentedSender<Arc<NorthwardData>>,
 }
 
 impl MpscNorthwardPublisher {
     /// Create a new publisher from the gateway's batch sender.
-    pub fn new(tx: Sender<Arc<NorthwardData>>) -> Self {
+    pub fn new(tx: InstrumentedSender<Arc<NorthwardData>>) -> Self {
         Self { tx }
     }
 }

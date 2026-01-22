@@ -71,15 +71,6 @@ version = "0.3"
 [workspace.dependencies.tracing-appender]
 version = "0.2"
 
-# Metrics
-[workspace.dependencies.opentelemetry]
-version = "0.31"
-[workspace.dependencies.opentelemetry_sdk]
-version = "0.31"
-[workspace.dependencies.opentelemetry-otlp]
-features = ["grpc-tonic"]
-version = "0.31"
-
 # Command Line Argument Parsing
 [workspace.dependencies.clap]
 features = ["env"]

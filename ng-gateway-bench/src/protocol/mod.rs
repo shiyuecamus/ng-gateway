@@ -4,7 +4,9 @@
 //! device/point topologies, and run collect/write operations across different
 //! southward protocols (e.g. Modbus, OPC UA).
 
+#[cfg(feature = "modbus")]
 pub mod modbus;
+#[cfg(feature = "opcua")]
 pub mod opcua;
 
 use ng_gateway_sdk::{

@@ -32,13 +32,6 @@ retry_attempts = 3
 retry_delay_ms = 1000
 outbound_queue_capacity = 10000
 
-# Metrics
-[metrics]
-enabled = false
-endpoint = "http://localhost:4317"
-export_interval = 60000
-service_name = "ng"
-
 # Web
 [web]
 router_prefix = "/api"

@@ -8,11 +8,7 @@ use anyhow::{anyhow, Context};
 use clap::{Parser, ValueEnum};
 use metrics::{sample_for, MetricsSummary};
 use ng_gateway_sdk::{NGValue, NorthwardData};
-use protocol::{
-    modbus::{build_modbus_channel_runtime, ModbusChannelRuntimeArgs},
-    opcua::{build_opcua_channel_runtime, OpcuaChannelRuntimeArgs},
-    ChannelRuntime,
-};
+use protocol::ChannelRuntime;
 use scenarios::{Scenario, ScenarioKind};
 use stats::{fmt_duration_ms, DurationStats};
 use std::{
@@ -32,7 +28,14 @@ use tokio::time::MissedTickBehavior;
 #[command(author, version, about)]
 struct Cli {
     /// Protocol under test.
-    #[arg(long, value_enum, default_value = "all")]
+    ///
+    /// NOTE:
+    /// `ng-gateway-bench` links drivers as Rust dependencies. Under the workspace release profile
+    /// (LTO enabled), linking multiple drivers into one binary will fail due to duplicate C-ABI
+    /// symbols (e.g. `create_driver_factory`).
+    ///
+    /// Therefore we only support running **one** protocol per built binary.
+    #[arg(long, value_enum, default_value = "modbus")]
     protocol: ProtocolOpt,
 
     /// Scenario id (1..=7).
@@ -107,7 +110,6 @@ struct Cli {
 enum ProtocolOpt {
     Modbus,
     Opcua,
-    All,
 }
 
 #[tokio::main]
@@ -139,12 +141,6 @@ async fn main() -> anyhow::Result<()> {
             ProtocolOpt::Opcua => {
                 let row = run_for_protocol(&cli, scenario, ProtocolOpt::Opcua).await?;
                 rows.push(row);
-            }
-            ProtocolOpt::All => {
-                let row1 = run_for_protocol(&cli, scenario, ProtocolOpt::Modbus).await?;
-                let row2 = run_for_protocol(&cli, scenario, ProtocolOpt::Opcua).await?;
-                rows.push(row1);
-                rows.push(row2);
             }
         }
     }
@@ -209,7 +205,6 @@ async fn run_for_protocol(
         protocol: match protocol {
             ProtocolOpt::Modbus => "modbus",
             ProtocolOpt::Opcua => "opcua",
-            ProtocolOpt::All => "all",
         }
         .to_string(),
         scenario_id: scenario.id,
@@ -235,32 +230,55 @@ fn build_channels(
     let mut channels = Vec::with_capacity(scenario.channel_count);
     for ch_idx in 0..scenario.channel_count {
         let ch = match protocol {
-            ProtocolOpt::Modbus => build_modbus_channel_runtime(ModbusChannelRuntimeArgs {
-                channel_idx: ch_idx,
-                devices_per_channel: scenario.devices_per_channel,
-                points_per_device: scenario.points_per_device,
-                period_ms: scenario.period_ms,
-                host: cli.modbus_host.clone(),
-                port: cli.modbus_port,
-                slave_id: cli.modbus_slave_id,
-                address_base: cli.modbus_address_base,
-                address_step: cli.modbus_address_step,
-                tcp_pool_size: cli.modbus_tcp_pool_size,
-            })
-            .map_err(|e| anyhow!(e))?,
-            ProtocolOpt::Opcua => build_opcua_channel_runtime(OpcuaChannelRuntimeArgs {
-                channel_idx: ch_idx,
-                devices_per_channel: scenario.devices_per_channel,
-                points_per_device: scenario.points_per_device,
-                period_ms: scenario.period_ms,
-                endpoint_url: cli.opcua_endpoint.clone(),
-                application_name: cli.opcua_application_name.clone(),
-                application_uri: cli.opcua_application_uri.clone(),
-                node_id_start: cli.opcua_node_id_start,
-            })
-            .map_err(|e| anyhow!(e))?,
-            ProtocolOpt::All => {
-                return Err(anyhow!("ProtocolOpt::All is not a buildable protocol"))
+            ProtocolOpt::Modbus => {
+                #[cfg(feature = "modbus")]
+                {
+                    protocol::modbus::build_modbus_channel_runtime(
+                        protocol::modbus::ModbusChannelRuntimeArgs {
+                            channel_idx: ch_idx,
+                            devices_per_channel: scenario.devices_per_channel,
+                            points_per_device: scenario.points_per_device,
+                            period_ms: scenario.period_ms,
+                            host: cli.modbus_host.clone(),
+                            port: cli.modbus_port,
+                            slave_id: cli.modbus_slave_id,
+                            address_base: cli.modbus_address_base,
+                            address_step: cli.modbus_address_step,
+                            tcp_pool_size: cli.modbus_tcp_pool_size,
+                        },
+                    )
+                    .map_err(|e| anyhow!(e))?
+                }
+                #[cfg(not(feature = "modbus"))]
+                {
+                    return Err(anyhow!(
+                        "Modbus benchmark is not enabled. Rebuild with `--features modbus`."
+                    ));
+                }
+            }
+            ProtocolOpt::Opcua => {
+                #[cfg(feature = "opcua")]
+                {
+                    protocol::opcua::build_opcua_channel_runtime(
+                        protocol::opcua::OpcuaChannelRuntimeArgs {
+                            channel_idx: ch_idx,
+                            devices_per_channel: scenario.devices_per_channel,
+                            points_per_device: scenario.points_per_device,
+                            period_ms: scenario.period_ms,
+                            endpoint_url: cli.opcua_endpoint.clone(),
+                            application_name: cli.opcua_application_name.clone(),
+                            application_uri: cli.opcua_application_uri.clone(),
+                            node_id_start: cli.opcua_node_id_start,
+                        },
+                    )
+                    .map_err(|e| anyhow!(e))?
+                }
+                #[cfg(not(feature = "opcua"))]
+                {
+                    return Err(anyhow!(
+                        "OPC UA benchmark is not enabled. Rebuild with `--features opcua`."
+                    ));
+                }
             }
         };
         channels.push(Arc::new(ch));

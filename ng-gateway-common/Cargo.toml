@@ -7,6 +7,7 @@ repository = { workspace = true }
 
 [dependencies]
 colored = "3.0.0"
+prometheus = "0.14.0"
 sys-locale = "0.3.2"
 term_size = "0.3.2"
 
@@ -26,14 +27,6 @@ workspace = true
 [dependencies.tracing-subscriber]
 workspace = true
 [dependencies.tracing-appender]
-workspace = true
-
-# Metrics
-[dependencies.opentelemetry]
-workspace = true
-[dependencies.opentelemetry_sdk]
-workspace = true
-[dependencies.opentelemetry-otlp]
 workspace = true
 
 # Json serialization

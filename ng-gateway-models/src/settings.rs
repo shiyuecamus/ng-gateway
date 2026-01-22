@@ -46,8 +46,6 @@ pub struct Inner {
     pub db: Db,
     #[serde(default)]
     pub cache: Cache,
-    #[serde(default)]
-    pub metrics: Metrics,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -644,47 +642,6 @@ impl Cache {
 pub enum CacheType {
     #[default]
     Moka,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Metrics {
-    #[serde(default = "Metrics::enabled_default")]
-    pub enabled: bool,
-    #[serde(default = "Metrics::endpoint_default")]
-    pub endpoint: String,
-    #[serde(default = "Metrics::export_interval_default")]
-    pub export_interval: u64,
-    #[serde(default = "Metrics::service_name_default")]
-    pub service_name: String,
-}
-
-impl Default for Metrics {
-    fn default() -> Self {
-        Self {
-            enabled: Metrics::enabled_default(),
-            endpoint: Metrics::endpoint_default(),
-            export_interval: Metrics::export_interval_default(),
-            service_name: Metrics::service_name_default(),
-        }
-    }
-}
-
-impl Metrics {
-    fn enabled_default() -> bool {
-        false
-    }
-
-    fn endpoint_default() -> String {
-        "http://localhost:4317".into()
-    }
-
-    fn export_interval_default() -> u64 {
-        60000
-    }
-
-    fn service_name_default() -> String {
-        "ng".into()
-    }
 }
 
 /// Southward communication configuration

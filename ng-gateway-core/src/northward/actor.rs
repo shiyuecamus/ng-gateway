@@ -7,6 +7,9 @@
 //! - Lock-free metrics and config hot-reload
 
 use chrono::{DateTime, Utc};
+use ng_gateway_common::instrumented_mpsc::{
+    self, DropReason, InstrumentedReceiver, InstrumentedSender, QueueObserver,
+};
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::core::metrics::{AppState, NorthwardAppMetrics};
 use ng_gateway_sdk::{
@@ -23,7 +26,10 @@ use std::{
 };
 use tokio::{
     sync::{
-        mpsc::{self, error::TrySendError},
+        mpsc::{
+            self,
+            error::{SendTimeoutError, TrySendError},
+        },
         watch,
     },
     time::timeout,
@@ -60,9 +66,9 @@ pub struct AppActor {
     queue_policy: QueuePolicy,
 
     // === Data queue (Gateway -> Plugin) ===
-    data_tx: mpsc::Sender<Arc<NorthwardData>>,
+    data_tx: InstrumentedSender<Arc<NorthwardData>>,
     /// Receiver is taken once on start() and moved into worker task
-    data_rx: Mutex<Option<mpsc::Receiver<Arc<NorthwardData>>>>,
+    data_rx: Mutex<Option<InstrumentedReceiver<Arc<NorthwardData>>>>,
 
     // === Events channel (Plugin -> Gateway) ===
     /// Gateway takes this via take_events_rx() to start bridge task
@@ -81,6 +87,8 @@ pub struct AppActor {
     /// Buffer queue: (data, timestamp) pairs
     /// Data is buffered here when plugin is not connected and flushed when connected
     buffer_queue: BufferQueue,
+    /// Buffer queue observer for Prometheus queue metrics.
+    buffer_observer: QueueObserver,
 
     // === Timestamps ===
     created_at: DateTime<Utc>,
@@ -117,8 +125,17 @@ impl AppActor {
         queue_policy: QueuePolicy,
         shutdown_token: CancellationToken,
     ) -> NGResult<Self> {
-        // Create bounded data channel
-        let (data_tx, data_rx) = mpsc::channel(queue_policy.capacity as usize);
+        // Create bounded data channel (instrumented for Prometheus queue metrics).
+        let (data_tx, data_rx) = instrumented_mpsc::channel(
+            format!("northward_app_{app_id}"),
+            queue_policy.capacity as usize,
+        )?;
+
+        // Create buffer observer (instrumented).
+        let buffer_observer = QueueObserver::new(
+            format!("northward_app_buffer_{app_id}"),
+            queue_policy.buffer_capacity as u64,
+        )?;
 
         // Wrap in Arc after initialization (zero runtime overhead for hot path)
         let plugin = Arc::from(plugin);
@@ -137,6 +154,7 @@ impl AppActor {
             state: AtomicU8::new(AppState::Uninitialized as u8),
             metrics: Arc::new(NorthwardAppMetrics::default()),
             buffer_queue: Arc::new(Mutex::new(VecDeque::new())),
+            buffer_observer,
             created_at: Utc::now(),
         })
     }
@@ -263,18 +281,9 @@ impl AppActor {
                 // Blocking with timeout: wait for space or drop after timeout
                 let timeout_duration = Duration::from_millis(self.queue_policy.block_duration);
 
-                match timeout(timeout_duration, self.data_tx.send(data)).await {
-                    Ok(Ok(_)) => Ok(true),
-                    Ok(Err(_)) => {
-                        // Channel closed
-                        error!("App {} data channel closed", self.app_id);
-                        Err(NGError::Error(format!(
-                            "App {} data channel closed",
-                            self.app_id
-                        )))
-                    }
-                    Err(_) => {
-                        // Timeout expired, drop current item
+                match self.data_tx.send_timeout(data, timeout_duration).await {
+                    Ok(()) => Ok(true),
+                    Err(SendTimeoutError::Timeout(_)) => {
                         warn!(
                             app_id = self.app_id,
                             timeout_ms = self.queue_policy.block_duration,
@@ -283,6 +292,13 @@ impl AppActor {
                         );
                         self.metrics.increment_dropped();
                         Ok(false)
+                    }
+                    Err(SendTimeoutError::Closed(_)) => {
+                        error!("App {} data channel closed", self.app_id);
+                        Err(NGError::Error(format!(
+                            "App {} data channel closed",
+                            self.app_id
+                        )))
                     }
                 }
             }
@@ -298,20 +314,31 @@ impl AppActor {
         let mut buffer = self.buffer_queue.lock().unwrap();
         let now = Instant::now();
 
+        // If buffer is enabled but capacity is zero, drop immediately to avoid unbounded growth.
+        if self.queue_policy.buffer_capacity == 0 {
+            self.buffer_observer.dropped(DropReason::BufferFull);
+            self.metrics.increment_dropped();
+            return Ok(false);
+        }
+
         // Check buffer capacity
         if buffer.len() >= self.queue_policy.buffer_capacity as usize {
             // Buffer full: remove oldest item (FIFO)
-            buffer.pop_front();
+            if buffer.pop_front().is_some() {
+                self.buffer_observer.dec();
+            }
             debug!(
                 app_id = self.app_id,
                 buffer_capacity = self.queue_policy.buffer_capacity,
                 "Buffer full: dropped oldest item (FIFO)"
             );
+            self.buffer_observer.dropped(DropReason::BufferFull);
             self.metrics.increment_dropped();
         }
 
         // Add new data to buffer
         buffer.push_back((data, now));
+        self.buffer_observer.inc();
         debug!(
             app_id = self.app_id,
             buffer_size = buffer.len(),
@@ -339,10 +366,11 @@ impl AppActor {
     /// * `Err` if data channel was closed during flush
     fn flush_buffer(
         buffer_queue: &BufferQueue,
-        data_tx: &mpsc::Sender<Arc<NorthwardData>>,
+        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
         queue_policy: QueuePolicy,
         app_id: i32,
         metrics: &Arc<NorthwardAppMetrics>,
+        buffer_observer: &QueueObserver,
     ) -> Result<usize, NGError> {
         let mut buffer = buffer_queue.lock().unwrap();
         let now = Instant::now();
@@ -359,11 +387,13 @@ impl AppActor {
 
         // Collect non-expired items
         while let Some((data, timestamp)) = buffer.pop_front() {
+            buffer_observer.dec();
             // Check expiration
             if let Some(expire) = expire_duration {
                 if now.duration_since(timestamp) > expire {
                     // Item expired, skip it
                     debug!(app_id = app_id, "Buffered data expired, skipping");
+                    buffer_observer.dropped(DropReason::Expired);
                     metrics.increment_dropped();
                     continue;
                 }
@@ -393,10 +423,12 @@ impl AppActor {
             // Put current item back
             if let Some(item) = current_item {
                 buffer.push_front(item);
+                buffer_observer.inc();
             }
             // Put remaining items back to buffer
             for item in to_send.into_iter().rev() {
                 buffer.push_front(item);
+                buffer_observer.inc();
             }
             Err(NGError::Error(format!(
                 "App {} data channel closed",
@@ -406,6 +438,7 @@ impl AppActor {
             // Put back items that couldn't be sent (queue full)
             for item in to_send.into_iter().rev() {
                 buffer.push_front(item);
+                buffer_observer.inc();
             }
 
             if flushed > 0 {
@@ -421,8 +454,14 @@ impl AppActor {
         }
     }
 
-    /// Get data sender for blocking sends (used internally)
-    pub fn data_tx(&self) -> mpsc::Sender<Arc<NorthwardData>> {
+    /// Get an instrumented data sender for this app.
+    ///
+    /// # Notes
+    /// Prefer calling `send_data()` from routing paths because it applies connection checks
+    /// and queue policies. This accessor is provided for internal helpers that need direct
+    /// send/try_send semantics while preserving queue metrics.
+    #[inline]
+    pub fn data_tx(&self) -> InstrumentedSender<Arc<NorthwardData>> {
         self.data_tx.clone()
     }
 
@@ -618,6 +657,7 @@ impl AppActor {
         let metrics = Arc::clone(&self.metrics);
         let token = self.shutdown_token.clone();
         let buffer_queue = Arc::clone(&self.buffer_queue);
+        let buffer_observer = self.buffer_observer.clone();
         let queue_policy = self.queue_policy;
         let data_tx = self.data_tx.clone();
 
@@ -665,6 +705,7 @@ impl AppActor {
                                     queue_policy,
                                     app_id,
                                     &metrics,
+                                    &buffer_observer,
                                 ) {
                                     warn!(
                                         app_id = app_id,

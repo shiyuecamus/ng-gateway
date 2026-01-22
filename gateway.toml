@@ -43,17 +43,6 @@ retry_delay_ms = 1000
 # Outbound queue capacity from collector to gateway (bounded channel)
 outbound_queue_capacity = 10000
 
-# Metrics configuration
-[metrics]
-# Enable/disable metrics collection
-enabled = false
-# Metrics export endpoint
-endpoint = "http://localhost:4317"
-# Export interval in milliseconds
-export_interval = 60000
-# Service name for metrics
-service_name = "ng"
-
 # Web
 [web]
 # router prefix

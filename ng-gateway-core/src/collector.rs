@@ -2,6 +2,7 @@ use crate::NGSouthwardManager;
 
 use chrono::Utc;
 use futures::{future::join_all, StreamExt};
+use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{core::metrics::CollectorMetrics, settings::CollectorConfig};
 use ng_gateway_sdk::{
@@ -9,7 +10,7 @@ use ng_gateway_sdk::{
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
-    sync::{mpsc, RwLock, Semaphore},
+    sync::{RwLock, Semaphore},
     task::JoinHandle,
     time::{interval, sleep, timeout, MissedTickBehavior},
 };
@@ -54,7 +55,7 @@ pub struct Collector {
     /// Fixed semaphore for bounded concurrency
     semaphore: Arc<Semaphore>,
     /// Data batch sender (bounded)
-    data_tx: Arc<mpsc::Sender<Arc<NorthwardData>>>,
+    data_tx: Arc<InstrumentedSender<Arc<NorthwardData>>>,
 }
 
 impl Collector {
@@ -63,7 +64,7 @@ impl Collector {
     pub fn new(
         config: CollectorConfig,
         southward_manager: Arc<NGSouthwardManager>,
-        data_tx: mpsc::Sender<Arc<NorthwardData>>,
+        data_tx: InstrumentedSender<Arc<NorthwardData>>,
         master_token: CancellationToken,
     ) -> Self {
         Self {
@@ -224,7 +225,7 @@ impl Collector {
         metrics: &Arc<RwLock<CollectorMetrics>>,
         config: CollectorConfig,
         semaphore: &Arc<Semaphore>,
-        data_tx: &Arc<mpsc::Sender<Arc<NorthwardData>>>,
+        data_tx: &Arc<InstrumentedSender<Arc<NorthwardData>>>,
         cancellation_token: &CancellationToken,
     ) -> NGResult<()> {
         // Check if cancelled before starting
@@ -411,7 +412,10 @@ impl Collector {
 
     /// Send data for improved throughput
     #[inline]
-    async fn send_data(data_tx: &Arc<mpsc::Sender<Arc<NorthwardData>>>, data: Vec<NorthwardData>) {
+    async fn send_data(
+        data_tx: &Arc<InstrumentedSender<Arc<NorthwardData>>>,
+        data: Vec<NorthwardData>,
+    ) {
         for item in data.into_iter() {
             if let Err(e) = data_tx.send(Arc::new(item)).await {
                 error!(error=%e, "Failed to send item to northward system");
