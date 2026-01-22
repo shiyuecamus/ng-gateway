@@ -9,7 +9,8 @@ use ng_driver_modbus::{
 };
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
-    SouthwardInitContext, Status, Transform,
+    ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext, Status,
+    Transform,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -56,7 +57,7 @@ pub fn build_modbus_channel_runtime(
         name: format!("bench-modbus-ch-{}", args.channel_idx),
         driver_id: 0,
         collection_type: CollectionType::Collection,
-        report_type: ng_gateway_sdk::ReportType::Always,
+        report_type: ReportType::Always,
         period: Some(args.period_ms),
         status: Status::Enabled,
         connection_policy: ConnectionPolicy::default(),
@@ -77,9 +78,8 @@ pub fn build_modbus_channel_runtime(
 
     let publisher = Arc::new(NullPublisher::default());
 
-    let mut devices: Vec<Arc<dyn ng_gateway_sdk::RuntimeDevice>> =
-        Vec::with_capacity(args.devices_per_channel);
-    let mut points_by_device: HashMap<i32, Vec<Arc<dyn ng_gateway_sdk::RuntimePoint>>> =
+    let mut devices: Vec<Arc<dyn RuntimeDevice>> = Vec::with_capacity(args.devices_per_channel);
+    let mut points_by_device: HashMap<i32, Vec<Arc<dyn RuntimePoint>>> =
         HashMap::with_capacity(args.devices_per_channel);
 
     // Build devices and points.
@@ -95,10 +95,9 @@ pub fn build_modbus_channel_runtime(
             device_type: "bench-modbus".to_string(),
             status: Status::Enabled,
             slave_id: args.slave_id,
-        }) as Arc<dyn ng_gateway_sdk::RuntimeDevice>;
+        }) as Arc<dyn RuntimeDevice>;
 
-        let mut pts: Vec<Arc<dyn ng_gateway_sdk::RuntimePoint>> =
-            Vec::with_capacity(args.points_per_device);
+        let mut pts: Vec<Arc<dyn RuntimePoint>> = Vec::with_capacity(args.points_per_device);
         for i in 0..args.points_per_device {
             let addr = args
                 .address_base
@@ -123,7 +122,7 @@ pub fn build_modbus_channel_runtime(
                 // Float32 consumes 2 registers.
                 quantity: 2,
             };
-            pts.push(Arc::new(point) as Arc<dyn ng_gateway_sdk::RuntimePoint>);
+            pts.push(Arc::new(point) as Arc<dyn RuntimePoint>);
         }
 
         points_by_device.insert(dev_id, pts);
@@ -132,13 +131,12 @@ pub fn build_modbus_channel_runtime(
 
     // Convert points_by_device into driver expected shape.
     let mut collect_items: PointsByDevice = Vec::with_capacity(devices.len());
-    let mut downlink_points: Vec<Arc<dyn ng_gateway_sdk::RuntimePoint>> = Vec::new();
+    let mut downlink_points: Vec<Arc<dyn RuntimePoint>> = Vec::new();
 
     for dev in devices.iter() {
         let dev_id = dev.id();
         let pts = points_by_device.get(&dev_id).cloned().unwrap_or_default();
-        let pts_arc: Arc<[Arc<dyn ng_gateway_sdk::RuntimePoint>]> =
-            Arc::from(pts.into_boxed_slice());
+        let pts_arc: Arc<[Arc<dyn RuntimePoint>]> = Arc::from(pts.into_boxed_slice());
 
         if downlink_points.is_empty() {
             // Store a cheap subset for write tests (first device only).
@@ -154,7 +152,7 @@ pub fn build_modbus_channel_runtime(
             .iter()
             .map(|(d, pts)| (d.id(), pts.to_vec()))
             .collect(),
-        runtime_channel: runtime_channel as Arc<dyn ng_gateway_sdk::RuntimeChannel>,
+        runtime_channel: runtime_channel as Arc<dyn RuntimeChannel>,
         publisher,
     };
 

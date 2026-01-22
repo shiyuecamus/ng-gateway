@@ -7,7 +7,9 @@
 pub mod modbus;
 pub mod opcua;
 
-use ng_gateway_sdk::{Driver, DriverResult, NGValue, RuntimeDevice, RuntimePoint};
+use ng_gateway_sdk::{
+    Driver, DriverResult, NGValue, NorthwardData, RuntimeDevice, RuntimePoint, WriteResult,
+};
 use std::{sync::Arc, time::Duration};
 
 /// A pre-built grouping item for `collect_data`: (device, points_of_device).
@@ -57,7 +59,7 @@ impl ChannelRuntime {
     }
 
     /// Perform one collection cycle for this channel.
-    pub async fn collect_once(&self) -> DriverResult<Vec<ng_gateway_sdk::NorthwardData>> {
+    pub async fn collect_once(&self) -> DriverResult<Vec<NorthwardData>> {
         self.driver.collect_data(&self.points_by_device).await
     }
 
@@ -68,7 +70,7 @@ impl ChannelRuntime {
         point: Arc<dyn RuntimePoint>,
         value: NGValue,
         timeout: Option<Duration>,
-    ) -> DriverResult<ng_gateway_sdk::WriteResult> {
+    ) -> DriverResult<WriteResult> {
         let timeout_ms = timeout.map(|d| d.as_millis() as u64);
         self.driver
             .write_point(device, point, value, timeout_ms)

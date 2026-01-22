@@ -16,8 +16,6 @@ use protocol::{
 use scenarios::{Scenario, ScenarioKind};
 use stats::{fmt_duration_ms, DurationStats};
 use std::{
-    fs::File,
-    io::Write,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -58,10 +56,6 @@ struct Cli {
     /// System sampler interval in milliseconds.
     #[arg(long, default_value_t = 500)]
     sample_interval_ms: u64,
-
-    /// Optional CSV output file path.
-    #[arg(long)]
-    csv: Option<String>,
 
     // ---------------- Modbus defaults (from your environment) ----------------
     #[arg(long, default_value = "8.155.153.52")]
@@ -123,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let mut rows: Vec<CsvRow> = Vec::new();
+    let mut rows: Vec<BenchRow> = Vec::new();
 
     // Resolve scenario set.
     let scenarios: Vec<Scenario> = if cli.all_scenarios {
@@ -161,10 +155,6 @@ async fn main() -> anyhow::Result<()> {
         print_downlink_table(&rows);
     }
 
-    if let Some(path) = cli.csv.as_deref() {
-        write_csv(path, &rows).context("write_csv")?;
-    }
-
     Ok(())
 }
 
@@ -172,7 +162,7 @@ async fn run_for_protocol(
     cli: &Cli,
     scenario: &Scenario,
     protocol: ProtocolOpt,
-) -> anyhow::Result<CsvRow> {
+) -> anyhow::Result<BenchRow> {
     let warmup = Duration::from_secs(cli.warmup_secs);
     let duration = Duration::from_secs(cli.duration_secs);
     let sample_interval = Duration::from_millis(cli.sample_interval_ms.max(1));
@@ -189,7 +179,7 @@ async fn run_for_protocol(
     let collect_fut = run_collect_phase(&channels, scenario.period_ms, duration, Some("measure"));
     let metrics_fut = sample_for(duration, sample_interval);
 
-    let (collect_stats, point_count, cycle_count, metrics, downlink) = match scenario.kind {
+    let (_collect_stats, _point_count, _cycle_count, metrics, downlink) = match scenario.kind {
         ScenarioKind::Collect => {
             let ((s, p, c), m) = tokio::try_join!(collect_fut, metrics_fut)?;
             (s, p, c, m, None)
@@ -215,7 +205,7 @@ async fn run_for_protocol(
         let _ = ch.stop().await;
     }
 
-    Ok(CsvRow {
+    Ok(BenchRow {
         protocol: match protocol {
             ProtocolOpt::Modbus => "modbus",
             ProtocolOpt::Opcua => "opcua",
@@ -229,11 +219,6 @@ async fn run_for_protocol(
         period_ms: scenario.period_ms,
         total_points: scenario.total_points,
         point_type: "Float32".to_string(),
-        collect_cycles: cycle_count,
-        collected_points: point_count,
-        collect_min_ms: collect_stats.min().map(|d| d.as_secs_f64() * 1000.0),
-        collect_max_ms: collect_stats.max().map(|d| d.as_secs_f64() * 1000.0),
-        collect_avg_ms: collect_stats.avg().map(|d| d.as_secs_f64() * 1000.0),
         avg_cpu_pct: metrics.avg_process_cpu_pct as f64,
         peak_rss_bytes: metrics.peak_process_rss_bytes,
         net_rx_bps: metrics.avg_net_rx_bps,
@@ -422,7 +407,7 @@ struct DownlinkStats {
 }
 
 #[derive(Debug, Clone)]
-struct CsvRow {
+struct BenchRow {
     protocol: String,
     scenario_id: u8,
     channel_count: usize,
@@ -432,12 +417,6 @@ struct CsvRow {
     total_points: usize,
     point_type: String,
 
-    collect_cycles: u64,
-    collected_points: usize,
-    collect_min_ms: Option<f64>,
-    collect_max_ms: Option<f64>,
-    collect_avg_ms: Option<f64>,
-
     avg_cpu_pct: f64,
     peak_rss_bytes: u64,
     net_rx_bps: f64,
@@ -446,7 +425,7 @@ struct CsvRow {
     downlink: Option<DownlinkStats>,
 }
 
-fn print_collect_table(rows: &[CsvRow]) {
+fn print_collect_table(rows: &[BenchRow]) {
     println!();
     println!("数据采集性能测试（Markdown 表格）");
     println!();
@@ -477,7 +456,7 @@ fn print_collect_table(rows: &[CsvRow]) {
     }
 }
 
-fn print_downlink_table(rows: &[CsvRow]) {
+fn print_downlink_table(rows: &[BenchRow]) {
     println!();
     println!("数据下发延迟测试（Markdown 表格）");
     println!();
@@ -502,56 +481,4 @@ fn print_downlink_table(rows: &[CsvRow]) {
             fmt_duration_ms(d.avg)
         );
     }
-}
-
-fn write_csv(path: &str, rows: &[CsvRow]) -> anyhow::Result<()> {
-    let mut f = File::create(path).with_context(|| format!("create csv file: {}", path))?;
-    writeln!(
-        f,
-        "protocol,scenario_id,channels,devices_per_channel,points_per_device,period_ms,total_points,collected_points,collect_cycles,collect_min_ms,collect_max_ms,collect_avg_ms,avg_cpu_pct,peak_rss_bytes,net_rx_bps,net_tx_bps,downlink_mode,downlink_points,downlink_iterations,downlink_ok,downlink_fail,downlink_min_ms,downlink_max_ms,downlink_avg_ms"
-    )?;
-    for r in rows {
-        let (mode, pcount, iters, ok, fail, min, max, avg) = match &r.downlink {
-            Some(d) => (
-                d.mode.as_str(),
-                d.point_count as u64,
-                d.iterations,
-                d.ok,
-                d.fail,
-                d.min.map(|x| x.as_secs_f64() * 1000.0).unwrap_or(0.0),
-                d.max.map(|x| x.as_secs_f64() * 1000.0).unwrap_or(0.0),
-                d.avg.map(|x| x.as_secs_f64() * 1000.0).unwrap_or(0.0),
-            ),
-            None => ("", 0, 0, 0, 0, 0.0, 0.0, 0.0),
-        };
-        writeln!(
-            f,
-            "{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{},{:.4},{:.4},{},{},{},{},{},{:.4},{:.4},{:.4}",
-            r.protocol,
-            r.scenario_id,
-            r.channel_count,
-            r.devices_per_channel,
-            r.points_per_device,
-            r.period_ms,
-            r.total_points,
-            r.collected_points,
-            r.collect_cycles,
-            r.collect_min_ms.unwrap_or(0.0),
-            r.collect_max_ms.unwrap_or(0.0),
-            r.collect_avg_ms.unwrap_or(0.0),
-            r.avg_cpu_pct,
-            r.peak_rss_bytes,
-            r.net_rx_bps,
-            r.net_tx_bps,
-            mode,
-            pcount,
-            iters,
-            ok,
-            fail,
-            min,
-            max,
-            avg
-        )?;
-    }
-    Ok(())
 }

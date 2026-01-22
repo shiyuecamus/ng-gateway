@@ -5,8 +5,7 @@ use ng_driver_opcua::{
     OpcUaReadMode, SecurityMode, SecurityPolicy,
 };
 use ng_gateway_sdk::{
-    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
-    SouthwardInitContext, Status, Transform,
+    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -46,7 +45,7 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
         name: format!("bench-opcua-ch-{}", args.channel_idx),
         driver_id: 0,
         collection_type: CollectionType::Collection,
-        report_type: ng_gateway_sdk::ReportType::Always,
+        report_type: ReportType::Always,
         period: Some(args.period_ms),
         status: Status::Enabled,
         connection_policy: ConnectionPolicy::default(),
@@ -67,9 +66,8 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
 
     let publisher = Arc::new(NullPublisher::default());
 
-    let mut devices: Vec<Arc<dyn ng_gateway_sdk::RuntimeDevice>> =
-        Vec::with_capacity(args.devices_per_channel);
-    let mut points_by_device: HashMap<i32, Vec<Arc<dyn ng_gateway_sdk::RuntimePoint>>> =
+    let mut devices: Vec<Arc<dyn RuntimeDevice>> = Vec::with_capacity(args.devices_per_channel);
+    let mut points_by_device: HashMap<i32, Vec<Arc<dyn RuntimePoint>>> =
         HashMap::with_capacity(args.devices_per_channel);
 
     for dev_idx in 0..args.devices_per_channel {
@@ -83,10 +81,9 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
             device_name: format!("bench-opcua-dev-{}-{}", args.channel_idx, dev_idx),
             device_type: "bench-opcua".to_string(),
             status: Status::Enabled,
-        }) as Arc<dyn ng_gateway_sdk::RuntimeDevice>;
+        }) as Arc<dyn RuntimeDevice>;
 
-        let mut pts: Vec<Arc<dyn ng_gateway_sdk::RuntimePoint>> =
-            Vec::with_capacity(args.points_per_device);
+        let mut pts: Vec<Arc<dyn RuntimePoint>> = Vec::with_capacity(args.points_per_device);
         for i in 0..args.points_per_device {
             let nid = args.node_id_start.saturating_add(i as u32);
             let node_id = format!("ns=3;i={}", nid);
@@ -107,20 +104,19 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
                 transform: Transform::default(),
                 node_id,
             };
-            pts.push(Arc::new(point) as Arc<dyn ng_gateway_sdk::RuntimePoint>);
+            pts.push(Arc::new(point) as Arc<dyn RuntimePoint>);
         }
         points_by_device.insert(dev_id, pts);
         devices.push(dev);
     }
 
     let mut collect_items: PointsByDevice = Vec::with_capacity(devices.len());
-    let mut downlink_points: Vec<Arc<dyn ng_gateway_sdk::RuntimePoint>> = Vec::new();
+    let mut downlink_points: Vec<Arc<dyn RuntimePoint>> = Vec::new();
 
     for dev in devices.iter() {
         let dev_id = dev.id();
         let pts = points_by_device.get(&dev_id).cloned().unwrap_or_default();
-        let pts_arc: Arc<[Arc<dyn ng_gateway_sdk::RuntimePoint>]> =
-            Arc::from(pts.into_boxed_slice());
+        let pts_arc: Arc<[Arc<dyn RuntimePoint>]> = Arc::from(pts.into_boxed_slice());
 
         if downlink_points.is_empty() {
             downlink_points = pts_arc.iter().take(200).cloned().collect();
@@ -135,7 +131,7 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
             .iter()
             .map(|(d, pts)| (d.id(), pts.to_vec()))
             .collect(),
-        runtime_channel: runtime_channel as Arc<dyn ng_gateway_sdk::RuntimeChannel>,
+        runtime_channel: runtime_channel as Arc<dyn RuntimeChannel>,
         publisher,
     };
 
