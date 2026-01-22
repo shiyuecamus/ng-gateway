@@ -11,6 +11,7 @@ members = [
   "ng-gateway-repository",
   "ng-gateway-core",
   "ng-gateway-sdk",
+  "ng-gateway-bench",
   "ng-gateway-southward/dlt645",
   "ng-gateway-southward/opcua",
   "ng-gateway-southward/iec104",

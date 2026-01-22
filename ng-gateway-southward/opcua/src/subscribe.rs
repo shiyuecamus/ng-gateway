@@ -1,3 +1,4 @@
+use super::capacity::SubscriptionCapacity;
 use crate::types::{MonitoredItemFailureKind, PointSnapshot};
 use arc_swap::ArcSwap;
 use ng_gateway_sdk::{
@@ -8,31 +9,12 @@ use opcua::{
     client::{MonitoredItem, Session, SubscriptionCallbacks},
     types::{
         enums::MonitoringMode, DataValue, MonitoredItemCreateRequest, MonitoringParameters, NodeId,
-        ReadValueId, TimestampsToReturn, Variant,
+        ReadValueId, TimestampsToReturn,
     },
 };
 use std::{collections::HashMap, sync::Arc, time::Duration as StdDuration};
 use tokio::sync::mpsc::{self};
 use tokio_util::sync::CancellationToken;
-
-/// Subscription-related capacity limits reported by the OPC UA server.
-///
-/// This structure represents a subset of server capabilities that are
-/// relevant for planning subscription layouts and putting soft guards
-/// around the number of subscriptions / monitored items we try to register.
-#[derive(Debug, Clone, Default)]
-struct SubscriptionCapacity {
-    /// Maximum number of sessions the server is willing to maintain.
-    pub max_sessions: Option<u32>,
-    /// Maximum total subscriptions for the server.
-    pub max_subscriptions: Option<u32>,
-    /// Maximum total monitored items for the whole server.
-    pub max_monitored_items: Option<u32>,
-    /// Maximum number of subscriptions per session.
-    pub max_subscriptions_per_session: Option<u32>,
-    /// Maximum monitored items per subscription. None means "unknown / unlimited".
-    pub max_monitored_items_per_subscription: Option<u32>,
-}
 
 /// Server-side monitored item info
 #[allow(unused)]
@@ -53,7 +35,12 @@ struct MonitoredItemInfo {
 /// Subscription manager commands
 pub(super) enum SubscriptionCommand {
     /// A new connected session arrived
-    NewSession(Arc<Session>),
+    NewSession {
+        /// Connected OPC UA session
+        session: Arc<Session>,
+        /// Server subscription capacity probed by the driver
+        capacity: SubscriptionCapacity,
+    },
     /// Create monitored items for nodes
     CreateNodes(Vec<NodeId>),
     /// Delete monitored items for nodes
@@ -109,8 +96,8 @@ impl SubscriptionActor {
                 maybe_cmd = self.rx.recv() => {
                     let Some(cmd) = maybe_cmd else { return; };
                     match cmd {
-                        SubscriptionCommand::NewSession(session) => {
-                            self.handle_new_session(session).await;
+                        SubscriptionCommand::NewSession { session, capacity } => {
+                            self.handle_new_session(session, capacity).await;
                         }
                         SubscriptionCommand::CreateNodes(nodes) => {
                             self.handle_create_nodes(nodes).await;
@@ -125,10 +112,10 @@ impl SubscriptionActor {
     }
 
     /// Handle a new connected session: read capacity and rebuild subscriptions.
-    async fn handle_new_session(&mut self, session: Arc<Session>) {
+    async fn handle_new_session(&mut self, session: Arc<Session>, capacity: SubscriptionCapacity) {
         self.session = Some(Arc::clone(&session));
-        // Read server-side capacity in a best-effort fashion.
-        self.capacity = read_subscription_capacity(&session).await;
+        // Use server-side capacity probed by the driver (best-effort).
+        self.capacity = capacity;
 
         if let Err(e) = self.rebuild_subscriptions_for_session(&session).await {
             tracing::error!(
@@ -559,100 +546,6 @@ impl SubscriptionActor {
 
         Ok(())
     }
-}
-
-/// Best-effort helper to read subscription-related capacity limits from the server.
-///
-/// This function uses standard `Server_ServerCapabilities_*` nodes to obtain
-/// maximum monitored item counts. Any read error or unexpected value type is
-/// treated as "unknown" and logged, but never fails the caller.
-#[inline]
-async fn read_subscription_capacity(session: &Arc<Session>) -> SubscriptionCapacity {
-    // Standard numeric node ids from async-opcua-types generated node_ids.rs:
-    // - Server_ServerCapabilities_MaxSessions = 24095 (ns=0, i=24095)
-    // - Server_ServerCapabilities_MaxSubscriptions = 24096 (ns=0, i=24096)
-    // - Server_ServerCapabilities_MaxMonitoredItems = 24097 (ns=0, i=24097)
-    // - Server_ServerCapabilities_MaxSubscriptionsPerSession = 24098 (ns=0, i=24098)
-    // - Server_ServerCapabilities_MaxMonitoredItemsPerSubscription = 24104 (ns=0, i=24104)
-    let nodes = [
-        ReadValueId::new_value(NodeId::new(0, 24095u32)),
-        ReadValueId::new_value(NodeId::new(0, 24096u32)),
-        ReadValueId::new_value(NodeId::new(0, 24097u32)),
-        ReadValueId::new_value(NodeId::new(0, 24098u32)),
-        ReadValueId::new_value(NodeId::new(0, 24104u32)),
-    ];
-    let mut capacity = SubscriptionCapacity::default();
-
-    match session.read(&nodes, TimestampsToReturn::Neither, 0.0).await {
-        Ok(values) => {
-            let expected = nodes.len();
-            if values.len() != expected {
-                tracing::warn!(
-                    expected,
-                    actual = values.len(),
-                    "OPC UA server capabilities read returned mismatched value count"
-                );
-            }
-            let to_u32 = |idx: usize, label: &str| -> Option<u32> {
-                match values.get(idx).and_then(|dv| dv.value.as_ref()) {
-                    Some(variant) => {
-                        let value = match variant {
-                            Variant::UInt32(v) => Some(*v),
-                            Variant::Int32(v) if *v >= 0 => Some(*v as u32),
-                            Variant::UInt64(v) if *v <= u32::MAX as u64 => Some(*v as u32),
-                            Variant::Int64(v) if *v >= 0 && *v <= u32::MAX as i64 => {
-                                Some(*v as u32)
-                            }
-                            _ => {
-                                tracing::warn!(
-                                    label,
-                                    variant = ?variant,
-                                    "OPC UA server capabilities value has unexpected type"
-                                );
-                                None
-                            }
-                        };
-                        if value.is_none() {
-                            tracing::debug!(
-                                label,
-                                "OPC UA server capabilities value parsed as None"
-                            );
-                        }
-                        value
-                    }
-                    None => {
-                        tracing::debug!(label, "OPC UA server capabilities value is empty");
-                        None
-                    }
-                }
-            };
-
-            capacity.max_sessions = to_u32(0, "MaxSessions");
-            capacity.max_subscriptions = to_u32(1, "MaxSubscriptions");
-            capacity.max_monitored_items = to_u32(2, "MaxMonitoredItems");
-            capacity.max_subscriptions_per_session = to_u32(3, "MaxSubscriptionsPerSession");
-            capacity.max_monitored_items_per_subscription =
-                to_u32(4, "MaxMonitoredItemsPerSubscription");
-
-            tracing::info!(
-                max_sessions = ?capacity.max_sessions,
-                max_subscriptions = ?capacity.max_subscriptions,
-                max_monitored_items = ?capacity.max_monitored_items,
-                max_subscriptions_per_session = ?capacity.max_subscriptions_per_session,
-                max_monitored_items_per_subscription =
-                    ?capacity.max_monitored_items_per_subscription,
-                "OPC UA server subscription capacity read from ServerCapabilities"
-            );
-        }
-        Err(status) => {
-            tracing::warn!(
-                status = %status,
-                "Failed to read OPC UA server subscription capabilities; continuing with default capacity"
-            );
-        }
-    }
-
-    capacity
 }
 
 #[inline]

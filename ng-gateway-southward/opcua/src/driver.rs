@@ -1,4 +1,5 @@
 use super::{
+    capacity::probe_capacity,
     codec::OpcUaCodec,
     subscribe::{SubscriptionActor, SubscriptionCommand, SubscriptionManager},
     supervisor::{SessionEntry, SessionSupervisor, SharedSession},
@@ -20,7 +21,10 @@ use ng_gateway_sdk::{
 };
 use opcua::{
     client::Session,
-    types::{DataValue, NodeId, ReadValueId, StatusCode, TimestampsToReturn, WriteValue},
+    types::{
+        constants as opcua_constants, DataValue, NodeId, ReadValueId, StatusCode,
+        TimestampsToReturn, WriteValue,
+    },
 };
 use serde_json::json;
 use std::{
@@ -55,6 +59,12 @@ pub struct OpcUaDriver {
     successful_requests: AtomicU64,
     failed_requests: AtomicU64,
     last_avg_response_time_ms: AtomicU64,
+
+    /// Effective max nodes per `Session::read()` call (0 means "unknown / use defaults").
+    ///
+    /// This value is best-effort refreshed on each new session connection by reading server
+    /// `ServerCapabilities` and clamping by the client decoding limits.
+    read_chunk_size: Arc<AtomicU64>,
 
     /// Cached NodeIds parsed from string to avoid repeated parsing costs on hot path
     node_id_cache: RwLock<HashMap<String, NodeId>>,
@@ -266,6 +276,7 @@ impl OpcUaDriver {
             successful_requests: AtomicU64::new(0),
             failed_requests: AtomicU64::new(0),
             last_avg_response_time_ms: AtomicU64::new(0),
+            read_chunk_size: Arc::new(AtomicU64::new(0)),
             node_id_cache: RwLock::new(HashMap::new()),
             subs_mgr: None,
             subs_actor: std::sync::Mutex::new(None),
@@ -320,7 +331,8 @@ impl Driver for OpcUaDriver {
         let supervisor =
             SessionSupervisor::new(Arc::clone(&self.shared), cancel, self.conn_tx.clone());
         let subs_mgr = self.subs_mgr.as_ref().map(Arc::clone);
-        let inner = Arc::clone(&self.inner);
+        let inner_for_supervisor = Arc::clone(&self.inner);
+        let read_chunk_size = Arc::clone(&self.read_chunk_size);
 
         // Spawn subscription actor if present
         if let Some(actor) = self.subs_actor.lock().unwrap().take() {
@@ -329,16 +341,48 @@ impl Driver for OpcUaDriver {
             });
         }
 
-        let on_connected = subs_mgr.map(|mgr| {
-            Box::new(move |session: Arc<Session>| {
-                let mgr = Arc::clone(&mgr);
-                tokio::spawn(async move {
-                    mgr.send_command(SubscriptionCommand::NewSession(session))
-                        .await;
-                })
-            }) as Box<dyn Fn(Arc<Session>) -> JoinHandle<()> + Send + Sync + 'static>
-        });
-        supervisor.run(inner, on_connected).await;
+        // On each (re)connection:
+        // - best-effort detect server read limits and derive a safe read chunk size
+        // - notify subscription manager (if subscribe mode enabled)
+        let on_connected: Option<
+            Box<dyn Fn(Arc<Session>) -> JoinHandle<()> + Send + Sync + 'static>,
+        > = Some(Box::new(move |session: Arc<Session>| {
+            let subs_mgr = subs_mgr.clone();
+            let read_chunk_size = Arc::clone(&read_chunk_size);
+            tokio::spawn(async move {
+                // Detect server-side limits (read + subscribe) and clamp by client decoding constraints.
+                let cap = probe_capacity(&session).await;
+
+                // Client-side hard decode limit for arrays (async-opcua-types).
+                let mut effective = opcua_constants::MAX_ARRAY_LENGTH.max(1);
+
+                if let Some(n) = cap.read.max_nodes_per_read {
+                    effective = effective.min(n as usize);
+                }
+                if let Some(n) = cap.read.max_array_length {
+                    effective = effective.min(n as usize);
+                }
+                effective = effective.max(1);
+
+                read_chunk_size.store(effective as u64, Ordering::Release);
+                tracing::info!(
+                    effective_read_batch_size = effective,
+                    client_max_array_length = opcua_constants::MAX_ARRAY_LENGTH,
+                    server_max_nodes_per_read = ?cap.read.max_nodes_per_read,
+                    server_max_array_length = ?cap.read.max_array_length,
+                    "OPC UA read batch size resolved"
+                );
+
+                if let Some(mgr) = subs_mgr {
+                    mgr.send_command(SubscriptionCommand::NewSession {
+                        session,
+                        capacity: cap.subscription,
+                    })
+                    .await;
+                }
+            })
+        }));
+        supervisor.run(inner_for_supervisor, on_connected).await;
         Ok(())
     }
 
@@ -410,91 +454,110 @@ impl Driver for OpcUaDriver {
             return Ok(Vec::new());
         }
 
+        // Determine effective read chunk size.
+        //
+        // This is resolved on each new session by probing server `ServerCapabilities`
+        // and clamped by client decoding limits. If not yet resolved, fall back to
+        // the client decoding default (`MAX_ARRAY_LENGTH`).
+        let max_read_nodes_per_call = match self.read_chunk_size.load(Ordering::Acquire) {
+            0 => opcua_constants::MAX_ARRAY_LENGTH.max(1),
+            n => (n as usize).max(1),
+        };
+
         let timeout_ms = self.inner.connection_policy.read_timeout_ms.max(1);
         let timeout_duration = TokioDuration::from_millis(timeout_ms);
 
         let start_ts = Instant::now();
         let session_opt = self.shared.session.load_full();
-        let results: DriverResult<Vec<DataValue>> = match session_opt {
-            None => Err(DriverError::ServiceUnavailable),
-            Some(session) => {
-                let session = Arc::clone(&session);
-                match tokio::time::timeout(
-                    timeout_duration,
-                    session.read(&nodes_to_read, TimestampsToReturn::Both, 0.0),
-                )
-                .await
-                {
-                    Ok(Ok(values)) => Ok(values),
-                    Ok(Err(sc)) => Err(DriverError::ExecutionError(format!(
-                        "OPC UA read status: {sc}"
-                    ))),
-                    Err(_elapsed) => Err(DriverError::Timeout(timeout_duration)),
-                }
-            }
+        let session = match session_opt {
+            None => return Err(DriverError::ServiceUnavailable),
+            Some(s) => Arc::clone(&s),
         };
 
-        // Unified metrics for read path.
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let elapsed_ms = start_ts.elapsed().as_millis() as u64;
-        match &results {
-            Ok(_) => {
-                self.successful_requests.fetch_add(1, Ordering::Relaxed);
-                let prev = self.last_avg_response_time_ms.load(Ordering::Acquire);
-                let new_avg = if prev == 0 {
-                    elapsed_ms
-                } else {
-                    (prev.saturating_mul(9) + elapsed_ms) / 10
-                };
-                self.last_avg_response_time_ms
-                    .store(new_avg, Ordering::Release);
-            }
-            Err(_) => {
-                self.failed_requests.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        let mut i = 0usize;
+        while i < nodes_to_read.len() {
+            let end = (i + max_read_nodes_per_call).min(nodes_to_read.len());
+            let nodes_chunk = &nodes_to_read[i..end];
+            let points_chunk = &points[i..end];
 
-        let values = results?;
-        if values.len() != points.len() {
-            warn!(
-                requested = points.len(),
-                returned = values.len(),
-                "OPC UA read returned unexpected value count"
-            );
-        }
+            let read_res: DriverResult<Vec<DataValue>> = match tokio::time::timeout(
+                timeout_duration,
+                session.read(nodes_chunk, TimestampsToReturn::Both, 0.0),
+            )
+            .await
+            {
+                Ok(Ok(values)) => Ok(values),
+                Ok(Err(sc)) => Err(DriverError::ExecutionError(format!(
+                    "OPC UA read status: {sc}"
+                ))),
+                Err(_elapsed) => Err(DriverError::Timeout(timeout_duration)),
+            };
 
-        for (p, dv) in points.iter().zip(values.iter()) {
-            if dv.status.as_ref().map(|s| s.is_bad()).unwrap_or(false) {
-                warn!(key = %p.key, status = ?dv.status, "OPC UA value status is bad");
-                continue;
-            }
-            let value_opt = dv.value.as_ref().and_then(|variant| {
-                OpcUaCodec::coerce_variant_value(variant, p.logical_data_type(), p.transform())
-            });
-            let value = match value_opt {
-                Some(v) => v,
-                None => {
-                    warn!(
-                        key = %p.key,
-                        expected = ?p.logical_data_type(),
-                        wire = ?p.wire_data_type(),
-                        "OPC UA value type mismatch - dropped"
-                    );
-                    continue;
+            let values = match read_res {
+                Ok(v) => v,
+                Err(e) => {
+                    // Count as one failed request; keep error context.
+                    self.failed_requests.fetch_add(1, Ordering::Relaxed);
+                    return Err(e);
                 }
             };
-            let Some(buf) = buffers.get_mut(&p.device_id) else {
-                continue;
-            };
-            buf.push(
-                p.r#type(),
-                PointValue {
-                    point_id: p.id,
-                    point_key: Arc::<str>::from(p.key.as_str()),
-                    value,
-                },
-            );
+
+            if values.len() != points_chunk.len() {
+                warn!(
+                    requested = points_chunk.len(),
+                    returned = values.len(),
+                    "OPC UA read returned unexpected value count"
+                );
+            }
+
+            for (p, dv) in points_chunk.iter().zip(values.iter()) {
+                if dv.status.as_ref().map(|s| s.is_bad()).unwrap_or(false) {
+                    warn!(key = %p.key, status = ?dv.status, "OPC UA value status is bad");
+                    continue;
+                }
+                let value_opt = dv.value.as_ref().and_then(|variant| {
+                    OpcUaCodec::coerce_variant_value(variant, p.logical_data_type(), p.transform())
+                });
+                let value = match value_opt {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            key = %p.key,
+                            expected = ?p.logical_data_type(),
+                            wire = ?p.wire_data_type(),
+                            "OPC UA value type mismatch - dropped"
+                        );
+                        continue;
+                    }
+                };
+                let Some(buf) = buffers.get_mut(&p.device_id) else {
+                    continue;
+                };
+                buf.push(
+                    p.r#type(),
+                    PointValue {
+                        point_id: p.id,
+                        point_key: Arc::<str>::from(p.key.as_str()),
+                        value,
+                    },
+                );
+            }
+
+            i = end;
         }
+
+        // Unified metrics for *one* collect_data call (even when internally chunked).
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let elapsed_ms = start_ts.elapsed().as_millis() as u64;
+        self.successful_requests.fetch_add(1, Ordering::Relaxed);
+        let prev = self.last_avg_response_time_ms.load(Ordering::Acquire);
+        let new_avg = if prev == 0 {
+            elapsed_ms
+        } else {
+            (prev.saturating_mul(9) + elapsed_ms) / 10
+        };
+        self.last_avg_response_time_ms
+            .store(new_avg, Ordering::Release);
 
         let ts = Utc::now();
         let mut device_ids: Vec<i32> = buffers.keys().copied().collect();

@@ -99,12 +99,13 @@ impl SessionSupervisor {
             // if stricter trust is required.
             builder = builder.trust_server_certs(true).create_sample_keypair(true);
         } else {
-            // For SecurityPolicy=None with non-certificate auth, no application certificate
-            // is needed. Disabling sample keypair generation avoids unnecessary certificate
-            // I/O and noisy "Invalid der" errors when PKI is not configured.
+            // For SecurityPolicy=None with non-certificate auth, encryption is not required,
+            // but the underlying library still initializes a certificate store and attempts
+            // to read the application instance certificate/private key. Generate a sample
+            // keypair to avoid noisy "missing certificate/private key" errors.
             builder = builder
                 .trust_server_certs(false)
-                .create_sample_keypair(false);
+                .create_sample_keypair(true);
         }
         Ok(builder)
     }

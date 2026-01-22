@@ -1,12 +1,19 @@
-mod codec;
-mod driver;
-mod factory;
+mod capacity;
+pub mod codec;
+pub mod driver;
+pub mod factory;
 mod metadata;
 mod subscribe;
 mod supervisor;
-mod types;
+pub mod types;
 
-use factory::OpcUaDriverFactory;
+pub use driver::OpcUaDriver;
+pub use factory::OpcUaDriverFactory;
+pub use types::{
+    OpcUaAuth, OpcUaChannel, OpcUaChannelConfig, OpcUaDevice, OpcUaPoint, OpcUaReadMode,
+    SecurityMode, SecurityPolicy,
+};
+
 use metadata::build_metadata;
 use ng_gateway_sdk::ng_driver_factory;
 
