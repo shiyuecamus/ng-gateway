@@ -5,7 +5,9 @@ use ng_driver_opcua::{
     OpcUaReadMode, SecurityMode, SecurityPolicy,
 };
 use ng_gateway_sdk::{
-    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform
+    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
+    ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext, Status,
+    Transform,
 };
 use std::{collections::HashMap, sync::Arc};
 
