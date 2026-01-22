@@ -1,8 +1,7 @@
 use super::NGEventBus;
 use colored::*;
 use ng_gateway_error::NGResult;
-use ng_gateway_models::event::ApplicationReady;
-use ng_gateway_models::EventBus;
+use ng_gateway_models::{event::ApplicationReady, EventBus};
 use std::io::{self, Write};
 use sys_locale::get_locale;
 use term_size;

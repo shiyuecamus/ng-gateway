@@ -4,11 +4,10 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
-    event::{EventBusConfig, EventBusMetrics, EventStats, NGEvent},
+    event::{EventBusConfig, EventStats, NGEvent},
     settings::Settings,
     EventBus,
 };
-use opentelemetry::KeyValue;
 use std::{
     any::{type_name, TypeId},
     marker::PhantomData,
@@ -27,7 +26,6 @@ pub struct NGEventBus {
     channels: Arc<DashMap<TypeId, Sender<Arc<dyn NGEvent>>>>,
     dispatchers: Arc<DashMap<TypeId, Box<dyn std::any::Any + Send + Sync>>>,
     stats: Arc<RwLock<EventStats>>,
-    metrics: Option<EventBusMetrics>,
 }
 
 impl NGEventBus {
@@ -38,14 +36,6 @@ impl NGEventBus {
             channels: Arc::new(DashMap::new()),
             dispatchers: Arc::new(DashMap::new()),
             stats: Arc::new(RwLock::new(EventStats::default())),
-            metrics: None,
-        }
-    }
-
-    /// Initializes OpenTelemetry metrics
-    pub fn init_metrics(&mut self) {
-        if self.config.enable_metrics {
-            self.metrics = Some(EventBusMetrics::default());
         }
     }
 
@@ -94,11 +84,9 @@ impl NGEventBus {
 
 #[async_trait]
 impl EventBus for NGEventBus {
-    async fn init(settings: &Settings) -> Arc<Self> {
-        let mut config = EventBusConfig::default();
-        config.set_enable_metrics(settings.metrics.enabled);
-        let mut event_bus = Self::new(config);
-        event_bus.init_metrics();
+    async fn init(_settings: &Settings) -> Arc<Self> {
+        let config = EventBusConfig::default();
+        let event_bus = Self::new(config);
         // TODO: register all events
         builtin::register_builtin_events(&event_bus).await;
         Arc::new(event_bus)
@@ -122,11 +110,6 @@ impl EventBus for NGEventBus {
             let mut lock = dispatcher_clone.write().await;
             lock.start().await;
         });
-
-        // Update active handlers count
-        if let Some(metrics) = &self.metrics {
-            metrics.active_handlers.add(1, &[]);
-        }
     }
 
     #[inline]
@@ -141,13 +124,6 @@ impl EventBus for NGEventBus {
         // Update statistics
         let mut stats = self.stats.write().await;
         stats.total_events += 1;
-
-        // Update metrics if enabled
-        if let Some(metrics) = &self.metrics {
-            metrics
-                .total_events
-                .add(1, &[KeyValue::new("event_type", event_type)]);
-        }
 
         // Send event to all subscribers
         let sender = self.get_channel::<E>().await;
@@ -237,12 +213,6 @@ impl<E: NGEvent> EventDispatcher<E> {
                 let mut stats = event_bus.stats.write().await;
                 stats.successful_handlers += successful;
                 stats.failed_handlers += failed;
-
-                // Update metrics if enabled
-                if let Some(metrics) = &event_bus.metrics {
-                    metrics.successful_handlers.add(successful, &[]);
-                    metrics.failed_handlers.add(failed, &[]);
-                }
             }
         }
     }
