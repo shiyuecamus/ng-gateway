@@ -5,7 +5,6 @@ use crate::{
     initializer::SeedableTrait,
 };
 use chrono::{DateTime, Utc};
-use ng_gateway_sdk::FieldError;
 use sea_orm::{
     DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, IntoActiveModel, ModelTrait,
 };
@@ -108,41 +107,4 @@ pub struct PathEntityId {
 #[serde(rename_all = "camelCase")]
 pub struct TemplateQuery {
     pub locale: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Validate)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportPreview {
-    pub total_rows: usize,
-    /// Number of valid rows (no blocking errors)
-    #[serde(default)]
-    pub valid: usize,
-    /// Number of invalid rows (with blocking errors)
-    #[serde(default)]
-    pub invalid: usize,
-    /// Number of warnings encountered (non-blocking)
-    #[serde(default)]
-    pub warn: usize,
-    /// A small subset of field errors for preview
-    #[serde(default)]
-    pub errors: Vec<FieldError>,
-}
-
-#[derive(Debug, Clone, Serialize, Validate)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitResult {
-    pub total_rows: usize,
-    pub inserted: usize,
-    /// Number of valid rows (no blocking errors)
-    #[serde(default)]
-    pub valid: usize,
-    /// Number of invalid rows (with blocking errors)
-    #[serde(default)]
-    pub invalid: usize,
-    /// Number of warnings encountered (non-blocking)
-    #[serde(default)]
-    pub warn: usize,
-    /// A small subset of field errors for preview
-    #[serde(default)]
-    pub errors: Vec<FieldError>,
 }

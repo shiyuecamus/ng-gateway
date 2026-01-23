@@ -11,14 +11,100 @@ use ng_gateway_models::{
     },
 };
 use sea_orm::{
-    prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
-    Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend,
+    EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 
 /// Repository for action operations
 pub struct ActionRepository;
 
 impl ActionRepository {
+    /// Maximum batch size for action insertion on SQLite.
+    ///
+    /// # Why
+    /// SQLite limits the number of bound variables per statement (commonly 999).
+    /// `insert_many` expands to a single multi-row INSERT, which can exceed the limit
+    /// for larger imports.
+    const SQLITE_INSERT_BATCH_ROWS: usize = 100;
+
+    /// Maximum batch size for action insertion on non-SQLite backends.
+    const DEFAULT_INSERT_BATCH_ROWS: usize = 1000;
+
+    /// Maximum `IN (...)` list size for SQLite queries.
+    const SQLITE_IN_LIST_BATCH: usize = 900;
+
+    /// Maximum `IN (...)` list size for non-SQLite backends.
+    const DEFAULT_IN_LIST_BATCH: usize = 5000;
+
+    #[inline]
+    fn insert_batch_rows_for_backend(backend: DbBackend) -> usize {
+        match backend {
+            DbBackend::Sqlite => Self::SQLITE_INSERT_BATCH_ROWS,
+            _ => Self::DEFAULT_INSERT_BATCH_ROWS,
+        }
+    }
+
+    #[inline]
+    fn in_list_batch_for_backend(backend: DbBackend) -> usize {
+        match backend {
+            DbBackend::Sqlite => Self::SQLITE_IN_LIST_BATCH,
+            _ => Self::DEFAULT_IN_LIST_BATCH,
+        }
+    }
+
+    /// Insert action rows in batches to avoid exceeding backend SQL variable limits.
+    async fn insert_many_in_batches<C>(
+        conn: &C,
+        actions: Vec<ActionActiveModel>,
+    ) -> StorageResult<Vec<ActionModel>>
+    where
+        C: ConnectionTrait,
+    {
+        let batch_rows = Self::insert_batch_rows_for_backend(conn.get_database_backend()).max(1);
+
+        let mut created: Vec<ActionModel> = Vec::with_capacity(actions.len());
+        let mut batch: Vec<ActionActiveModel> = Vec::with_capacity(batch_rows);
+
+        for a in actions.into_iter() {
+            batch.push(a);
+            if batch.len() >= batch_rows {
+                let to_insert = std::mem::take(&mut batch);
+                let inserted = Action::insert_many(to_insert)
+                    .exec_with_returning_many(conn)
+                    .await?;
+                created.extend(inserted.into_iter());
+            }
+        }
+
+        if !batch.is_empty() {
+            let inserted = Action::insert_many(batch)
+                .exec_with_returning_many(conn)
+                .await?;
+            created.extend(inserted.into_iter());
+        }
+
+        Ok(created)
+    }
+
+    /// Delete action rows by ids in batches to avoid exceeding backend SQL variable limits.
+    async fn delete_by_ids_in_batches<C>(conn: &C, ids: Vec<i32>) -> StorageResult<Vec<ActionModel>>
+    where
+        C: ConnectionTrait,
+    {
+        let batch_size = Self::in_list_batch_for_backend(conn.get_database_backend()).max(1);
+        let mut deleted: Vec<ActionModel> = Vec::with_capacity(ids.len());
+
+        for chunk in ids.chunks(batch_size) {
+            let removed = Action::delete_many()
+                .filter(ActionColumn::Id.is_in(chunk.to_vec()))
+                .exec_with_returning(conn)
+                .await?;
+            deleted.extend(removed.into_iter());
+        }
+
+        Ok(deleted)
+    }
+
     /// Create new action
     pub async fn create<C>(action: ActionActiveModel, db: Option<&C>) -> StorageResult<ActionModel>
     where
@@ -41,15 +127,15 @@ impl ActionRepository {
     where
         C: ConnectionTrait,
     {
+        if actions.is_empty() {
+            return Ok(Vec::new());
+        }
+
         match db {
-            Some(conn) => Ok(Action::insert_many(actions)
-                .exec_with_returning_many(conn)
-                .await?),
+            Some(conn) => Self::insert_many_in_batches(conn, actions).await,
             None => {
                 let conn = get_db_connection().await?;
-                Ok(Action::insert_many(actions)
-                    .exec_with_returning_many(&conn)
-                    .await?)
+                Self::insert_many_in_batches(&conn, actions).await
             }
         }
     }
@@ -90,17 +176,15 @@ impl ActionRepository {
     where
         C: ConnectionTrait,
     {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         match db {
-            Some(conn) => Ok(Action::delete_many()
-                .filter(ActionColumn::Id.is_in(ids))
-                .exec_with_returning(conn)
-                .await?),
+            Some(conn) => Self::delete_by_ids_in_batches(conn, ids).await,
             None => {
                 let conn = get_db_connection().await?;
-                Ok(Action::delete_many()
-                    .filter(ActionColumn::Id.is_in(ids))
-                    .exec_with_returning(&conn)
-                    .await?)
+                Self::delete_by_ids_in_batches(&conn, ids).await
             }
         }
     }

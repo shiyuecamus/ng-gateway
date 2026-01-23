@@ -16,9 +16,10 @@ pub use crate::domain::{
     },
     credentials::{NewCredentials, UpdateCredentials},
     device::{ChangeDeviceStatus, DeviceInfo, DevicePageParams, NewDevice, UpdateDevice},
-    driver::{
-        CommitResult, DriverInfo, DriverPageParams, ImportPreview, NewDriver, PathEntityId,
-        TemplateQuery, UpdateDriver,
+    driver::{DriverInfo, DriverPageParams, NewDriver, PathEntityId, TemplateQuery, UpdateDriver},
+    import::{
+        CommitResult, DeviceGroup, DeviceRef, ImportPreview, PreparedActionCommit,
+        PreparedDeviceCommit, PreparedDevicePointsCommit, PreparedPointCommit,
     },
     menu::{ChangeMenuStatus, MenuInfo, MenuMeta, MenuTree, NewMenu, NewMenuWithId, UpdateMenu},
     plugin::{NewPlugin, PluginInfo, PluginPageParams, UpdatePlugin},

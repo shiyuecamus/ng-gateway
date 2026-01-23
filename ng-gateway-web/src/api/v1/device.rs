@@ -1,5 +1,7 @@
-use std::sync::Arc;
-
+use crate::{
+    rbac::{has_any_role, has_resource_operation, has_scope},
+    AppState,
+};
 use actix_multipart::Multipart;
 use actix_web::{http::Method, web};
 use actix_web_validator::{Json, Path, Query};
@@ -12,7 +14,7 @@ use ng_gateway_models::{
     domain::prelude::{
         BatchDeletePayload, ChangeDeviceStatus, ClearByChannelPayload, CommitResult, DeviceInfo,
         DevicePageParams, ImportPreview, NewAction, NewDevice, NewPoint, PageResult, PathId,
-        UpdateDevice,
+        PreparedActionCommit, PreparedPointCommit, UpdateDevice,
     },
     enums::common::{EntityType, Operation},
     rbac::PermRule,
@@ -20,14 +22,10 @@ use ng_gateway_models::{
     PermChecker,
 };
 use ng_gateway_repository::{ChannelRepository, DeviceRepository, DriverRepository};
-use ng_gateway_sdk::{DriverEntityTemplate, DriverSchemas, FlattenEntity, RowMappingContext};
+use ng_gateway_sdk::{DriverSchemas, FlattenEntity, RowMappingContext};
 use sea_orm::IntoActiveModel;
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::{info, instrument};
-
-use crate::{
-    rbac::{has_any_role, has_resource_operation, has_scope},
-    AppState,
-};
 
 pub(super) const ROUTER_PREFIX: &str = "/device";
 
@@ -400,36 +398,47 @@ pub async fn import_point_preview(
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
 
-    // Read metadata and rows, validate meta
-    let template = schemas.build_template(FlattenEntity::Point, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(std::io::Cursor::new(accumulated_data.freeze()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Point)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Point, &metadata.locale);
+    // Excel parsing + row validation is CPU-heavy and uses blocking I/O internally (zip/XML).
+    // Run it on a dedicated blocking thread to avoid starving Actix workers.
+    let buf = accumulated_data.freeze();
+    let driver_type = driver.driver_type;
+    let preview = tokio::task::spawn_blocking(move || -> Result<ImportPreview, WebError> {
+        // Read metadata and rows, validate meta
+        let template = schemas.build_template(FlattenEntity::Point, "zh-CN");
+        let (metadata, rows) = template
+            .read_with_meta_from_reader(std::io::Cursor::new(buf))
+            .map_err(|e| WebError::InternalError(e.to_string()))?;
+        metadata
+            .validate(&driver_type, FlattenEntity::Point)
+            .map_err(|e| WebError::BadRequest(e.to_string()))?;
+        let template = schemas.build_template(FlattenEntity::Point, &metadata.locale);
 
-    // Validate and normalize rows
-    let total = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
+        // Validate and normalize rows
+        let total = rows.len();
+        let (valids, errors, warn_count) =
+            template.validate_and_normalize_rows(rows, &metadata.locale);
 
-    // Semantics:
-    // - `valids` contains rows that passed all field-level validation.
-    // - Any row that failed validation is excluded from `valids`, regardless of how many
-    //   `FieldError`s it produced.
-    // Therefore:
-    // - `valid` should be the number of rows in `valids`.
-    // - `invalid` should be `total - valid`, which is the number of rows that had at least one error.
-    let valid_count = valids.len();
+        // Semantics:
+        // - `valids` contains rows that passed all field-level validation.
+        // - Any row that failed validation is excluded from `valids`, regardless of how many
+        //   `FieldError`s it produced.
+        // Therefore:
+        // - `valid` should be the number of rows in `valids`.
+        // - `invalid` should be `total - valid`, which is the number of rows that had at least one error.
+        let valid_count = valids.len();
 
-    Ok(WebResponse::ok(ImportPreview {
-        total_rows: total,
-        valid: valid_count,
-        invalid: total.saturating_sub(valid_count),
-        warn: warn_count,
-        errors: errors.into_iter().take(50).collect(),
-    }))
+        Ok(ImportPreview {
+            total_rows: total,
+            valid: valid_count,
+            invalid: total.saturating_sub(valid_count),
+            warn: warn_count,
+            errors: errors.into_iter().take(50).collect(),
+        })
+    })
+    .await
+    .map_err(|e| WebError::InternalError(format!("Failed to run import preview task: {e}")))??;
+
+    Ok(WebResponse::ok(preview))
 }
 
 /// Import point template and commit
@@ -475,47 +484,57 @@ pub async fn import_point_commit(
         .ok_or(WebError::NotFound(EntityType::Driver.to_string()))?;
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
-
-    // Resolve locale + validate
+    // Parse + validate + map on blocking pool to avoid starving Actix workers.
     let buf = accumulated_data.freeze();
-    let metadata = DriverEntityTemplate::read_template_metadata(std::io::Cursor::new(buf.clone()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Point)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Point, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(std::io::Cursor::new(buf))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Point)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Point, &metadata.locale);
+    let entity_id = device.id;
+    let driver_type = driver.driver_type.clone();
+    let prepared = tokio::task::spawn_blocking(move || -> Result<PreparedPointCommit, WebError> {
+        let template = schemas.build_template(FlattenEntity::Point, "zh-CN");
+        let (metadata, rows) = template
+            .read_with_meta_from_reader(std::io::Cursor::new(buf))
+            .map_err(|e| WebError::InternalError(e.to_string()))?;
+        metadata
+            .validate(&driver_type, FlattenEntity::Point)
+            .map_err(|e| WebError::BadRequest(e.to_string()))?;
 
-    let total_rows = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
-    let valid_count = valids.len();
+        let locale = metadata.locale.clone();
+        let template = schemas.build_template(FlattenEntity::Point, &locale);
 
-    let points: Vec<NewPoint> = template
-        .map_to_domain(
-            valids,
-            RowMappingContext {
-                entity_id: device.id,
-                driver_type: driver.driver_type.clone(),
-                locale: metadata.locale.clone(),
-            },
-        )
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+        let total_rows = rows.len();
+        let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &locale);
+        let valid_count = valids.len();
 
-    let num_points = points.len();
-    match state.gateway.create_points(points).await {
-        Ok(_) => Ok(WebResponse::ok(CommitResult {
+        let points: Vec<NewPoint> = template
+            .map_to_domain(
+                valids,
+                RowMappingContext {
+                    entity_id,
+                    driver_type: driver_type.clone(),
+                    locale,
+                },
+            )
+            .map_err(|e| WebError::InternalError(e.to_string()))?;
+
+        Ok(PreparedPointCommit {
             total_rows,
-            valid: valid_count,
-            invalid: total_rows.saturating_sub(valid_count),
-            warn: warn_count,
-            inserted: num_points,
+            warn_count,
+            valid_count,
+            points,
             errors,
+        })
+    })
+    .await
+    .map_err(|e| WebError::InternalError(format!("Failed to run import commit task: {e}")))??;
+
+    let num_points = prepared.points.len();
+    match state.gateway.create_points(prepared.points).await {
+        Ok(_) => Ok(WebResponse::ok(CommitResult {
+            total_rows: prepared.total_rows,
+            valid: prepared.valid_count,
+            invalid: prepared.total_rows.saturating_sub(prepared.valid_count),
+            warn: prepared.warn_count,
+            inserted: num_points,
+            errors: prepared.errors,
         })),
         Err(e) => Ok(WebResponse::error(&e.to_string())),
     }
@@ -563,31 +582,42 @@ pub async fn import_action_preview(
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
 
-    // Parse + validate meta
-    let template = schemas.build_template(FlattenEntity::Action, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(std::io::Cursor::new(accumulated_data.freeze()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Action)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Action, &metadata.locale);
+    // Excel parsing + row validation is CPU-heavy and uses blocking I/O internally (zip/XML).
+    // Run it on a dedicated blocking thread to avoid starving Actix workers.
+    let buf = accumulated_data.freeze();
+    let driver_type = driver.driver_type;
+    let preview = tokio::task::spawn_blocking(move || -> Result<ImportPreview, WebError> {
+        // Parse + validate meta
+        let template = schemas.build_template(FlattenEntity::Action, "zh-CN");
+        let (metadata, rows) = template
+            .read_with_meta_from_reader(std::io::Cursor::new(buf))
+            .map_err(|e| WebError::InternalError(e.to_string()))?;
+        metadata
+            .validate(&driver_type, FlattenEntity::Action)
+            .map_err(|e| WebError::BadRequest(e.to_string()))?;
+        let template = schemas.build_template(FlattenEntity::Action, &metadata.locale);
 
-    let total = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
+        let total = rows.len();
+        let (valids, errors, warn_count) =
+            template.validate_and_normalize_rows(rows, &metadata.locale);
 
-    // Same semantics as point preview:
-    // - `valids` contains only rows without field-level errors.
-    // - `valid` is the number of such rows; `invalid` is the remaining rows.
-    let valid_count = valids.len();
+        // Same semantics as point preview:
+        // - `valids` contains only rows without field-level errors.
+        // - `valid` is the number of such rows; `invalid` is the remaining rows.
+        let valid_count = valids.len();
 
-    Ok(WebResponse::ok(ImportPreview {
-        total_rows: total,
-        valid: valid_count,
-        invalid: total.saturating_sub(valid_count),
-        warn: warn_count,
-        errors: errors.into_iter().take(50).collect(),
-    }))
+        Ok(ImportPreview {
+            total_rows: total,
+            valid: valid_count,
+            invalid: total.saturating_sub(valid_count),
+            warn: warn_count,
+            errors: errors.into_iter().take(50).collect(),
+        })
+    })
+    .await
+    .map_err(|e| WebError::InternalError(format!("Failed to run import preview task: {e}")))??;
+
+    Ok(WebResponse::ok(preview))
 }
 
 /// Import action template and commit (aggregate parameters by action name/command)
@@ -607,8 +637,6 @@ pub async fn import_action_commit(
     mut multipart: Multipart,
     state: web::Data<Arc<AppState>>,
 ) -> WebResult<WebResponse<CommitResult>> {
-    use std::collections::BTreeMap;
-
     let device = match DeviceRepository::find_by_id(params.id).await? {
         Some(device) => device,
         None => return Err(WebError::NotFound(EntityType::Device.to_string())),
@@ -634,59 +662,71 @@ pub async fn import_action_commit(
         .ok_or(WebError::NotFound(EntityType::Driver.to_string()))?;
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
-
+    // Parse + validate + map + aggregate on blocking pool to avoid starving Actix workers.
     let buf = accumulated_data.freeze();
-    let metadata = DriverEntityTemplate::read_template_metadata(std::io::Cursor::new(buf.clone()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Action)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Action, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(std::io::Cursor::new(buf))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Action)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Action, &metadata.locale);
+    let entity_id = device.id;
+    let driver_type = driver.driver_type.clone();
+    let prepared =
+        tokio::task::spawn_blocking(move || -> Result<PreparedActionCommit, WebError> {
+            let template = schemas.build_template(FlattenEntity::Action, "zh-CN");
+            let (metadata, rows) = template
+                .read_with_meta_from_reader(std::io::Cursor::new(buf))
+                .map_err(|e| WebError::InternalError(e.to_string()))?;
+            metadata
+                .validate(&driver_type, FlattenEntity::Action)
+                .map_err(|e| WebError::BadRequest(e.to_string()))?;
 
-    let total_rows = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
-    let valid_count = valids.len();
+            let locale = metadata.locale.clone();
+            let template = schemas.build_template(FlattenEntity::Action, &locale);
 
-    // Map each row to NewAction (single parameter)
-    let per_row_actions: Vec<NewAction> = template
-        .map_to_domain(
-            valids,
-            RowMappingContext {
-                entity_id: device.id,
-                driver_type: driver.driver_type.clone(),
-                locale: metadata.locale.clone(),
-            },
-        )
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+            let total_rows = rows.len();
+            let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &locale);
+            let valid_count = valids.len();
 
-    // Aggregate parameters by (name, command)
-    let mut grouped: BTreeMap<(String, String), NewAction> = BTreeMap::new();
-    for a in per_row_actions.into_iter() {
-        let key = (a.name.clone(), a.command.clone());
-        if let Some(existing) = grouped.get_mut(&key) {
-            existing.inputs.0.extend(a.inputs.0.into_iter());
-        } else {
-            grouped.insert(key, a);
-        }
-    }
-    let actions: Vec<NewAction> = grouped.into_values().collect();
-    let num_actions = actions.len();
+            // Map each row to NewAction (single parameter)
+            let per_row_actions: Vec<NewAction> = template
+                .map_to_domain(
+                    valids,
+                    RowMappingContext {
+                        entity_id,
+                        driver_type: driver_type.clone(),
+                        locale,
+                    },
+                )
+                .map_err(|e| WebError::InternalError(e.to_string()))?;
 
-    match state.gateway.create_actions(actions).await {
+            // Aggregate parameters by (name, command)
+            let mut grouped: BTreeMap<(String, String), NewAction> = BTreeMap::new();
+            for a in per_row_actions.into_iter() {
+                let key = (a.name.clone(), a.command.clone());
+                if let Some(existing) = grouped.get_mut(&key) {
+                    existing.inputs.0.extend(a.inputs.0.into_iter());
+                } else {
+                    grouped.insert(key, a);
+                }
+            }
+            let actions: Vec<NewAction> = grouped.into_values().collect();
+
+            Ok(PreparedActionCommit {
+                total_rows,
+                warn_count,
+                valid_count,
+                actions,
+                errors,
+            })
+        })
+        .await
+        .map_err(|e| WebError::InternalError(format!("Failed to run import commit task: {e}")))??;
+
+    let num_actions = prepared.actions.len();
+    match state.gateway.create_actions(prepared.actions).await {
         Ok(_) => Ok(WebResponse::ok(CommitResult {
-            total_rows,
-            valid: valid_count,
-            invalid: total_rows.saturating_sub(valid_count),
-            warn: warn_count,
+            total_rows: prepared.total_rows,
+            valid: prepared.valid_count,
+            invalid: prepared.total_rows.saturating_sub(prepared.valid_count),
+            warn: prepared.warn_count,
             inserted: num_actions,
-            errors,
+            errors: prepared.errors,
         })),
         Err(e) => Ok(WebResponse::error(&e.to_string())),
     }

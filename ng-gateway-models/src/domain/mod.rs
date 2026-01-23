@@ -21,6 +21,8 @@ mod device;
 #[allow(clippy::needless_update)]
 mod driver;
 #[allow(clippy::needless_update)]
+mod import;
+#[allow(clippy::needless_update)]
 mod menu;
 #[allow(clippy::needless_update)]
 mod plugin;

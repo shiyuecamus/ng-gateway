@@ -9,7 +9,7 @@ use ng_gateway_models::{
     enums::common::Status,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, Order, PaginatorTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, Order, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 
@@ -17,6 +17,92 @@ use sea_orm::{
 pub struct DeviceRepository;
 
 impl DeviceRepository {
+    /// Maximum batch size for device insertion on SQLite.
+    ///
+    /// # Why
+    /// SQLite limits the number of bound variables per statement (commonly 999).
+    /// `insert_many` expands to a single multi-row INSERT, which can exceed the limit
+    /// for larger imports.
+    const SQLITE_INSERT_BATCH_ROWS: usize = 100;
+
+    /// Maximum batch size for device insertion on non-SQLite backends.
+    const DEFAULT_INSERT_BATCH_ROWS: usize = 1000;
+
+    /// Maximum `IN (...)` list size for SQLite queries.
+    const SQLITE_IN_LIST_BATCH: usize = 900;
+
+    /// Maximum `IN (...)` list size for non-SQLite backends.
+    const DEFAULT_IN_LIST_BATCH: usize = 5000;
+
+    #[inline]
+    fn insert_batch_rows_for_backend(backend: DbBackend) -> usize {
+        match backend {
+            DbBackend::Sqlite => Self::SQLITE_INSERT_BATCH_ROWS,
+            _ => Self::DEFAULT_INSERT_BATCH_ROWS,
+        }
+    }
+
+    #[inline]
+    fn in_list_batch_for_backend(backend: DbBackend) -> usize {
+        match backend {
+            DbBackend::Sqlite => Self::SQLITE_IN_LIST_BATCH,
+            _ => Self::DEFAULT_IN_LIST_BATCH,
+        }
+    }
+
+    /// Insert device rows in batches to avoid exceeding backend SQL variable limits.
+    async fn insert_many_in_batches<C>(
+        conn: &C,
+        devices: Vec<DeviceActiveModel>,
+    ) -> StorageResult<Vec<DeviceModel>>
+    where
+        C: ConnectionTrait,
+    {
+        let batch_rows = Self::insert_batch_rows_for_backend(conn.get_database_backend()).max(1);
+
+        let mut created: Vec<DeviceModel> = Vec::with_capacity(devices.len());
+        let mut batch: Vec<DeviceActiveModel> = Vec::with_capacity(batch_rows);
+
+        for d in devices.into_iter() {
+            batch.push(d);
+            if batch.len() >= batch_rows {
+                let to_insert = std::mem::take(&mut batch);
+                let inserted = Device::insert_many(to_insert)
+                    .exec_with_returning_many(conn)
+                    .await?;
+                created.extend(inserted.into_iter());
+            }
+        }
+
+        if !batch.is_empty() {
+            let inserted = Device::insert_many(batch)
+                .exec_with_returning_many(conn)
+                .await?;
+            created.extend(inserted.into_iter());
+        }
+
+        Ok(created)
+    }
+
+    /// Delete device rows by ids in batches to avoid exceeding backend SQL variable limits.
+    async fn delete_by_ids_in_batches<C>(conn: &C, ids: Vec<i32>) -> StorageResult<Vec<DeviceModel>>
+    where
+        C: ConnectionTrait,
+    {
+        let batch_size = Self::in_list_batch_for_backend(conn.get_database_backend()).max(1);
+        let mut deleted: Vec<DeviceModel> = Vec::with_capacity(ids.len());
+
+        for chunk in ids.chunks(batch_size) {
+            let removed = Device::delete_many()
+                .filter(DeviceColumn::Id.is_in(chunk.to_vec()))
+                .exec_with_returning(conn)
+                .await?;
+            deleted.extend(removed.into_iter());
+        }
+
+        Ok(deleted)
+    }
+
     /// Create many devices and return inserted models
     pub async fn create_many<C>(
         devices: Vec<DeviceActiveModel>,
@@ -25,15 +111,15 @@ impl DeviceRepository {
     where
         C: ConnectionTrait,
     {
+        if devices.is_empty() {
+            return Ok(Vec::new());
+        }
+
         match db {
-            Some(conn) => Ok(Device::insert_many(devices)
-                .exec_with_returning_many(conn)
-                .await?),
+            Some(conn) => Self::insert_many_in_batches(conn, devices).await,
             None => {
                 let conn = get_db_connection().await?;
-                Ok(Device::insert_many(devices)
-                    .exec_with_returning_many(&conn)
-                    .await?)
+                Self::insert_many_in_batches(&conn, devices).await
             }
         }
     }
@@ -52,17 +138,15 @@ impl DeviceRepository {
     where
         C: ConnectionTrait,
     {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         match db {
-            Some(conn) => Ok(Device::delete_many()
-                .filter(DeviceColumn::Id.is_in(ids))
-                .exec_with_returning(conn)
-                .await?),
+            Some(conn) => Self::delete_by_ids_in_batches(conn, ids).await,
             None => {
                 let conn = get_db_connection().await?;
-                Ok(Device::delete_many()
-                    .filter(DeviceColumn::Id.is_in(ids))
-                    .exec_with_returning(&conn)
-                    .await?)
+                Self::delete_by_ids_in_batches(&conn, ids).await
             }
         }
     }

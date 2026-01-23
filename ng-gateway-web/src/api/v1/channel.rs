@@ -15,8 +15,9 @@ use ng_gateway_error::{rbac::RBACError, web::WebError, NGResult, WebResult};
 use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE,
     domain::prelude::{
-        ChangeChannelStatus, ChannelInfo, ChannelPageParams, CommitResult, DeviceInfo,
-        ImportPreview, NewChannel, NewDevice, NewPoint, PageResult, PathId, UpdateChannel,
+        ChangeChannelStatus, ChannelInfo, ChannelPageParams, CommitResult, DeviceGroup, DeviceInfo,
+        DeviceRef, ImportPreview, NewChannel, NewDevice, NewPoint, PageResult, PathId,
+        PreparedDeviceCommit, PreparedDevicePointsCommit, UpdateChannel,
     },
     enums::common::{EntityType, Operation},
     rbac::PermRule,
@@ -25,15 +26,16 @@ use ng_gateway_models::{
 };
 use ng_gateway_repository::{ChannelRepository, DeviceRepository, DriverRepository};
 use ng_gateway_sdk::{
-    DriverEntityTemplate, DriverSchemas, FieldError, FlattenEntity, FromValidatedRow,
-    RowMappingContext, ValidatedRow, ValidationCode,
+    DriverSchemas, FieldError, FlattenEntity, FromValidatedRow, RowMappingContext, ValidatedRow,
+    ValidationCode,
 };
 use sea_orm::IntoActiveModel;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{HashMap, HashSet},
     io::Cursor,
     sync::Arc,
 };
+
 use tracing::{info, instrument};
 
 pub(super) const ROUTER_PREFIX: &str = "/channel";
@@ -499,27 +501,39 @@ pub async fn import_device_preview(
         .ok_or(WebError::NotFound(EntityType::Driver.to_string()))?;
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
-    // Read metadata and rows together, then validate meta
-    let template = schemas.build_template(FlattenEntity::Device, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(Cursor::new(accumulated_data.freeze()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Device)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Device, &metadata.locale);
 
-    // Validate and normalize rows
-    let total = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
+    // Excel parsing + row validation is CPU-heavy and uses blocking I/O internally (zip/XML).
+    // Run it on a dedicated blocking thread to avoid starving Actix workers.
+    let buf = accumulated_data.freeze();
+    let driver_type = driver.driver_type;
+    let preview = tokio::task::spawn_blocking(move || -> Result<ImportPreview, WebError> {
+        // Read metadata and rows together, then validate meta
+        let template = schemas.build_template(FlattenEntity::Device, "zh-CN");
+        let (metadata, rows) = template
+            .read_with_meta_from_reader(Cursor::new(buf))
+            .map_err(|e| WebError::InternalError(e.to_string()))?;
+        metadata
+            .validate(&driver_type, FlattenEntity::Device)
+            .map_err(|e| WebError::BadRequest(e.to_string()))?;
+        let template = schemas.build_template(FlattenEntity::Device, &metadata.locale);
 
-    Ok(WebResponse::ok(ImportPreview {
-        total_rows: total,
-        valid: valids.len(),
-        invalid: total.saturating_sub(valids.len()),
-        warn: warn_count,
-        errors: errors.into_iter().take(50).collect(),
-    }))
+        // Validate and normalize rows
+        let total = rows.len();
+        let (valids, errors, warn_count) =
+            template.validate_and_normalize_rows(rows, &metadata.locale);
+
+        Ok(ImportPreview {
+            total_rows: total,
+            valid: valids.len(),
+            invalid: total.saturating_sub(valids.len()),
+            warn: warn_count,
+            errors: errors.into_iter().take(50).collect(),
+        })
+    })
+    .await
+    .map_err(|e| WebError::InternalError(format!("Failed to run import preview task: {e}")))??;
+
+    Ok(WebResponse::ok(preview))
 }
 
 /// Import device template and commit
@@ -561,49 +575,60 @@ pub async fn import_device_commit(
         .ok_or(WebError::NotFound(EntityType::Driver.to_string()))?;
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
-    // Read metadata to resolve locale and validate compatibility
+    // Parse + validate + map on blocking pool to avoid starving Actix workers.
     let buf = accumulated_data.freeze();
-    let metadata = DriverEntityTemplate::read_template_metadata(Cursor::new(buf.clone()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Device)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Device, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(Cursor::new(buf))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::Device)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::Device, &metadata.locale);
+    let channel_id = channel.id;
+    let driver_type = driver.driver_type.clone();
+    let prepared =
+        tokio::task::spawn_blocking(move || -> Result<PreparedDeviceCommit, WebError> {
+            // Parse workbook once (meta + rows), then validate meta.
+            let template = schemas.build_template(FlattenEntity::Device, "zh-CN");
+            let (metadata, rows) = template
+                .read_with_meta_from_reader(Cursor::new(buf))
+                .map_err(|e| WebError::InternalError(e.to_string()))?;
+            metadata
+                .validate(&driver_type, FlattenEntity::Device)
+                .map_err(|e| WebError::BadRequest(e.to_string()))?;
 
-    // Validate and normalize
-    let total_rows = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
+            let locale = metadata.locale.clone();
+            let template = schemas.build_template(FlattenEntity::Device, &locale);
 
-    // Map to NewDevice via SDK mapping helper for thinner web layer
-    let valid_count = valids.len();
-    let devices: Vec<NewDevice> = template
-        .map_to_domain(
-            valids,
-            RowMappingContext {
-                entity_id: channel.id,
-                driver_type: driver.driver_type.clone(),
-                locale: metadata.locale.clone(),
-            },
-        )
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+            let total_rows = rows.len();
+            let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &locale);
+            let valid_count = valids.len();
+
+            let devices: Vec<NewDevice> = template
+                .map_to_domain(
+                    valids,
+                    RowMappingContext {
+                        entity_id: channel_id,
+                        driver_type: driver_type.clone(),
+                        locale,
+                    },
+                )
+                .map_err(|e| WebError::InternalError(e.to_string()))?;
+
+            Ok(PreparedDeviceCommit {
+                total_rows,
+                warn_count,
+                valid_count,
+                devices,
+                errors,
+            })
+        })
+        .await
+        .map_err(|e| WebError::InternalError(format!("Failed to run import commit task: {e}")))??;
 
     // Commit via gateway
-    let num_devices = devices.len();
-    match state.gateway.create_devices(devices).await {
+    let num_devices = prepared.devices.len();
+    match state.gateway.create_devices(prepared.devices).await {
         Ok(_) => Ok(WebResponse::ok(CommitResult {
-            total_rows,
-            valid: valid_count,
-            invalid: total_rows.saturating_sub(valid_count),
-            warn: warn_count,
+            total_rows: prepared.total_rows,
+            valid: prepared.valid_count,
+            invalid: prepared.total_rows.saturating_sub(prepared.valid_count),
+            warn: prepared.warn_count,
             inserted: num_devices,
-            errors,
+            errors: prepared.errors,
         })),
         Err(e) => Ok(WebResponse::error(&e.to_string())),
     }
@@ -615,19 +640,15 @@ pub async fn import_device_commit(
 /// if any device group has inconsistent device_type or device_driver_config fields.
 fn group_rows_by_device(
     rows: Vec<ValidatedRow>,
-) -> Result<BTreeMap<String, Vec<ValidatedRow>>, Vec<FieldError>> {
-    use serde_json::Value as Json;
+) -> Result<HashMap<String, Vec<ValidatedRow>>, Vec<FieldError>> {
+    let mut groups: HashMap<String, DeviceGroup> = HashMap::new();
+    let mut errors: Vec<FieldError> = Vec::new();
 
-    let mut groups: BTreeMap<String, Vec<ValidatedRow>> = BTreeMap::new();
-    let mut errors = Vec::new();
-
-    // First pass: group by device_name
     for row in rows {
         let device_name = row
             .values
             .get("device_name")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
             .unwrap_or_default();
 
         if device_name.is_empty() {
@@ -640,57 +661,33 @@ fn group_rows_by_device(
             continue;
         }
 
-        groups.entry(device_name).or_default().push(row);
-    }
+        let current_device_type = row.values.get("device_type").and_then(|v| v.as_str());
+        let current_device_config = row.values.get("device_driver_config");
 
-    // Second pass: validate consistency within each group
-    for (device_name, group_rows) in groups.iter() {
-        if group_rows.is_empty() {
-            continue;
-        }
-
-        // Extract device_type and device_driver_config from first row as reference
-        let first_row = &group_rows[0];
-        let ref_device_type = first_row
-            .values
-            .get("device_type")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Extract device_driver_config as a JSON object
-        let ref_device_config = first_row
-            .values
-            .get("device_driver_config")
-            .cloned()
-            .unwrap_or_else(|| Json::Object(serde_json::Map::new()));
-
-        // Check consistency for all other rows in the group
-        for row in group_rows.iter().skip(1) {
-            let device_type = row
-                .values
-                .get("device_type")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            if device_type != ref_device_type {
+        if let Some(group) = groups.get_mut(device_name) {
+            // Validate device_type consistency
+            let ref_device_type = group.ref_device_type.as_deref();
+            if current_device_type != ref_device_type {
                 errors.push(FieldError {
                     row: row.row_index,
                     field: "device_type".to_string(),
                     code: ValidationCode::TypeMismatch,
                     message: format!(
                         "device_type mismatch: expected {:?}, got {:?} for device {}",
-                        ref_device_type, device_type, device_name
+                        ref_device_type, current_device_type, device_name
                     ),
                 });
             }
 
-            let device_config = row
-                .values
-                .get("device_driver_config")
-                .cloned()
-                .unwrap_or_else(|| Json::Object(serde_json::Map::new()));
-
-            if device_config != ref_device_config {
+            // Validate device_driver_config consistency (treat missing as empty object)
+            let config_mismatch = match current_device_config {
+                Some(v) => v != &group.ref_device_config,
+                None => !matches!(
+                    group.ref_device_config,
+                    serde_json::Value::Object(ref m) if m.is_empty()
+                ),
+            };
+            if config_mismatch {
                 errors.push(FieldError {
                     row: row.row_index,
                     field: "device_driver_config".to_string(),
@@ -698,14 +695,120 @@ fn group_rows_by_device(
                     message: format!("device_driver_config mismatch for device {}", device_name),
                 });
             }
+
+            group.rows.push(row);
+        } else {
+            // First time seeing this device: snapshot reference values.
+            let ref_device_type = current_device_type.map(|s| s.to_string());
+            let ref_device_config = current_device_config
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            groups.insert(
+                device_name.to_string(),
+                DeviceGroup {
+                    ref_device_type,
+                    ref_device_config,
+                    rows: vec![row],
+                },
+            );
         }
     }
 
-    if errors.is_empty() {
-        Ok(groups)
-    } else {
-        Err(errors)
+    if !errors.is_empty() {
+        return Err(errors);
     }
+
+    Ok(groups
+        .into_iter()
+        .map(|(k, g)| (k, g.rows))
+        .collect::<HashMap<_, _>>())
+}
+
+/// Validate device-level consistency constraints for `FlattenEntity::DevicePoints`.
+///
+/// # Why this exists
+/// `DevicePoints` import represents a logical "device" repeated across multiple rows (one per point).
+/// We must ensure that some device-level fields are consistent within the same `device_name`.
+///
+/// # What it validates
+/// - `device_name` is required
+/// - For the same `device_name`, all rows must have the same `device_type`
+/// - For the same `device_name`, all rows must have the same `device_driver_config`
+///
+/// # Performance
+/// This runs in a single pass over `rows` and does **not** clone the input rows.
+fn validate_device_group_consistency(rows: &[ValidatedRow]) -> Vec<FieldError> {
+    let mut refs: HashMap<String, DeviceRef> = HashMap::new();
+    let mut errors: Vec<FieldError> = Vec::new();
+
+    for row in rows {
+        let device_name = row
+            .values
+            .get("device_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if device_name.is_empty() {
+            errors.push(FieldError {
+                row: row.row_index,
+                field: "device_name".to_string(),
+                code: ValidationCode::Required,
+                message: "device_name is required".to_string(),
+            });
+            continue;
+        }
+
+        let current_device_type = row.values.get("device_type").and_then(|v| v.as_str());
+        let current_device_config = row.values.get("device_driver_config");
+
+        if let Some(existing) = refs.get(device_name) {
+            // device_type consistency
+            let ref_device_type = existing.device_type.as_deref();
+            if current_device_type != ref_device_type {
+                errors.push(FieldError {
+                    row: row.row_index,
+                    field: "device_type".to_string(),
+                    code: ValidationCode::TypeMismatch,
+                    message: format!(
+                        "device_type mismatch: expected {:?}, got {:?} for device {}",
+                        ref_device_type, current_device_type, device_name
+                    ),
+                });
+            }
+
+            // device_driver_config consistency (treat missing as empty object)
+            let config_mismatch = match current_device_config {
+                Some(v) => v != &existing.device_driver_config,
+                None => !matches!(
+                    existing.device_driver_config,
+                    serde_json::Value::Object(ref m) if m.is_empty()
+                ),
+            };
+            if config_mismatch {
+                errors.push(FieldError {
+                    row: row.row_index,
+                    field: "device_driver_config".to_string(),
+                    code: ValidationCode::TypeMismatch,
+                    message: format!("device_driver_config mismatch for device {}", device_name),
+                });
+            }
+        } else {
+            // First time seeing this device_name: snapshot reference values once per device.
+            let ref_device_type = current_device_type.map(|s| s.to_string());
+            let ref_device_config = current_device_config
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            refs.insert(
+                device_name.to_string(),
+                DeviceRef {
+                    device_type: ref_device_type,
+                    device_driver_config: ref_device_config,
+                },
+            );
+        }
+    }
+
+    errors
 }
 
 /// Import device with points template preview
@@ -747,51 +850,59 @@ pub async fn import_device_points_preview(
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
 
-    // Read metadata and rows together, then validate meta
-    let template = schemas.build_template(FlattenEntity::DevicePoints, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(Cursor::new(accumulated_data.freeze()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::DevicePoints)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::DevicePoints, &metadata.locale);
+    // Excel parsing + row validation is CPU-heavy and uses blocking I/O internally (zip/XML).
+    // Run it on a dedicated blocking thread to avoid starving Actix workers.
+    let buf = accumulated_data.freeze();
+    let driver_type = driver.driver_type;
+    let preview = tokio::task::spawn_blocking(move || -> Result<ImportPreview, String> {
+        // Read metadata and rows together, then validate meta
+        let template = schemas.build_template(FlattenEntity::DevicePoints, "zh-CN");
+        let (metadata, rows) = template
+            .read_with_meta_from_reader(Cursor::new(buf))
+            .map_err(|e| e.to_string())?;
+        metadata
+            .validate(&driver_type, FlattenEntity::DevicePoints)
+            .map_err(|e| e.to_string())?;
+        let template = schemas.build_template(FlattenEntity::DevicePoints, &metadata.locale);
 
-    // Validate and normalize rows
-    let total = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
+        // Validate and normalize rows
+        let total = rows.len();
+        let (valids, errors, warn_count) =
+            template.validate_and_normalize_rows(rows, &metadata.locale);
 
-    // Group by device and validate consistency
-    let group_errors = match group_rows_by_device(valids.clone()) {
-        Ok(_) => Vec::new(),
-        Err(errs) => errs,
-    };
+        // Validate device-level consistency without cloning all rows
+        let group_errors = validate_device_group_consistency(&valids);
 
-    // Combine validation errors and compute row-level statistics.
-    // Note:
-    // - `validate_and_normalize_rows` already filters out rows with field-level errors from `valids`.
-    // - `group_rows_by_device` may introduce additional errors for otherwise field-valid rows.
-    // - A single row can have multiple `FieldError`s; we must deduplicate by row index to avoid
-    //   double-counting the same row as multiple invalid entries.
-    let mut all_errors = errors;
-    all_errors.extend(group_errors);
+        // Combine validation errors and compute row-level statistics.
+        // Note:
+        // - `validate_and_normalize_rows` already filters out rows with field-level errors from `valids`.
+        // - `validate_device_group_consistency` may introduce additional errors for otherwise field-valid rows.
+        // - A single row can have multiple `FieldError`s; we must deduplicate by row index to avoid
+        //   double-counting the same row as multiple invalid entries.
+        let mut all_errors = errors;
+        all_errors.extend(group_errors);
 
-    // Collect unique row indices that have any kind of error
-    let mut invalid_row_indices: BTreeSet<usize> = BTreeSet::new();
-    for err in &all_errors {
-        invalid_row_indices.insert(err.row);
-    }
+        let mut invalid_row_indices: HashSet<usize> = HashSet::with_capacity(all_errors.len());
+        for err in &all_errors {
+            invalid_row_indices.insert(err.row);
+        }
 
-    let invalid = invalid_row_indices.len();
-    let valid = total.saturating_sub(invalid);
+        let invalid = invalid_row_indices.len();
+        let valid = total.saturating_sub(invalid);
 
-    Ok(WebResponse::ok(ImportPreview {
-        total_rows: total,
-        valid,
-        invalid,
-        warn: warn_count,
-        errors: all_errors.into_iter().take(50).collect(),
-    }))
+        Ok(ImportPreview {
+            total_rows: total,
+            valid,
+            invalid,
+            warn: warn_count,
+            errors: all_errors.into_iter().take(50).collect(),
+        })
+    })
+    .await
+    .map_err(|e| WebError::InternalError(format!("Failed to run import preview task: {e}")))?
+    .map_err(WebError::BadRequest)?;
+
+    Ok(WebResponse::ok(preview))
 }
 
 /// Import device with points template and commit
@@ -834,116 +945,143 @@ pub async fn import_device_points_commit(
     let schemas: DriverSchemas = serde_json::from_value(driver.metadata)
         .map_err(|e| WebError::InternalError(format!("Invalid driver schemas: {e}")))?;
 
-    // Read metadata to resolve locale and validate compatibility
+    // Excel parsing + validation + row-to-domain mapping is CPU-heavy and uses blocking I/O
+    // internally (zip/XML). Run it on a dedicated blocking thread to avoid starving Actix workers.
     let buf = accumulated_data.freeze();
-    let metadata = DriverEntityTemplate::read_template_metadata(Cursor::new(buf.clone()))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::DevicePoints)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::DevicePoints, "zh-CN");
-    let (metadata, rows) = template
-        .read_with_meta_from_reader(Cursor::new(buf))
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
-    metadata
-        .validate(&driver.driver_type, FlattenEntity::DevicePoints)
-        .map_err(|e| WebError::BadRequest(e.to_string()))?;
-    let template = schemas.build_template(FlattenEntity::DevicePoints, &metadata.locale);
+    let channel_id = channel.id;
+    let driver_type = driver.driver_type.clone();
+    let prepared =
+        tokio::task::spawn_blocking(move || -> Result<PreparedDevicePointsCommit, WebError> {
+            // Parse workbook once (meta + rows), then validate meta.
+            let template = schemas.build_template(FlattenEntity::DevicePoints, "zh-CN");
+            let (metadata, rows) = template
+                .read_with_meta_from_reader(Cursor::new(buf))
+                .map_err(|e| WebError::InternalError(e.to_string()))?;
+            metadata
+                .validate(&driver_type, FlattenEntity::DevicePoints)
+                .map_err(|e| WebError::BadRequest(e.to_string()))?;
 
-    // Validate and normalize
-    let total_rows = rows.len();
-    let (valids, errors, warn_count) = template.validate_and_normalize_rows(rows, &metadata.locale);
+            let locale = metadata.locale.clone();
+            let template = schemas.build_template(FlattenEntity::DevicePoints, &locale);
 
-    // Group by device and validate consistency
-    let grouped = group_rows_by_device(valids).map_err(|group_errors| {
-        WebError::BadRequest(format!(
-            "Device grouping errors: {}",
-            group_errors
-                .iter()
-                .map(|e| format!("row {}: {}", e.row, e.message))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ))
-    })?;
+            // Validate and normalize
+            let total_rows = rows.len();
+            let (valids, mut errors, warn_count) =
+                template.validate_and_normalize_rows(rows, &locale);
 
-    // Process each device group
-    let mut all_devices: Vec<NewDevice> = Vec::new();
-    let mut device_name_to_new_device: BTreeMap<String, NewDevice> = BTreeMap::new();
-    let mut all_points: Vec<(String, ValidatedRow)> = Vec::new();
-    let mut device_errors = errors;
+            // Group by device and validate device-level consistency in a single pass
+            let grouped = group_rows_by_device(valids).map_err(|group_errors| {
+                WebError::BadRequest(format!(
+                    "Device grouping errors: {}",
+                    group_errors
+                        .iter()
+                        .map(|e| format!("row {}: {}", e.row, e.message))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ))
+            })?;
 
-    for (device_name, group_rows) in grouped {
-        if group_rows.is_empty() {
-            continue;
-        }
+            let mut devices: Vec<NewDevice> = Vec::new();
+            let mut device_name_to_type: HashMap<String, String> = HashMap::new();
+            let mut points_by_device: HashMap<String, Vec<ValidatedRow>> = HashMap::new();
 
-        // Extract device info from first row
-        let first_row = &group_rows[0];
-        let device_context = RowMappingContext {
-            entity_id: channel.id,
-            driver_type: driver.driver_type.clone(),
-            locale: metadata.locale.clone(),
-        };
+            for (device_name, group_rows) in grouped.into_iter() {
+                if group_rows.is_empty() {
+                    continue;
+                }
 
-        // Map device fields: need to extract device_driver_config and rename to driver_config
-        let mut device_row_values = first_row.values.clone();
+                // The first row contains device fields; points are in every row.
+                let mut row_iter = group_rows.into_iter();
+                let first_row = match row_iter.next() {
+                    Some(r) => r,
+                    None => continue,
+                };
 
-        // Move device_driver_config to driver_config for NewDevice mapping
-        if let Some(device_config) = device_row_values.remove("device_driver_config") {
-            device_row_values.insert("driver_config".to_string(), device_config);
-        }
+                let device_context = RowMappingContext {
+                    entity_id: channel_id,
+                    driver_type: driver_type.clone(),
+                    locale: locale.clone(),
+                };
 
-        let device_row = ValidatedRow {
-            row_index: first_row.row_index,
-            values: device_row_values,
-        };
+                // Map device fields: move `device_driver_config` to `driver_config` for NewDevice mapping.
+                // Note: cloning once per **device** is acceptable and avoids cloning per **point row**.
+                let mut device_row_values = first_row.values.clone();
+                if let Some(device_config) = device_row_values.remove("device_driver_config") {
+                    device_row_values.insert("driver_config".to_string(), device_config);
+                }
+                let device_row = ValidatedRow {
+                    row_index: first_row.row_index,
+                    values: device_row_values,
+                };
 
-        // Create NewDevice
-        let new_device = match NewDevice::from_validated_row(&device_row, &device_context) {
-            Ok(d) => d,
-            Err(e) => {
-                device_errors.push(FieldError {
-                    row: first_row.row_index,
-                    field: "device".to_string(),
-                    code: ValidationCode::Unknown,
-                    message: format!("Failed to create device: {}", e),
-                });
-                continue;
+                let new_device = match NewDevice::from_validated_row(&device_row, &device_context) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        errors.push(FieldError {
+                            row: first_row.row_index,
+                            field: "device".to_string(),
+                            code: ValidationCode::Unknown,
+                            message: format!("Failed to create device: {}", e),
+                        });
+                        continue;
+                    }
+                };
+
+                device_name_to_type.insert(device_name.clone(), new_device.device_type.clone());
+                devices.push(new_device);
+
+                // Build point rows without cloning: consume owned `ValidatedRow` values and remove keys in-place.
+                let mut point_rows: Vec<ValidatedRow> = Vec::new();
+
+                for row in std::iter::once(first_row).chain(row_iter) {
+                    let mut point_row_values = row.values;
+                    point_row_values.remove("device_name");
+                    point_row_values.remove("device_type");
+                    point_row_values.remove("device_driver_config");
+
+                    // Ensure driver_config exists (for point-level driver config)
+                    if !point_row_values.contains_key("driver_config") {
+                        point_row_values.insert(
+                            "driver_config".to_string(),
+                            serde_json::Value::Object(serde_json::Map::new()),
+                        );
+                    }
+
+                    point_rows.push(ValidatedRow {
+                        row_index: row.row_index,
+                        values: point_row_values,
+                    });
+                }
+
+                points_by_device.insert(device_name, point_rows);
             }
-        };
 
-        all_devices.push(new_device.clone());
-        device_name_to_new_device.insert(device_name.clone(), new_device);
+            Ok(PreparedDevicePointsCommit {
+                total_rows,
+                warn_count,
+                locale,
+                devices,
+                device_name_to_type,
+                points_by_device,
+                errors,
+            })
+        })
+        .await
+        .map_err(|e| WebError::InternalError(format!("Failed to run import commit task: {e}")))??;
 
-        // Extract points from all rows in the group
-        for row in group_rows {
-            // Remove device-specific fields from point row
-            let mut point_row_values = row.values.clone();
-            point_row_values.remove("device_name");
-            point_row_values.remove("device_type");
-            point_row_values.remove("device_driver_config");
-
-            // Ensure driver_config exists (for point driver config)
-            if !point_row_values.contains_key("driver_config") {
-                point_row_values.insert(
-                    "driver_config".to_string(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
-            }
-
-            let point_row = ValidatedRow {
-                row_index: row.row_index,
-                values: point_row_values,
-            };
-
-            // We'll create points after devices are created
-            all_points.push((device_name.clone(), point_row));
-        }
-    }
+    let PreparedDevicePointsCommit {
+        total_rows,
+        warn_count,
+        locale,
+        devices,
+        device_name_to_type,
+        points_by_device,
+        errors,
+    } = prepared;
 
     // Create devices first
-    let num_devices = all_devices.len();
-    match state.gateway.create_devices(all_devices).await {
+    let num_devices = devices.len();
+    match state.gateway.create_devices(devices).await {
         Ok(_) => {}
         Err(e) => {
             return Ok(WebResponse::error(&format!(
@@ -959,48 +1097,79 @@ pub async fn import_device_points_commit(
 
     // Map device names to device IDs
     // Match by both device_name and device_type to handle potential duplicates
-    let mut device_name_to_id: BTreeMap<String, i32> = BTreeMap::new();
+    let mut device_name_to_id: HashMap<String, i32> = HashMap::new();
     for created_device in created_devices {
-        if let Some(new_device) = device_name_to_new_device.get(&created_device.device_name) {
-            if new_device.device_type == created_device.device_type {
+        if let Some(expected_type) = device_name_to_type.get(&created_device.device_name) {
+            if expected_type == &created_device.device_type {
                 device_name_to_id.insert(created_device.device_name.clone(), created_device.id);
             }
         }
     }
 
-    // Create points with correct device_id
-    let mut points_to_create = Vec::new();
-    for (device_name, point_row) in all_points {
-        if let Some(&device_id) = device_name_to_id.get(&device_name) {
-            let point_context = RowMappingContext {
-                entity_id: device_id,
-                driver_type: driver.driver_type.clone(),
-                locale: metadata.locale.clone(),
+    // Map point rows to NewPoint (CPU-heavy); do it on blocking pool.
+    let driver_type_for_points = driver.driver_type.clone();
+    let locale_for_points = locale.clone();
+    let mut all_errors = errors;
+    let (points_to_create, point_errors) = tokio::task::spawn_blocking(move || {
+        let mut points: Vec<NewPoint> = Vec::new();
+        let mut errors: Vec<FieldError> = Vec::new();
+
+        for (device_name, point_rows) in points_by_device.into_iter() {
+            let Some(&device_id) = device_name_to_id.get(&device_name) else {
+                // Device not found after creation; report once per device to avoid flooding.
+                if let Some(first) = point_rows.first() {
+                    errors.push(FieldError {
+                        row: first.row_index,
+                        field: "device".to_string(),
+                        code: ValidationCode::Unknown,
+                        message: format!("Device not found after creation: {}", device_name),
+                    });
+                }
+                continue;
             };
 
-            match NewPoint::from_validated_row(&point_row, &point_context) {
-                Ok(p) => points_to_create.push(p),
-                Err(e) => {
-                    device_errors.push(FieldError {
+            let point_context = RowMappingContext {
+                entity_id: device_id,
+                driver_type: driver_type_for_points.clone(),
+                locale: locale_for_points.clone(),
+            };
+
+            for point_row in point_rows {
+                match NewPoint::from_validated_row(&point_row, &point_context) {
+                    Ok(p) => points.push(p),
+                    Err(e) => errors.push(FieldError {
                         row: point_row.row_index,
                         field: "point".to_string(),
                         code: ValidationCode::Unknown,
                         message: format!("Failed to create point: {}", e),
-                    });
+                    }),
                 }
             }
         }
-    }
 
+        (points, errors)
+    })
+    .await
+    .map_err(|e| WebError::InternalError(format!("Failed to run point mapping task: {e}")))?;
+
+    all_errors.extend(point_errors);
     let num_points = points_to_create.len();
+
+    let invalid_row_count = all_errors
+        .iter()
+        .map(|e| e.row)
+        .collect::<HashSet<_>>()
+        .len();
+
+    // Create points
     match state.gateway.create_points(points_to_create).await {
         Ok(_) => Ok(WebResponse::ok(CommitResult {
             total_rows,
-            valid: total_rows.saturating_sub(device_errors.len()),
-            invalid: device_errors.len(),
+            valid: total_rows.saturating_sub(invalid_row_count),
+            invalid: invalid_row_count,
             warn: warn_count,
             inserted: num_devices + num_points,
-            errors: device_errors.into_iter().take(50).collect(),
+            errors: all_errors.into_iter().take(50).collect(),
         })),
         Err(e) => Ok(WebResponse::error(&format!(
             "Failed to create points: {}",

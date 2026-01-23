@@ -1747,8 +1747,10 @@ impl DriverEntityTemplate {
             }
 
             for col in &self.columns {
-                let present_value =
-                    DriverEntityTemplate::get_value_by_path(&normalized_row, &col.key).cloned();
+                // Avoid cloning `serde_json::Value` unless we actually need to update/remove it.
+                // On large imports (e.g. 100k rows), repeated clones here become a major hotspot.
+                let present_value_ref =
+                    DriverEntityTemplate::get_value_by_path(&normalized_row, &col.key);
                 let ctx_row = ValidateRowContext {
                     row_index: idx,
                     locale,
@@ -1757,12 +1759,16 @@ impl DriverEntityTemplate {
 
                 match col.validate(&ctx_row) {
                     Ok(Some(new_value)) => {
-                        if Some(new_value.clone()) != present_value {
+                        let needs_update = match present_value_ref {
+                            Some(v) => v != &new_value,
+                            None => true,
+                        };
+                        if needs_update {
                             Self::insert_nested(&mut normalized_row, &col.key, new_value);
                         }
                     }
                     Ok(None) => {
-                        if present_value.is_some() {
+                        if present_value_ref.is_some() {
                             let _ = Self::remove_by_path(&mut normalized_row, &col.key);
                         }
                     }

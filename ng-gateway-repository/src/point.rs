@@ -12,14 +12,116 @@ use ng_gateway_models::{
     enums::common::{AccessMode, DataPointType, DataType},
 };
 use sea_orm::{
-    prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
-    Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend,
+    EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 
 /// Repository for point operations
 pub struct PointRepository;
 
 impl PointRepository {
+    /// Maximum batch size for point insertion on SQLite.
+    ///
+    /// # Why
+    /// SQLite has a hard limit on the number of bound variables per SQL statement.
+    /// Many distributions compile SQLite with `SQLITE_MAX_VARIABLE_NUMBER = 999`.
+    ///
+    /// A point insert touches ~14-15 columns, therefore inserting thousands of points in
+    /// a single `INSERT ... VALUES (...), (...), ...` statement will fail with:
+    /// `too many SQL variables`.
+    ///
+    /// We keep this value conservative to remain compatible across SQLite builds and
+    /// across schema evolution.
+    const SQLITE_INSERT_BATCH_ROWS: usize = 100;
+
+    /// Maximum batch size for point insertion on non-SQLite backends.
+    ///
+    /// This is primarily a safety valve to avoid generating extremely large SQL statements.
+    const DEFAULT_INSERT_BATCH_ROWS: usize = 1000;
+
+    /// Maximum `IN (...)` list size for SQLite queries.
+    ///
+    /// # Why
+    /// SQLite limits the number of bound variables per statement (commonly 999).
+    /// Queries like `... WHERE id IN (?, ?, ...)` will hit that limit when the list is large.
+    const SQLITE_IN_LIST_BATCH: usize = 900;
+
+    /// Maximum `IN (...)` list size for non-SQLite backends.
+    const DEFAULT_IN_LIST_BATCH: usize = 5000;
+
+    #[inline]
+    fn insert_batch_rows_for_backend(backend: DbBackend) -> usize {
+        match backend {
+            DbBackend::Sqlite => Self::SQLITE_INSERT_BATCH_ROWS,
+            _ => Self::DEFAULT_INSERT_BATCH_ROWS,
+        }
+    }
+
+    #[inline]
+    fn in_list_batch_for_backend(backend: DbBackend) -> usize {
+        match backend {
+            DbBackend::Sqlite => Self::SQLITE_IN_LIST_BATCH,
+            _ => Self::DEFAULT_IN_LIST_BATCH,
+        }
+    }
+
+    /// Insert point rows in batches to avoid exceeding backend SQL variable limits.
+    ///
+    /// # Notes
+    /// - On SQLite, `insert_many` can easily exceed `SQLITE_MAX_VARIABLE_NUMBER` (commonly 999).
+    /// - We intentionally do not wrap this into a long transaction because the gateway layer
+    ///   already implements compensation logic, and smaller statements reduce lock contention.
+    async fn insert_many_in_batches<C>(
+        conn: &C,
+        points: Vec<PointActiveModel>,
+    ) -> StorageResult<Vec<PointModel>>
+    where
+        C: ConnectionTrait,
+    {
+        let batch_rows = Self::insert_batch_rows_for_backend(conn.get_database_backend()).max(1);
+        let mut created: Vec<PointModel> = Vec::with_capacity(points.len());
+        let mut batch: Vec<PointActiveModel> = Vec::with_capacity(batch_rows);
+
+        for p in points.into_iter() {
+            batch.push(p);
+            if batch.len() >= batch_rows {
+                let to_insert = std::mem::take(&mut batch);
+                let inserted = Point::insert_many(to_insert)
+                    .exec_with_returning_many(conn)
+                    .await?;
+                created.extend(inserted.into_iter());
+            }
+        }
+
+        if !batch.is_empty() {
+            let inserted = Point::insert_many(batch)
+                .exec_with_returning_many(conn)
+                .await?;
+            created.extend(inserted.into_iter());
+        }
+
+        Ok(created)
+    }
+
+    /// Delete point rows by ids in batches to avoid exceeding backend SQL variable limits.
+    async fn delete_by_ids_in_batches<C>(conn: &C, ids: Vec<i32>) -> StorageResult<Vec<PointModel>>
+    where
+        C: ConnectionTrait,
+    {
+        let batch_size = Self::in_list_batch_for_backend(conn.get_database_backend()).max(1);
+        let mut deleted: Vec<PointModel> = Vec::with_capacity(ids.len());
+
+        for chunk in ids.chunks(batch_size) {
+            let removed = Point::delete_many()
+                .filter(PointColumn::Id.is_in(chunk.to_vec()))
+                .exec_with_returning(conn)
+                .await?;
+            deleted.extend(removed.into_iter());
+        }
+
+        Ok(deleted)
+    }
+
     /// Create new point
     pub async fn create<C>(point: PointActiveModel, db: Option<&C>) -> StorageResult<PointModel>
     where
@@ -42,15 +144,15 @@ impl PointRepository {
     where
         C: ConnectionTrait,
     {
+        if points.is_empty() {
+            return Ok(Vec::new());
+        }
+
         match db {
-            Some(conn) => Ok(Point::insert_many(points)
-                .exec_with_returning_many(conn)
-                .await?),
+            Some(conn) => Self::insert_many_in_batches(conn, points).await,
             None => {
                 let conn = get_db_connection().await?;
-                Ok(Point::insert_many(points)
-                    .exec_with_returning_many(&conn)
-                    .await?)
+                Self::insert_many_in_batches(&conn, points).await
             }
         }
     }
@@ -91,17 +193,15 @@ impl PointRepository {
     where
         C: ConnectionTrait,
     {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         match db {
-            Some(conn) => Ok(Point::delete_many()
-                .filter(PointColumn::Id.is_in(ids))
-                .exec_with_returning(conn)
-                .await?),
+            Some(conn) => Self::delete_by_ids_in_batches(conn, ids).await,
             None => {
                 let conn = get_db_connection().await?;
-                Ok(Point::delete_many()
-                    .filter(PointColumn::Id.is_in(ids))
-                    .exec_with_returning(&conn)
-                    .await?)
+                Self::delete_by_ids_in_batches(&conn, ids).await
             }
         }
     }
