@@ -4,7 +4,7 @@
   "version": 1,
   "refresh": "5s",
   "timezone": "browser",
-  "time": { "from": "now-15m", "to": "now" },
+  "time": { "from": "now-5m", "to": "now" },
   "tags": ["ng-gateway", "queues"],
   "templating": {
     "list": [

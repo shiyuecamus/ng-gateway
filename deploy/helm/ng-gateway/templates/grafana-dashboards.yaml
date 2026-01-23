@@ -23,7 +23,7 @@ data:
       "version": 1,
       "refresh": "5s",
       "timezone": "browser",
-      "time": { "from": "now-15m", "to": "now" },
+      "time": { "from": "now-5m", "to": "now" },
       "tags": ["ng-gateway"],
       "templating": {
         "list": [
@@ -153,7 +153,7 @@ data:
       "version": 1,
       "refresh": "5s",
       "timezone": "browser",
-      "time": { "from": "now-15m", "to": "now" },
+      "time": { "from": "now-5m", "to": "now" },
       "tags": ["ng-gateway", "queues"],
       "templating": {
         "list": [
@@ -242,7 +242,7 @@ data:
       "version": 1,
       "refresh": "5s",
       "timezone": "browser",
-      "time": { "from": "now-15m", "to": "now" },
+      "time": { "from": "now-5m", "to": "now" },
       "tags": ["ng-gateway", "southward"],
       "templating": {
         "list": [
@@ -350,7 +350,7 @@ data:
       "version": 1,
       "refresh": "5s",
       "timezone": "browser",
-      "time": { "from": "now-15m", "to": "now" },
+      "time": { "from": "now-5m", "to": "now" },
       "tags": ["ng-gateway", "northward"],
       "templating": {
         "list": [
@@ -448,7 +448,7 @@ data:
       "version": 1,
       "refresh": "5s",
       "timezone": "browser",
-      "time": { "from": "now-15m", "to": "now" },
+      "time": { "from": "now-5m", "to": "now" },
       "tags": ["ng-gateway", "control"],
       "templating": {
         "list": [
@@ -536,7 +536,7 @@ data:
       "version": 1,
       "refresh": "5s",
       "timezone": "browser",
-      "time": { "from": "now-15m", "to": "now" },
+      "time": { "from": "now-5m", "to": "now" },
       "tags": ["ng-gateway", "collector"],
       "templating": {
         "list": [
