@@ -166,6 +166,8 @@ pub(crate) struct SouthwardMetricsHub {
     // manager-level (no labels)
     channels_total: IntGauge,
     channels_connected: IntGauge,
+    devices_total: IntGauge,
+    data_points_total: IntGauge,
     // snapshot fields (single source of truth for REST/WS)
     total_channels: AtomicU64,
     connected_channels: AtomicU64,
@@ -213,6 +215,28 @@ impl SouthwardMetricsHub {
             registry,
             Box::new(channels_connected.clone()),
             "southward_channels_connected",
+        );
+
+        let devices_total = IntGauge::new(
+            "southward_devices_total",
+            "Total number of devices across all southward channels.",
+        )
+        .map_err(|e| NGError::from(format!("Failed to create southward_devices_total: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(devices_total.clone()),
+            "southward_devices_total",
+        );
+
+        let data_points_total = IntGauge::new(
+            "southward_data_points_total",
+            "Total number of data points across all devices across all southward channels.",
+        )
+        .map_err(|e| NGError::from(format!("Failed to create southward_data_points_total: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(data_points_total.clone()),
+            "southward_data_points_total",
         );
 
         let channel_connected = IntGaugeVec::new(
@@ -330,6 +354,8 @@ impl SouthwardMetricsHub {
         Ok(Self {
             channels_total,
             channels_connected,
+            devices_total,
+            data_points_total,
             total_channels: AtomicU64::new(0),
             connected_channels: AtomicU64::new(0),
             total_devices: AtomicU64::new(0),
@@ -403,6 +429,7 @@ impl SouthwardMetricsHub {
     #[inline]
     pub(crate) fn set_total_devices(&self, value: u64) {
         self.total_devices.store(value, Ordering::Relaxed);
+        self.devices_total.set(value as i64);
         self.touch_manager_snapshot();
     }
 
@@ -417,6 +444,7 @@ impl SouthwardMetricsHub {
     #[inline]
     pub(crate) fn set_total_data_points(&self, value: u64) {
         self.total_data_points.store(value, Ordering::Relaxed);
+        self.data_points_total.set(value as i64);
         self.touch_manager_snapshot();
     }
 

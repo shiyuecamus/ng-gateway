@@ -84,7 +84,7 @@ data:
             { "expr": "ng_gateway_southward_channels_total", "legendFormat": "total" },
             { "expr": "ng_gateway_southward_channels_connected", "legendFormat": "connected" }
           ],
-          "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 }
+          "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 }
         },
         {
           "type": "stat",
@@ -94,7 +94,25 @@ data:
             { "expr": "ng_gateway_northward_apps_total", "legendFormat": "total" },
             { "expr": "ng_gateway_northward_apps_active", "legendFormat": "active" }
           ],
-          "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 }
+          "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 }
+        },
+        {
+          "type": "stat",
+          "title": "Devices total",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_southward_devices_total", "legendFormat": "total" }
+          ],
+          "gridPos": { "x": 12, "y": 0, "w": 6, "h": 6 }
+        },
+        {
+          "type": "stat",
+          "title": "Data points total",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_southward_data_points_total", "legendFormat": "total" }
+          ],
+          "gridPos": { "x": 18, "y": 0, "w": 6, "h": 6 }
         },
         {
           "type": "stat",
@@ -103,7 +121,7 @@ data:
           "targets": [
             { "expr": "ng_gateway_collector_active_tasks", "legendFormat": "active" }
           ],
-          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 }
+          "gridPos": { "x": 0, "y": 34, "w": 8, "h": 6 }
         },
         {
           "type": "timeseries",

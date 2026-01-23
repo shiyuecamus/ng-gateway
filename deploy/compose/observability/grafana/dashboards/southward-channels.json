@@ -30,6 +30,58 @@
   },
   "panels": [
     {
+      "type": "stat",
+      "title": "Southward channels",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ng_gateway_southward_channels_total",
+          "legendFormat": "total"
+        },
+        {
+          "expr": "ng_gateway_southward_channels_connected",
+          "legendFormat": "connected"
+        }
+      ],
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 }
+    },
+    {
+      "type": "stat",
+      "title": "Devices total",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ng_gateway_southward_devices_total",
+          "legendFormat": "total"
+        }
+      ],
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 }
+    },
+    {
+      "type": "stat",
+      "title": "Data points total",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ng_gateway_southward_data_points_total",
+          "legendFormat": "total"
+        }
+      ],
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 6 }
+    },
+    {
+      "type": "stat",
+      "title": "Reconnect rate (/min) total",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(ng_gateway_southward_channel_reconnect_total[5m])) * 60",
+          "legendFormat": "reconnect/min"
+        }
+      ],
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 6 }
+    },
+    {
       "type": "timeseries",
       "title": "Connected (0/1)",
       "datasource": "Prometheus",
@@ -53,7 +105,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 }
     },
     {
       "type": "timeseries",
@@ -79,7 +131,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 8 }
     },
     {
       "type": "timeseries",
@@ -105,7 +157,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 }
     },
     {
       "type": "timeseries",
@@ -131,7 +183,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 }
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 }
     },
     {
       "type": "timeseries",
@@ -157,7 +209,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 }
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 8 }
     }
   ]
 }

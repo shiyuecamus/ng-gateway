@@ -20,7 +20,7 @@ use ng_gateway_core::gateway::NGGateway;
 use ng_gateway_error::web::WebError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::time::{interval, Duration, MissedTickBehavior};
+use tokio::time::{interval_at, Duration, Instant, MissedTickBehavior};
 use tracing::{debug, error, instrument, warn};
 
 use crate::AppState;
@@ -126,7 +126,6 @@ enum MetricsServerMessage {
 struct Subscription {
     scope: MetricsScope,
     id: Option<i32>,
-    interval_ms: u64,
 }
 
 /// Handle WebSocket upgrades for `/api/ws/metrics`.
@@ -165,17 +164,19 @@ async fn metrics_ws_loop(
         })?;
 
     let mut subscription: Option<Subscription> = None;
-    let mut ticker = interval(Duration::from_millis(1000));
+    // IMPORTANT: `tokio::time::interval` ticks immediately on creation.
+    // Use `interval_at(now + interval)` to ensure updates are truly periodic.
+    let mut current_interval_ms: u64 = 1000;
+    let mut ticker = interval_at(
+        Instant::now() + Duration::from_millis(current_interval_ms),
+        Duration::from_millis(current_interval_ms),
+    );
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
                 let Some(sub) = subscription.clone() else { continue; };
-                // Enforce server-side bounds to protect from overly aggressive clients.
-                let interval_ms = sub.interval_ms.clamp(200, 5_000);
-                ticker = interval(Duration::from_millis(interval_ms));
-                ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
                 let ts = chrono::Utc::now().timestamp_millis();
                 match build_scope_snapshot(&gateway, sub.scope, sub.id).await {
@@ -228,7 +229,8 @@ async fn metrics_ws_loop(
                     WsMessage::Text(text) => {
                         match serde_json::from_str::<MetricsClientMessage>(&text) {
                             Ok(MetricsClientMessage::Subscribe { request_id, scope, id, interval_ms }) => {
-                                let interval_ms = interval_ms.unwrap_or(1000);
+                                // Enforce server-side bounds to protect from overly aggressive clients.
+                                let interval_ms = interval_ms.unwrap_or(1000).clamp(200, 5_000);
 
                                 // Validate scope + id pairing.
                                 if scope.requires_id() && id.is_none() {
@@ -250,8 +252,17 @@ async fn metrics_ws_loop(
                                         subscription = Some(Subscription {
                                             scope,
                                             id,
-                                            interval_ms,
                                         });
+                                        // Reconfigure periodic ticker ONLY when subscription changes.
+                                        // Use `interval_at` to avoid immediate tick burst.
+                                        if interval_ms != current_interval_ms {
+                                            current_interval_ms = interval_ms;
+                                        }
+                                        ticker = interval_at(
+                                            Instant::now() + Duration::from_millis(current_interval_ms),
+                                            Duration::from_millis(current_interval_ms),
+                                        );
+                                        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
                                         let ack = MetricsServerMessage::Subscribed {
                                             request_id: request_id.clone(),

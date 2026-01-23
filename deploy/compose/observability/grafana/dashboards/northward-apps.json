@@ -30,6 +30,34 @@
   },
   "panels": [
     {
+      "type": "stat",
+      "title": "Northward apps",
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "ng_gateway_northward_apps_total", "legendFormat": "total" },
+        { "expr": "ng_gateway_northward_apps_active", "legendFormat": "active" }
+      ],
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 }
+    },
+    {
+      "type": "stat",
+      "title": "Northward apps connected",
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(ng_gateway_northward_app_connected)", "legendFormat": "connected" }
+      ],
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 }
+    },
+    {
+      "type": "stat",
+      "title": "Northward reconnect rate (/min) total",
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(rate(ng_gateway_northward_app_reconnect_total[5m])) * 60", "legendFormat": "reconnect/min" }
+      ],
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 }
+    },
+    {
       "type": "timeseries",
       "title": "Connected (0/1)",
       "datasource": "Prometheus",
@@ -50,7 +78,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 }
     },
     {
       "type": "timeseries",
@@ -73,7 +101,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 8 }
     },
     {
       "type": "timeseries",
@@ -96,7 +124,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 }
     },
     {
       "type": "timeseries",
@@ -119,7 +147,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 }
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 }
     }
   ]
 }

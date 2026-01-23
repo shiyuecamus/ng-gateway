@@ -64,6 +64,13 @@ pub struct Collector {
 
 impl Collector {
     #[inline]
+    async fn refresh_active_tasks_metric(&self) {
+        // Best-effort: number of per-channel collection tasks currently registered.
+        let n = self.collection_tasks.read().await.len() as u64;
+        self.metrics_hub.set_collector_active_tasks(n);
+    }
+
+    #[inline]
     /// Create a new collection engine
     pub fn new(
         config: CollectorConfig,
@@ -131,9 +138,8 @@ impl Collector {
 
         info!("📊 Collection engine started: {successful} successful, {failed} failed channels");
 
-        // Update metrics
-        self.metrics_hub
-            .set_collector_active_tasks(successful as u64);
+        // Update metrics (prefer actual registered tasks, not "successful starts").
+        self.refresh_active_tasks_metric().await;
 
         if successful == 0 {
             warn!("No channels started successfully");
@@ -434,7 +440,9 @@ impl Collector {
 
         // Keep approximate semaphore metrics updated (best-effort).
         let available = semaphore.available_permits() as u64;
-        metrics_hub.set_collector_concurrency_permits(available, available);
+        let total = config.max_concurrent_collections as u64;
+        let current = total.saturating_sub(available);
+        metrics_hub.set_collector_concurrency_permits(current, available);
 
         let collection_duration_ms = (Utc::now() - start_time).num_milliseconds();
         debug!("📈 Channel [{channel_name}] collection completed: {successful} successful, {failed} failed, {timeouts} timeouts, duration in {collection_duration_ms}ms");
@@ -498,6 +506,7 @@ impl Collector {
 
         // Clear channel tokens
         self.channel_tokens.write().await.clear();
+        self.refresh_active_tasks_metric().await;
 
         Ok(())
     }
@@ -517,6 +526,7 @@ impl Collector {
             .await
             .insert(channel_id, channel_token);
         self.start_channel_collection(channel_id).await?;
+        self.refresh_active_tasks_metric().await;
         Ok(())
     }
 
@@ -534,6 +544,7 @@ impl Collector {
                 task.abort();
             }
         }
+        self.refresh_active_tasks_metric().await;
     }
 
     /// Restart channel collection

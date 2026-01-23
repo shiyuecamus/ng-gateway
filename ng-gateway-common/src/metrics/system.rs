@@ -128,26 +128,12 @@ impl SystemMetrics {
             }
         }
 
-        // Network bytes (best-effort): accumulate deltas since last refresh into counters.
-        let networks = Networks::new_with_refreshed_list();
-        let (sent, recv) = networks.iter().fold((0u64, 0u64), |acc, (_name, data)| {
-            (
-                acc.0 + data.total_transmitted(),
-                acc.1 + data.total_received(),
-            )
-        });
-
-        let delta_sent = sent.saturating_sub(state.last_net_sent);
-        let delta_recv = recv.saturating_sub(state.last_net_recv);
-        state.last_net_sent = sent;
-        state.last_net_recv = recv;
-
-        if delta_sent > 0 {
-            self.network_bytes_sent_total.inc_by(delta_sent);
-        }
-        if delta_recv > 0 {
-            self.network_bytes_received_total.inc_by(delta_recv);
-        }
+        // Network bytes counters (best-effort).
+        Self::update_network_counters(
+            &mut state,
+            &self.network_bytes_sent_total,
+            &self.network_bytes_received_total,
+        );
     }
 
     /// Snapshot system information for REST/WS consumers.
@@ -177,6 +163,13 @@ impl SystemMetrics {
         };
 
         state.sys.refresh_all();
+        // IMPORTANT: WS status snapshots rely on network byte counters too.
+        // Previously these counters were only refreshed on Prometheus scrape, so UI would see 0.
+        Self::update_network_counters(
+            &mut state,
+            &self.network_bytes_sent_total,
+            &self.network_bytes_received_total,
+        );
 
         // OS information
         let os_type = System::name().unwrap_or_else(|| "Unknown".to_string());
@@ -226,6 +219,38 @@ impl SystemMetrics {
             self.network_bytes_sent_total.get(),
             self.network_bytes_received_total.get(),
         )
+    }
+
+    /// Update process-lifetime network byte counters from sysinfo totals.
+    ///
+    /// # Notes
+    /// - Uses deltas between successive observations to maintain "since process start" counters.
+    /// - Safe to call from both scrape-time refresh and control-plane snapshots.
+    #[inline]
+    fn update_network_counters(
+        state: &mut SystemState,
+        sent_counter: &IntCounter,
+        recv_counter: &IntCounter,
+    ) {
+        let networks = Networks::new_with_refreshed_list();
+        let (sent, recv) = networks.iter().fold((0u64, 0u64), |acc, (_name, data)| {
+            (
+                acc.0 + data.total_transmitted(),
+                acc.1 + data.total_received(),
+            )
+        });
+
+        let delta_sent = sent.saturating_sub(state.last_net_sent);
+        let delta_recv = recv.saturating_sub(state.last_net_recv);
+        state.last_net_sent = sent;
+        state.last_net_recv = recv;
+
+        if delta_sent > 0 {
+            sent_counter.inc_by(delta_sent);
+        }
+        if delta_recv > 0 {
+            recv_counter.inc_by(delta_recv);
+        }
     }
 }
 

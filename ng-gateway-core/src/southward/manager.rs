@@ -2110,7 +2110,11 @@ impl NGSouthwardManager {
                 }
             },
         )
-        .await
+        .await?;
+
+        // Control-plane path: refresh aggregated counts for observability snapshots.
+        self.refresh_manager_snapshot_from_index().await;
+        Ok(())
     }
 
     /// Replace (upsert) many devices under a specific channel; revert memory on driver error.
@@ -2461,7 +2465,11 @@ impl NGSouthwardManager {
                 }
             },
         )
-        .await
+        .await?;
+
+        // Control-plane path: refresh aggregated counts (points totals) for observability snapshots.
+        self.refresh_manager_snapshot_from_index().await;
+        Ok(())
     }
 
     /// Replace (upsert) runtime points on a device by id; wait for driver and revert on failure.
@@ -2574,7 +2582,10 @@ impl NGSouthwardManager {
                 }
             },
         )
-        .await
+        .await?;
+
+        self.refresh_manager_snapshot_from_index().await;
+        Ok(())
     }
 
     /// Remove runtime points by id and wait for driver; revert in-memory on failure.
@@ -2657,7 +2668,10 @@ impl NGSouthwardManager {
                 }
             },
         )
-        .await
+        .await?;
+
+        self.refresh_manager_snapshot_from_index().await;
+        Ok(())
     }
 
     /// Add actions to a device and wait for driver; revert on failure.
