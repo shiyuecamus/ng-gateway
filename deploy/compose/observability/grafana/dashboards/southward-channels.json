@@ -1,0 +1,159 @@
+{
+  "title": "NG Gateway - Southward Channels",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "timezone": "browser",
+  "time": { "from": "now-5m", "to": "now" },
+  "tags": ["ng-gateway", "southward"],
+  "templating": {
+    "list": [
+      {
+        "name": "channel_id",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(ng_gateway_southward_channel_connected, channel_id)",
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "text": "All", "value": ".*" }
+      },
+      {
+        "name": "driver",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(ng_gateway_southward_channel_connected, driver)",
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "text": "All", "value": ".*" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Connected (0/1)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ng_gateway_southward_channel_connected{channel_id=~\"$channel_id\",driver=~\"$driver\"}",
+          "legendFormat": "{{channel_id}}/{{driver}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "State (numeric)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ng_gateway_southward_channel_state{channel_id=~\"$channel_id\",driver=~\"$driver\"}",
+          "legendFormat": "{{channel_id}}/{{driver}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconnect rate (/min)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(ng_gateway_southward_channel_reconnect_total{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m]) * 60",
+          "legendFormat": "{{channel_id}}/{{driver}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Collect cycle p95 (seconds) by result",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, channel_id, driver, result) (rate(ng_gateway_southward_collect_cycle_seconds_bucket{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m])))",
+          "legendFormat": "{{channel_id}}/{{driver}}/{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Point read rate (points/s) by result",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (channel_id, driver, result) (rate(ng_gateway_southward_point_read_total{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m]))",
+          "legendFormat": "{{channel_id}}/{{driver}}/{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 }
+    }
+  ]
+}
+

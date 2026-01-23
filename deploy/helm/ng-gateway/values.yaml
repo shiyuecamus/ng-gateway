@@ -312,16 +312,51 @@ ingress:
   #    hosts:
   #      - gateway.example.com
 
-# ServiceMonitor for Prometheus (requires Prometheus Operator)
-serviceMonitor:
+# Observability "one-click" bundle.
+# This does NOT install Prometheus/Grafana for you.
+# It only creates Kubernetes resources (ServiceMonitor/PodMonitor/PrometheusRule/Dashboard ConfigMaps)
+# that are typically consumed by Prometheus Operator + Grafana sidecar (kube-prometheus-stack).
+observability:
   enabled: false
-  interval: 30s
-  scrapeTimeout: 10s
-  labels: {}
-  annotations: {}
-  # Additional ServiceMonitor configuration
-  metricRelabelings: []
-  relabelings: []
+
+  # Prometheus Operator selectors often require a label match (kube-prometheus-stack defaults to `release=<helm release>`).
+  # Set selectorLabelValue to your kube-prometheus-stack release name, e.g. "kube-prometheus-stack" or "monitoring".
+  prometheusOperator:
+    selectorLabelKey: release
+    selectorLabelValue: "kube-prometheus-stack"
+
+  # Scraping configuration (choose ONE: ServiceMonitor or PodMonitor).
+  scrape:
+    kind: ServiceMonitor # ServiceMonitor | PodMonitor
+    interval: 5s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+    metricRelabelings: []
+    relabelings: []
+
+  # Grafana dashboards provisioning via ConfigMaps (for Grafana sidecar).
+  grafanaDashboards:
+    enabled: true
+    # Optional: create dashboard ConfigMaps in a different namespace (e.g. the Grafana namespace).
+    # Requires Helm to have RBAC permission to create ConfigMaps in that namespace.
+    namespace: ""
+    labels:
+      grafana_dashboard: "1"
+    annotations: {}
+
+  # PrometheusRule alerts (requires Prometheus Operator).
+  alerts:
+    enabled: true
+    labels: {}
+    annotations: {}
+    # Default alert thresholds (tune per deployment).
+    thresholds:
+      queueSaturationRatio: 0.8
+      dropsPerSecond: 0.1
+      blockedP95Seconds: 0.2
+      reconnectPerMinute: 10
+      publishSuccessRate: 0.95
 
 # NetworkPolicy
 networkPolicy:
@@ -331,14 +366,6 @@ networkPolicy:
     - Egress
   ingress: []
   egress: []
-
-# PodMonitor for Prometheus (requires Prometheus Operator)
-podMonitor:
-  enabled: false
-  interval: 30s
-  scrapeTimeout: 10s
-  labels: {}
-  annotations: {}
 
 # Name of the Kubernetes secret containing image pull credentials
 imagePullSecrets: []

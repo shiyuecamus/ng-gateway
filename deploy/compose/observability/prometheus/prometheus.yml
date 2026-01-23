@@ -1,0 +1,38 @@
+global:
+  # NOTE:
+  # Dashboard refresh can be 5s, but Prometheus sample resolution is limited by
+  # scrape_interval. Keep this aligned with the desired dashboard granularity.
+  # High-resolution mode (local/dev): 1s samples
+  scrape_interval: 1s
+  evaluation_interval: 1s
+  scrape_timeout: 1s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+
+  # NG Gateway (host mode)
+  #
+  # - macOS/Windows: host.docker.internal works by default.
+  # - Linux: docker-compose.observability.yaml adds extra_hosts host-gateway mapping.
+  - job_name: ng-gateway-host
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8978"]
+        labels:
+          source: host
+
+  # NG Gateway (docker mode)
+  #
+  # Enable the gateway service via compose profile "stack", and Prometheus will scrape it via docker DNS.
+  - job_name: ng-gateway-docker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gateway:5678"]
+        labels:
+          source: docker
+

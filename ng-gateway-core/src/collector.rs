@@ -2,13 +2,17 @@ use crate::NGSouthwardManager;
 
 use chrono::Utc;
 use futures::{future::join_all, StreamExt};
-use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
+use ng_gateway_common::metrics::{channel::InstrumentedSender, NGMetricsHub};
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::{core::metrics::CollectorMetrics, settings::CollectorConfig};
+use ng_gateway_models::{core::metrics::CollectorMetricsSnapshot, settings::CollectorConfig};
 use ng_gateway_sdk::{
     CollectItem, CollectionGroupKey, CollectionType, NorthwardData, RuntimeDevice, RuntimePoint,
 };
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     sync::{RwLock, Semaphore},
     task::JoinHandle,
@@ -44,10 +48,10 @@ pub struct Collector {
     config: CollectorConfig,
     /// Channel manager reference
     southward_manager: Arc<NGSouthwardManager>,
+    /// Metrics hub (single source of truth).
+    metrics_hub: Arc<NGMetricsHub>,
     /// Collection tasks by channel ID
     collection_tasks: Arc<RwLock<HashMap<i32, JoinHandle<()>>>>,
-    /// Engine metrics
-    metrics: Arc<RwLock<CollectorMetrics>>,
     /// Master cancellation token
     master_token: CancellationToken,
     /// Channel-specific cancellation tokens
@@ -64,14 +68,15 @@ impl Collector {
     pub fn new(
         config: CollectorConfig,
         southward_manager: Arc<NGSouthwardManager>,
+        metrics_hub: Arc<NGMetricsHub>,
         data_tx: InstrumentedSender<Arc<NorthwardData>>,
         master_token: CancellationToken,
     ) -> Self {
         Self {
             config,
             southward_manager,
+            metrics_hub,
             collection_tasks: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(RwLock::new(CollectorMetrics::default())),
             master_token,
             channel_tokens: Arc::new(RwLock::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(config.max_concurrent_collections)),
@@ -127,10 +132,8 @@ impl Collector {
         info!("📊 Collection engine started: {successful} successful, {failed} failed channels");
 
         // Update metrics
-        {
-            let mut metrics = self.metrics.write().await;
-            metrics.active_tasks = successful;
-        }
+        self.metrics_hub
+            .set_collector_active_tasks(successful as u64);
 
         if successful == 0 {
             warn!("No channels started successfully");
@@ -166,7 +169,7 @@ impl Collector {
 
         let period_ms = channel.config.period().unwrap_or(10000);
         let southward_manager = Arc::clone(&self.southward_manager);
-        let metrics = Arc::clone(&self.metrics);
+        let metrics_hub = Arc::clone(&self.metrics_hub);
         let config = self.config;
         let semaphore = Arc::clone(&self.semaphore);
         let data_tx = Arc::clone(&self.data_tx);
@@ -193,7 +196,7 @@ impl Collector {
                             channel_id,
                             &channel_name,
                             &southward_manager,
-                            &metrics,
+                            &metrics_hub,
                             config,
                             &semaphore,
                             &data_tx,
@@ -222,7 +225,7 @@ impl Collector {
         channel_id: i32,
         channel_name: &str,
         southward_manager: &Arc<NGSouthwardManager>,
-        metrics: &Arc<RwLock<CollectorMetrics>>,
+        metrics_hub: &Arc<NGMetricsHub>,
         config: CollectorConfig,
         semaphore: &Arc<Semaphore>,
         data_tx: &Arc<InstrumentedSender<Arc<NorthwardData>>>,
@@ -330,6 +333,7 @@ impl Collector {
             groups.len(),
         );
         let driver = Arc::new(driver);
+        let prom = southward_manager.get_channel_metric_handles(channel_id);
 
         // Execute groups concurrently without spawning per-device tasks.
         //
@@ -343,6 +347,7 @@ impl Collector {
             .map(|group| {
                 let driver = Arc::clone(&driver);
                 let token = cancellation_token.clone();
+                let prom = prom.clone();
                 async move {
                     // Make semaphore acquire cancellable (owned permit)
                     let acquired = tokio::select! {
@@ -361,10 +366,46 @@ impl Collector {
                         }
                         result = async {
                             let group_timeout = Duration::from_millis(config.collection_timeout_ms);
-                            match timeout(group_timeout, driver.collect_data(&group.items)).await {
-                                Ok(inner) => inner.map_err(|e| NGError::DriverError(e.to_string())),
-                                Err(_) => Err(NGError::Error("Group collection timeout".to_string())),
+                            let io_start = Instant::now();
+                            let (res, is_timeout) = match timeout(group_timeout, driver.collect_data(&group.items)).await {
+                                Ok(inner) => (inner.map_err(|e| NGError::DriverError(e.to_string())), false),
+                                Err(_) => (Err(NGError::Error("Group collection timeout".to_string())), true),
+                            };
+
+                            let elapsed = io_start.elapsed();
+                            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+                            let elapsed_seconds = elapsed.as_secs_f64();
+                            let points_read = group
+                                .items
+                                .iter()
+                                .map(|(_dev, pts)| pts.len() as u64)
+                                .sum::<u64>();
+
+                            // Southward per-channel I/O metrics (success/fail).
+                            if let Some(h) = &prom {
+                                if res.is_ok() {
+                                    h.record_io_success(elapsed_ns, elapsed_seconds);
+                                    h.record_collect_success(points_read, elapsed_seconds);
+                                } else {
+                                    h.record_io_failed(elapsed_ns, elapsed_seconds);
+                                    if is_timeout {
+                                        h.record_collect_timeout(points_read, elapsed_seconds);
+                                    } else {
+                                        h.record_collect_fail(points_read, elapsed_seconds);
+                                    }
+                                }
                             }
+
+                            // Collector cycle metrics (success/fail/timeout).
+                            if res.is_ok() {
+                                metrics_hub.record_collector_cycle_success(elapsed_ns, elapsed_seconds);
+                            } else if is_timeout {
+                                metrics_hub.record_collector_cycle_timeout(elapsed_ns, elapsed_seconds);
+                            } else {
+                                metrics_hub.record_collector_cycle_fail(elapsed_ns, elapsed_seconds);
+                            }
+
+                            res
                         } => result,
                     }
                 }
@@ -391,21 +432,12 @@ impl Collector {
             }
         }
 
-        // Update collection metrics
-        let collection_duration = Utc::now() - start_time;
+        // Keep approximate semaphore metrics updated (best-effort).
+        let available = semaphore.available_permits() as u64;
+        metrics_hub.set_collector_concurrency_permits(available, available);
 
-        // Update collector metrics
-        Self::update_metrics(
-            metrics,
-            successful,
-            failed,
-            timeouts,
-            collection_duration,
-            semaphore,
-        )
-        .await;
-
-        debug!("📈 Channel [{channel_name}] collection completed: {successful} successful, {failed} failed, {timeouts} timeouts, duration in {collection_duration}ms");
+        let collection_duration_ms = (Utc::now() - start_time).num_milliseconds();
+        debug!("📈 Channel [{channel_name}] collection completed: {successful} successful, {failed} failed, {timeouts} timeouts, duration in {collection_duration_ms}ms");
 
         Ok(())
     }
@@ -421,39 +453,6 @@ impl Collector {
                 error!(error=%e, "Failed to send item to northward system");
             }
         }
-    }
-
-    /// Update collector metrics
-    async fn update_metrics(
-        metrics: &Arc<RwLock<CollectorMetrics>>,
-        successful: usize,
-        failed: usize,
-        timeouts: usize,
-        duration: chrono::Duration,
-        semaphore: &Arc<Semaphore>,
-    ) {
-        let mut metrics_guard = metrics.write().await;
-
-        let total_operations = (successful + failed + timeouts) as u64;
-        metrics_guard.total_collections += total_operations;
-        metrics_guard.successful_collections += successful as u64;
-        metrics_guard.failed_collections += failed as u64;
-        metrics_guard.timeout_collections += timeouts as u64;
-
-        // Update average collection time
-        let total_collections = metrics_guard.total_collections as f64;
-        if total_collections > 0.0 {
-            let current_avg = metrics_guard.average_collection_time_ms;
-            let new_time = duration.num_milliseconds() as f64;
-            metrics_guard.average_collection_time_ms =
-                (current_avg * (total_collections - total_operations as f64) + new_time)
-                    / total_collections;
-        }
-
-        // Update semaphore metrics (approximate with available permits)
-        let available = semaphore.available_permits();
-        metrics_guard.current_permits = available;
-        metrics_guard.available_permits = available;
     }
 
     #[instrument(name = "collection-engine-stop", skip_all)]
@@ -505,14 +504,8 @@ impl Collector {
 
     #[inline]
     /// Get current engine metrics
-    pub async fn get_metrics(&self) -> CollectorMetrics {
-        self.metrics.read().await.clone()
-    }
-
-    #[inline]
-    /// Reset engine metrics
-    pub async fn reset_metrics(&self) {
-        *self.metrics.write().await = CollectorMetrics::default();
+    pub async fn get_snapshot(&self) -> CollectorMetricsSnapshot {
+        self.metrics_hub.snapshot_collector()
     }
 
     #[inline]

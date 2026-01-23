@@ -1,0 +1,80 @@
+{{- if and .Values.gateway.enabled .Values.observability.enabled .Values.observability.alerts.enabled }}
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-prometheusrule
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+    {{- $k := .Values.observability.prometheusOperator.selectorLabelKey }}
+    {{- $v := .Values.observability.prometheusOperator.selectorLabelValue }}
+    {{- if and $k $v (not (hasKey (.Values.observability.alerts.labels | default dict) $k)) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+    {{- with .Values.observability.alerts.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.alerts.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: ng-gateway.rules
+      rules:
+        - alert: NGGatewayQueueSaturation
+          expr: |
+            (ng_gateway_queue_depth / clamp_min(ng_gateway_queue_capacity, 1)) > {{ .Values.observability.alerts.thresholds.queueSaturationRatio }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Queue saturation detected"
+            description: 'Queue {{ "{{" }} $labels.queue {{ "}}" }} saturation ratio is above threshold for 5m.'
+
+        - alert: NGGatewayQueueDropsDetected
+          expr: |
+            sum by (queue, reason) (rate(ng_gateway_queue_dropped_total[5m])) > {{ .Values.observability.alerts.thresholds.dropsPerSecond }}
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Queue drops detected"
+            description: 'Queue {{ "{{" }} $labels.queue {{ "}}" }} has drops (reason={{ "{{" }} $labels.reason {{ "}}" }}).'
+
+        - alert: NGGatewayQueueBlockedTimeSpike
+          expr: |
+            histogram_quantile(0.95, sum by (le, queue) (rate(ng_gateway_queue_blocked_seconds_bucket[5m]))) > {{ .Values.observability.alerts.thresholds.blockedP95Seconds }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Queue blocked time spike"
+            description: 'Queue {{ "{{" }} $labels.queue {{ "}}" }} p95 blocked time is above threshold.'
+
+        - alert: NGGatewaySouthwardReconnectStorm
+          expr: |
+            rate(ng_gateway_southward_channel_reconnect_total[5m]) * 60 > {{ .Values.observability.alerts.thresholds.reconnectPerMinute }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Southward reconnect storm"
+            description: 'Channel {{ "{{" }} $labels.channel_id {{ "}}" }} (driver={{ "{{" }} $labels.driver {{ "}}" }}) reconnect rate is high.'
+
+        - alert: NGGatewayNorthwardPublishSuccessRateLow
+          expr: |
+            (
+              sum by (app_id, plugin_id) (rate(ng_gateway_northward_messages_total{direction="uplink",result="success"}[5m]))
+              /
+              clamp_min(sum by (app_id, plugin_id) (rate(ng_gateway_northward_messages_total{direction="uplink",result=~"success|fail"}[5m])), 1e-9)
+            ) < {{ .Values.observability.alerts.thresholds.publishSuccessRate }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Northward publish success rate low"
+            description: 'App {{ "{{" }} $labels.app_id {{ "}}" }}/{{ "{{" }} $labels.plugin_id {{ "}}" }} uplink success rate is below threshold.'
+{{- end }}
+{{- end }}
+

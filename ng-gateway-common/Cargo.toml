@@ -16,6 +16,8 @@ term_size = "0.3.2"
 workspace = true
 [dependencies.ng-gateway-models]
 workspace = true
+[dependencies.ng-gateway-sdk]
+workspace = true
 [dependencies.ng-gateway-macros]
 workspace = true
 [dependencies.ng-gateway-utils]

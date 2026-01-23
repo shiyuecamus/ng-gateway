@@ -20,12 +20,16 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
 use ng_gateway_common::{
-    instrumented_mpsc::{InstrumentedReceiver, InstrumentedSender},
+    metrics::{
+        channel::{bounded, InstrumentedReceiver, InstrumentedSender},
+        control::ControlResult,
+        NGMetricsHub,
+    },
     NGAppContext,
 };
 use ng_gateway_error::{init::InitContextError, storage::StorageError, NGError, NGResult};
 use ng_gateway_models::{
-    core::metrics::{GatewayMetrics, GatewayStatus, SystemInfo},
+    core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
         ChangeAppStatus, ChangeChannelStatus, ChangeDeviceStatus, NewAction, NewApp, NewAppSub,
         NewChannel, NewDevice, NewPoint, UpdateAction, UpdateApp, UpdateAppSub, UpdateChannel,
@@ -39,6 +43,7 @@ use ng_gateway_models::{
         core::GatewayState,
     },
     settings::Settings,
+    web::PrometheusTextPayload,
     ActionRuntimeCmd, AppRuntimeCmd, AppSubRuntimeCmd, ChannelRuntimeCmd, DbManager,
     DeviceRuntimeCmd, DriverRuntimeCmd, Gateway, NorthwardManager, PluginRuntimeCmd,
     PointRuntimeCmd, RealtimeMonitorHub, SouthwardManager,
@@ -59,11 +64,10 @@ use std::{
     sync::Arc,
     time::{self, Duration, Instant},
 };
-use sysinfo::{Disks, System};
 use tokio::{
     fs,
     sync::{RwLock, Semaphore},
-    time::{interval, sleep, timeout},
+    time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
@@ -101,6 +105,12 @@ impl WriteSerializers {
 #[allow(unused)]
 /// Next-generation gateway implementation with high-performance architecture
 pub struct NGGateway {
+    /// Global metrics hub (single source of truth) owned by the gateway instance.
+    ///
+    /// # Notes
+    /// This is intentionally **not** a global singleton. The gateway owns it and
+    /// passes it explicitly to subsystems that need to register or update metrics.
+    metrics_hub: Arc<NGMetricsHub>,
     /// Driver registry and loader
     driver_registry: DriverRegistry,
     driver_loader: DriverLoader,
@@ -123,9 +133,6 @@ pub struct NGGateway {
     /// Gateway state management
     state: Arc<RwLock<GatewayState>>,
 
-    /// Performance metrics
-    metrics: Arc<RwLock<GatewayMetrics>>,
-
     /// Data batch channel (bounded, single consumer)
     data_tx: DataSender,
     /// Data batch receiver (bounded, single consumer, taken on forwarding start)
@@ -141,8 +148,6 @@ pub struct NGGateway {
 
     /// Forwarding task handle for graceful shutdown
     forwarding_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// Metrics task handle for graceful shutdown
-    metrics_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Northward events task handle for graceful shutdown
     northward_events_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Cancellation token for tasks
@@ -164,29 +169,34 @@ impl Gateway for NGGateway {
 
         let (os_type, os_arch) = (current_os_type(), current_os_arch());
 
+        // Initialize the metrics hub (single source of truth) owned by this gateway instance.
+        let metrics_hub = Arc::new(NGMetricsHub::new().map_err(|e| {
+            InitContextError::Primitive(format!("Failed to initialize metrics hub: {e}"))
+        })?);
+
         // Create bounded data batch channel (single consumer) to propagate backpressure
-        let (data_tx, data_rx): (DataSender, DataReceiver) =
-            ng_gateway_common::instrumented_mpsc::channel(
-                "collector_outbound",
-                settings.general.collector.outbound_queue_capacity,
-            )
-            .map_err(|e| {
-                InitContextError::Primitive(format!(
-                    "Failed to create instrumented queue collector_outbound: {e}"
-                ))
-            })?;
+        let (data_tx, data_rx) = bounded(
+            &metrics_hub,
+            "collector_outbound",
+            settings.general.collector.outbound_queue_capacity,
+        )
+        .map_err(|e| {
+            InitContextError::Primitive(format!(
+                "Failed to create instrumented queue collector_outbound: {e}"
+            ))
+        })?;
 
         // Create bounded northward events channel (single consumer) for event routing
-        let (northward_events_tx, northward_events_rx): (EventsSender, EventsReceiver) =
-            ng_gateway_common::instrumented_mpsc::channel(
-                "northward_events",
-                settings.general.northward.queue_capacity,
-            )
-            .map_err(|e| {
-                InitContextError::Primitive(format!(
-                    "Failed to create instrumented queue northward_events: {e}"
-                ))
-            })?;
+        let (northward_events_tx, northward_events_rx): (EventsSender, EventsReceiver) = bounded(
+            &metrics_hub,
+            "northward_events",
+            settings.general.northward.queue_capacity,
+        )
+        .map_err(|e| {
+            InitContextError::Primitive(format!(
+                "Failed to create instrumented queue northward_events: {e}"
+            ))
+        })?;
 
         // Initialize driver system
         let driver_registry = Arc::new(DashMap::new());
@@ -211,7 +221,10 @@ impl Gateway for NGGateway {
         driver_loader.load_all(&id_paths).await;
 
         // Initialize southward manager
-        let southward_manager = Arc::new(NGSouthwardManager::new(Arc::clone(&driver_registry)));
+        let southward_manager = Arc::new(NGSouthwardManager::new(
+            Arc::clone(&driver_registry),
+            Arc::clone(&metrics_hub),
+        ));
 
         // Initialize channels and devices
         let southward_config = Self::load_southward_config(&conn).await.map_err(|e| {
@@ -258,6 +271,7 @@ impl Gateway for NGGateway {
         // Initialize northward manager
         let northward_manager = NGNorthwardManager::new(
             Arc::clone(&northward_registry),
+            Arc::clone(&metrics_hub),
             Arc::clone(&southward_manager),
         );
 
@@ -274,6 +288,7 @@ impl Gateway for NGGateway {
             })?;
 
         let gateway = Arc::new(Self {
+            metrics_hub: Arc::clone(&metrics_hub),
             northward_manager,
             northward_loader,
             driver_registry,
@@ -282,11 +297,11 @@ impl Gateway for NGGateway {
             collector: Arc::new(Collector::new(
                 settings.general.collector,
                 southward_manager,
+                Arc::clone(&metrics_hub),
                 data_tx.clone(),
                 CancellationToken::new(),
             )),
             state: Arc::new(RwLock::new(GatewayState::Uninitialized)),
-            metrics: Arc::new(RwLock::new(GatewayMetrics::default())),
             data_tx,
             data_rx: Arc::new(RwLock::new(Some(data_rx))),
             northward_events_tx,
@@ -294,7 +309,6 @@ impl Gateway for NGGateway {
             monitor_hub: Arc::new(NGRealtimeMonitorHub::new()),
             start_time: Some(Utc::now()),
             forwarding_task: Arc::new(RwLock::new(None)),
-            metrics_task: Arc::new(RwLock::new(None)),
             northward_events_task: Arc::new(RwLock::new(None)),
             shutdown_token: CancellationToken::new(),
         });
@@ -324,11 +338,6 @@ impl Gateway for NGGateway {
                     "Failed to start northward event processor: {e}"
                 ))
             })?;
-
-        // Start metrics collection
-        gateway.start_metrics_collection().await.map_err(|e| {
-            InitContextError::Primitive(format!("Failed to start metrics collection: {e}"))
-        })?;
 
         *gateway.state.write().await = GatewayState::Running;
 
@@ -367,15 +376,6 @@ impl Gateway for NGGateway {
                 }
             }
         }
-        if let Some(handle) = self.metrics_task.write().await.take() {
-            let mut handle = handle;
-            tokio::select! {
-                _ = &mut handle => {}
-                _ = sleep(time::Duration::from_secs(2)) => {
-                    handle.abort();
-                }
-            }
-        }
         if let Some(handle) = self.northward_events_task.write().await.take() {
             let mut handle = handle;
             tokio::select! {
@@ -405,6 +405,10 @@ impl Gateway for NGGateway {
 
         info!("✅ NGGateway stopped successfully");
         Ok(())
+    }
+
+    fn export_prometheus_metrics(&self) -> NGResult<PrometheusTextPayload> {
+        self.metrics_hub.gather_prometheus_text()
     }
 
     #[inline]
@@ -1224,6 +1228,16 @@ impl AppSubRuntimeCmd for NGGateway {
 }
 
 impl NGGateway {
+    /// Get a reference to the gateway-owned metrics hub.
+    ///
+    /// # Notes
+    /// - This is the **single source of truth** for Prometheus metrics in this process.
+    /// - This intentionally avoids a global singleton; the gateway owns the hub.
+    #[inline]
+    pub fn metrics_hub(&self) -> &NGMetricsHub {
+        &self.metrics_hub
+    }
+
     async fn load_northward_config(
         conn: &DatabaseConnection,
     ) -> NGResult<Vec<(AppModel, Option<AppSubModel>)>> {
@@ -1356,6 +1370,7 @@ impl NGGateway {
 
         let northward_manager = Arc::clone(&self.northward_manager);
         let southward_manager = Arc::clone(&self.southward_manager);
+        let metrics_hub = Arc::clone(&self.metrics_hub);
         let write_serializers = Arc::new(WriteSerializers::default());
         let token = self.shutdown_token.clone();
 
@@ -1377,6 +1392,7 @@ impl NGGateway {
                                     event,
                                     &northward_manager,
                                     &southward_manager,
+                                    &metrics_hub,
                                     &write_serializers,
                                 ).await;
                             }
@@ -1418,6 +1434,7 @@ impl NGGateway {
         event: NorthwardEvent,
         northward_manager: &Arc<NGNorthwardManager>,
         southward_manager: &Arc<NGSouthwardManager>,
+        metrics_hub: &Arc<NGMetricsHub>,
         write_serializers: &Arc<WriteSerializers>,
     ) {
         match event {
@@ -1461,12 +1478,14 @@ impl NGGateway {
                 let northward_manager = Arc::clone(northward_manager);
                 let southward_manager = Arc::clone(southward_manager);
                 let write_serializers = Arc::clone(write_serializers);
+                let metrics_hub = Arc::clone(metrics_hub);
                 tokio::spawn(async move {
                     Self::handle_write_point(
                         app_id,
                         req,
                         &northward_manager,
                         &southward_manager,
+                        &metrics_hub,
                         &write_serializers,
                     )
                     .await;
@@ -1492,6 +1511,7 @@ impl NGGateway {
         req: WritePoint,
         northward_manager: &Arc<NGNorthwardManager>,
         southward_manager: &Arc<NGSouthwardManager>,
+        metrics_hub: &Arc<NGMetricsHub>,
         write_serializers: &Arc<WriteSerializers>,
     ) {
         // Single lookup for both meta + runtime point (hot-path optimization).
@@ -1512,6 +1532,7 @@ impl NGGateway {
 
         // From here, we can always include device_id in response.
         let device_id = meta.device_id;
+        let channel_id = meta.channel_id;
 
         // Access mode validation
         if !matches!(meta.access_mode, AccessMode::Write | AccessMode::ReadWrite) {
@@ -1637,13 +1658,28 @@ impl NGGateway {
         // Serialize writes per channel.
         let sem = write_serializers.semaphore_for(meta.channel_id);
         let start = Instant::now();
+        let control_driver = southward_manager
+            .snapshot_channel_driver_id(meta.channel_id)
+            .unwrap_or_else(|| "unknown".to_string());
+        let control = metrics_hub
+            .register_control_channel_metrics(meta.channel_id, control_driver.clone())
+            .ok();
         let permit = match timeout_ms {
             Some(ms) => {
                 let total = Duration::from_millis(ms);
                 match timeout(total, sem.clone().acquire_owned()).await {
-                    Ok(Ok(p)) => Some((p, total)),
+                    Ok(Ok(p)) => {
+                        if let Some(h) = &control {
+                            h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
+                        }
+                        Some((p, total))
+                    }
                     Ok(Err(_)) => None,
                     Err(_) => {
+                        if let Some(h) = &control {
+                            h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
+                            h.inc_write_request(ControlResult::Timeout);
+                        }
                         let resp = WritePointResponse::failed(
                             request_id.clone(),
                             point_id,
@@ -1660,12 +1696,21 @@ impl NGGateway {
                 }
             }
             None => match sem.clone().acquire_owned().await {
-                Ok(p) => Some((p, Duration::from_millis(0))),
+                Ok(p) => {
+                    if let Some(h) = &control {
+                        h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
+                    }
+                    Some((p, Duration::from_millis(0)))
+                }
                 Err(_) => None,
             },
         };
 
         let Some((permit, total_timeout)) = permit else {
+            if let Some(h) = &control {
+                h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
+                h.inc_write_request(ControlResult::Fail);
+            }
             let resp = WritePointResponse::failed(
                 request_id.clone(),
                 point_id,
@@ -1716,9 +1761,31 @@ impl NGGateway {
         drop(device);
 
         // Execute driver write (still serialized by permit).
+        let prom = southward_manager.get_channel_metric_handles(channel_id);
+        let io_start = Instant::now();
         let write_res = driver
             .write_point(device_cfg, point, wire_value, remaining_timeout_ms)
             .await;
+        if let Some(h) = &prom {
+            let elapsed = io_start.elapsed();
+            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+            let elapsed_seconds = elapsed.as_secs_f64();
+            if write_res.is_ok() {
+                h.record_io_success(elapsed_ns, elapsed_seconds);
+            } else {
+                h.record_io_failed(elapsed_ns, elapsed_seconds);
+            }
+        }
+        if let Some(h) = &control {
+            let elapsed = io_start.elapsed().as_secs_f64();
+            if write_res.is_ok() {
+                h.inc_write_request(ControlResult::Success);
+                h.observe_write_execute_seconds(ControlResult::Success, elapsed);
+            } else {
+                h.inc_write_request(ControlResult::Fail);
+                h.observe_write_execute_seconds(ControlResult::Fail, elapsed);
+            }
+        }
 
         drop(permit);
 
@@ -1816,140 +1883,20 @@ impl NGGateway {
         }
     }
 
-    /// Start metrics collection
-    async fn start_metrics_collection(&self) -> NGResult<()> {
-        let metrics = Arc::clone(&self.metrics);
-        let southward_manager = Arc::clone(&self.southward_manager);
-        let collector: Arc<Collector> = Arc::clone(&self.collector);
-
-        let token = self.shutdown_token.clone();
-        let handle = tokio::spawn(async move {
-            let mut interval = interval(std::time::Duration::from_millis(10000));
-
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let southward_manager_metrics = southward_manager.get_metrics().await;
-                        let collection_engine_metrics = collector.get_metrics().await;
-
-                        let mut metrics_guard = metrics.write().await;
-
-                        // Get data manager metrics
-                        metrics_guard.total_channels = southward_manager_metrics.total_channels;
-                        metrics_guard.connected_channels = southward_manager_metrics.connected_channels;
-                        metrics_guard.total_devices = southward_manager_metrics.total_devices;
-                        metrics_guard.active_devices = southward_manager_metrics.active_devices;
-                        metrics_guard.total_data_points = southward_manager_metrics.total_data_points;
-
-                        // Get collection engine metrics
-                        metrics_guard.total_collections = collection_engine_metrics.total_collections;
-                        metrics_guard.successful_collections =
-                            collection_engine_metrics.successful_collections;
-                        metrics_guard.failed_collections = collection_engine_metrics.failed_collections;
-                        metrics_guard.timeout_collections = collection_engine_metrics.timeout_collections;
-                        metrics_guard.average_collection_time_ms =
-                            collection_engine_metrics.average_collection_time_ms;
-                        metrics_guard.active_tasks = collection_engine_metrics.active_tasks;
-
-                        // Update timestamp
-                        metrics_guard.last_update = Some(Utc::now());
-                        drop(metrics_guard);
-                    }
-                }
-            }
-        });
-        self.metrics_task.write().await.replace(handle);
-
-        Ok(())
-    }
-
     #[inline]
     /// Get comprehensive gateway status
-    pub async fn get_status(&self) -> GatewayStatus {
+    pub async fn get_snapshot(&self) -> GatewayStatusSnapshot {
         let state = self.state.read().await.clone();
-        let metrics = self.get_updated_metrics().await;
-        let northward_metrics = self.northward_manager.get_status().await;
-        let southward_metrics = self.southward_manager.get_metrics().await;
-        let collector_metrics = self.collector.get_metrics().await;
-        let system_info = Self::get_system_info();
+        let uptime = self
+            .start_time
+            .map(|t| Utc::now() - t)
+            .unwrap_or_else(chrono::Duration::zero);
 
-        GatewayStatus {
+        self.metrics_hub.build_gateway_snapshot(
             state,
-            metrics,
-            northward_metrics,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            southward_metrics,
-            collector_metrics,
-            system_info,
-        }
-    }
-
-    /// Get real-time system information
-    fn get_system_info() -> SystemInfo {
-        let mut sys = System::new_all();
-        sys.refresh_all();
-
-        // Get OS information
-        let os_type = System::name().unwrap_or_else(|| "Unknown".to_string());
-        let os_arch = System::cpu_arch();
-        let hostname = System::host_name();
-
-        // Get CPU information
-        let cpu_cores = sys.cpus().len();
-        let cpu_usage_percent = sys.global_cpu_usage() as f64;
-
-        // Get memory information
-        let total_memory = sys.total_memory();
-        let used_memory = sys.used_memory();
-        let memory_usage_percent = if total_memory > 0 {
-            (used_memory as f64 / total_memory as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        // Get disk information
-        let disks = Disks::new_with_refreshed_list();
-        let (total_disk, used_disk) = disks.list().iter().fold((0u64, 0u64), |acc, disk| {
-            let total = disk.total_space();
-            let available = disk.available_space();
-            let used = total.saturating_sub(available);
-            (acc.0 + total, acc.1 + used)
-        });
-        let disk_usage_percent = if total_disk > 0 {
-            (used_disk as f64 / total_disk as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        SystemInfo {
-            os_type,
-            os_arch,
-            hostname,
-            cpu_cores,
-            total_memory,
-            used_memory,
-            memory_usage_percent,
-            cpu_usage_percent,
-            total_disk,
-            used_disk,
-            disk_usage_percent,
-        }
-    }
-
-    #[inline]
-    /// Get updated metrics
-    async fn get_updated_metrics(&self) -> GatewayMetrics {
-        let mut metrics = self.metrics.write().await;
-
-        // Update uptime
-        if let Some(start_time) = self.start_time {
-            metrics.uptime = Utc::now() - start_time;
-        }
-
-        metrics.clone()
+            env!("CARGO_PKG_VERSION").to_string(),
+            uptime,
+        )
     }
 
     #[inline]
@@ -2081,12 +2028,24 @@ async fn execute_action_direct(
         .map_err(|err| NGError::DriverError(err.to_string()))?;
 
     // Execute
-    device
+    let prom = southward_manager.get_channel_metric_handles(device.config.channel_id());
+    let io_start = Instant::now();
+    let res = device
         .driver
         .execute_action(Arc::clone(&device.config), runtime_action, typed_params)
         .await
-        .map(|r| r.payload.unwrap_or(serde_json::Value::Null))
-        .map_err(|e| NGError::DriverError(e.to_string()))
+        .map_err(|e| NGError::DriverError(e.to_string()));
+    if let Some(h) = &prom {
+        let elapsed = io_start.elapsed();
+        let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        let elapsed_seconds = elapsed.as_secs_f64();
+        if res.is_ok() {
+            h.record_io_success(elapsed_ns, elapsed_seconds);
+        } else {
+            h.record_io_failed(elapsed_ns, elapsed_seconds);
+        }
+    }
+    res.map(|r| r.payload.unwrap_or(serde_json::Value::Null))
 }
 
 #[inline]

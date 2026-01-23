@@ -365,8 +365,7 @@ async fn build_scope_snapshot(
 ) -> Result<Value, ActixError> {
     match scope {
         MetricsScope::Global => {
-            let status = gateway.get_status().await;
-            let snapshot = status.get_snapshot();
+            let snapshot = gateway.get_snapshot().await;
             serde_json::to_value(&snapshot).map_err(|e| {
                 ActixError::from(WebError::InternalError(format!(
                     "Failed to serialize gateway status snapshot: {e}"
@@ -374,13 +373,14 @@ async fn build_scope_snapshot(
             })
         }
         MetricsScope::App => {
-            let app_id =
-                id.ok_or_else(|| ActixError::from(WebError::BadRequest("missing app id".into())))?;
+            let app_id = id.ok_or(ActixError::from(WebError::BadRequest(
+                "missing app id".into(),
+            )))?;
             let stats = gateway
                 .get_northward_manager()
-                .get_app_stats(app_id)
+                .get_app_snapshot(app_id)
                 .await
-                .ok_or_else(|| ActixError::from(WebError::NotFound("app not found".into())))?;
+                .ok_or(ActixError::from(WebError::NotFound("app not found".into())))?;
             serde_json::to_value(&stats).map_err(|e| {
                 ActixError::from(WebError::InternalError(format!(
                     "Failed to serialize northward app stats: {e}"
@@ -388,13 +388,15 @@ async fn build_scope_snapshot(
             })
         }
         MetricsScope::Channel => {
-            let channel_id = id.ok_or_else(|| {
-                ActixError::from(WebError::BadRequest("missing channel id".into()))
-            })?;
+            let channel_id = id.ok_or(ActixError::from(WebError::BadRequest(
+                "missing channel id".into(),
+            )))?;
             let stats = gateway
                 .get_southward_manager()
-                .get_channel_stats(channel_id)
-                .ok_or_else(|| ActixError::from(WebError::NotFound("channel not found".into())))?;
+                .get_channel_snapshot(channel_id)
+                .ok_or(ActixError::from(WebError::NotFound(
+                    "channel not found".into(),
+                )))?;
             serde_json::to_value(&stats).map_err(|e| {
                 ActixError::from(WebError::InternalError(format!(
                     "Failed to serialize southward channel stats: {e}"

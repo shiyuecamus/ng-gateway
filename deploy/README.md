@@ -37,7 +37,46 @@ deploy/
 │   └── scripts/
 │       ├── package-helm-offline.sh    # Helm 离线包（zip）
 │       └── package-push-helm.sh       # Helm Chart 打包并 push（OCI）
+├── compose/                       # docker-compose 示例（本地/离线/可观测性）
 ```
+
+---
+
+## Observability（本地 Prometheus + Grafana，一键可观测）
+
+本仓库提供一个开箱即用的可观测性栈（Prometheus + Grafana），内置 dashboards 与告警规则：
+
+- Compose 文件：`deploy/compose/docker-compose.observability.yaml`
+- 配置目录：`deploy/compose/observability/`
+  - Prometheus 配置与 rules：`observability/prometheus/`
+  - Grafana provisioning 与 dashboards：`observability/grafana/`
+
+### 启动
+
+```bash
+# 默认：拉起 Prometheus + Grafana + Gateway（同栈一键闭环）
+docker compose -f deploy/compose/docker-compose.observability.yaml up -d
+```
+
+如果你只想部署 Prometheus + Grafana，并抓取宿主机上运行的网关（host 模式）：
+
+```bash
+docker compose -f deploy/compose/docker-compose.observability.host.yaml up -d
+```
+
+### 访问
+
+- Prometheus：`http://localhost:9090`
+- Grafana：`http://localhost:3000`（默认账号：`admin/admin`）
+
+### 接入 ng-gateway 指标
+
+Prometheus 预置了两条抓取路径：
+
+- **Host 模式**：`host.docker.internal:8978/metrics`（macOS/Windows 默认可用；Linux compose 已加 `host-gateway` 映射）
+- **Docker 模式**：`gateway:5678/metrics`（使用 `docker-compose.observability.yaml` 同栈启动网关时生效）
+
+> 注意：不要同时启用 host + docker 两个网关实例，否则 Prometheus 可能会抓到两份相同指标，导致 dashboard/告警双倍统计。
 
 ---
 
@@ -198,6 +237,42 @@ helm install ng-gateway charts/*.tgz -n default --create-namespace
 ```
 
 > Helm Chart 采用 all-in-one：Ingress（如果启用）会把 `/` 路由到 gateway Service，由网关进程同时提供 UI 与 API。
+
+---
+
+## Observability（Helm / Prometheus Operator / Grafana）
+
+Helm Chart 中提供了 4 类可观测性资源（可选，通过 values 开关启用）。推荐直接使用 **一键开关**：
+
+- `observability.enabled=true`
+
+它会默认开启：
+- ServiceMonitor（推荐）
+- PrometheusRule
+- Grafana dashboards ConfigMaps
+
+并默认关闭 PodMonitor（避免与 ServiceMonitor 重复抓取）。
+
+你也可以逐项启用/关闭（手动模式）：
+
+- `templates/servicemonitor.yaml`：Prometheus Operator 的 **ServiceMonitor**
+- `templates/podmonitor.yaml`：Prometheus Operator 的 **PodMonitor**
+- `templates/prometheusrule.yaml`：Prometheus Operator 的 **PrometheusRule**
+- `templates/grafana-dashboards.yaml`：Grafana sidecar 自动导入的 **Dashboard ConfigMaps**
+
+要“开箱即用”，你通常还需要：
+
+1) 集群安装 Prometheus Operator（建议直接用 Helm 安装 `kube-prometheus-stack`）
+2) 确认 Prometheus 的 selector label 规则：kube-prometheus-stack 常见要求 `release=<kps-release>`，本 Chart 默认用 `release=kube-prometheus-stack`；如不同请改：
+   - `observability.prometheusOperator.selectorLabelValue`
+3) Grafana dashboards 的“自动导入”依赖 Grafana sidecar 的 namespace watch 策略：
+   - 要么让 sidecar watch `ALL`（或包含网关 namespace）
+   - 要么把 dashboards ConfigMap 直接创建到 Grafana namespace：
+     - `observability.grafanaDashboards.namespace=<grafana-namespace>`
+
+详细参数见：
+
+- `deploy/helm/ng-gateway/values.yaml` 中的 `observability`
 
 ---
 

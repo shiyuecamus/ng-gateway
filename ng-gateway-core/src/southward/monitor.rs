@@ -1,7 +1,7 @@
 use crate::southward::index::RuntimeIndex;
 use chrono::Utc;
 use dashmap::DashMap;
-use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
+use ng_gateway_common::metrics::{channel::InstrumentedSender, NGMetricsHub};
 use ng_gateway_sdk::{
     DeviceConnectedData, DeviceDisconnectedData, NorthwardData, SouthwardConnectionState,
 };
@@ -16,14 +16,16 @@ pub struct ChannelMonitor {
     index: Arc<RuntimeIndex>,
     tokens: Arc<DashMap<i32, CancellationToken>>,
     tasks: Arc<DashMap<i32, JoinHandle<()>>>,
+    metrics_hub: Arc<NGMetricsHub>,
 }
 
 impl ChannelMonitor {
-    pub fn new(index: Arc<RuntimeIndex>) -> Self {
+    pub fn new(index: Arc<RuntimeIndex>, metrics_hub: Arc<NGMetricsHub>) -> Self {
         Self {
             index,
             tokens: Arc::new(DashMap::new()),
             tasks: Arc::new(DashMap::new()),
+            metrics_hub,
         }
     }
 
@@ -42,9 +44,21 @@ impl ChannelMonitor {
             Some(chan) => chan.config.name().to_string(),
             None => return,
         };
+        let monitor_driver_id = match self.index.channels.get(&channel_id) {
+            Some(chan) => chan.config.driver_id().to_string(),
+            None => return,
+        };
         let monitor_data_tx = data_tx.clone();
         let device_map = Arc::clone(&self.index.channel_devices);
         let devices_table = Arc::clone(&self.index.devices);
+        let monitor_metrics_hub = Arc::clone(&self.metrics_hub);
+        let prom = match self
+            .metrics_hub
+            .register_southward_channel_metrics(channel_id, monitor_driver_id.clone())
+        {
+            Ok(h) => h,
+            Err(_) => return,
+        };
 
         let token = CancellationToken::new();
         self.tokens.insert(channel_id, token.clone());
@@ -60,6 +74,23 @@ impl ChannelMonitor {
                     if state == last_state {
                         return None;
                     }
+
+                    // Maintain manager-level connected channels count in the hub (single source of truth).
+                    let was_connected = last_state.is_connected();
+                    let is_connected = state.is_connected();
+                    if is_connected && !was_connected {
+                        monitor_metrics_hub.inc_southward_connected_channels();
+                    } else if !is_connected && was_connected {
+                        monitor_metrics_hub.dec_southward_connected_channels();
+                    }
+
+                    // Update Prometheus gauges and reconnect counter.
+                    prom.set_connected(state.is_connected());
+                    prom.set_state_value(state.as_value());
+                    if state.is_reconnecting() && !last_state.is_reconnecting() {
+                        prom.inc_reconnect();
+                    }
+
                     last_state = state.clone();
 
                     match state {

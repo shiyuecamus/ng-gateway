@@ -32,6 +32,49 @@ helm install my-gateway ./ng-gateway \
   --set gateway.service.type=NodePort
 ```
 
+## Observability（One-click：Prometheus Operator + Grafana）
+
+本 Chart 支持“一键输出可观测资源”（不负责安装 Prometheus/Grafana 本体）：
+
+- Prometheus Operator CRDs（`monitoring.coreos.com/v1`）：
+  - `ServiceMonitor`（默认启用）
+  - `PodMonitor`（默认关闭，避免重复抓取）
+  - `PrometheusRule`（默认启用）
+- Grafana sidecar dashboards：
+  - 以 `ConfigMap` 方式输出 dashboard JSON（默认启用）
+
+### 最小可用（推荐：kube-prometheus-stack）
+
+前提：集群已安装 Prometheus Operator（推荐 Helm 安装 `kube-prometheus-stack`）。
+
+1) 安装/升级 ng-gateway 并启用 observability bundle：
+
+```bash
+helm upgrade --install ng-gateway ./ng-gateway -n ng --create-namespace \
+  --set observability.enabled=true
+```
+
+2) 如果你的 `kube-prometheus-stack` Helm release 名不是默认的 `kube-prometheus-stack`，需要对齐 selector label：
+
+```bash
+helm upgrade --install ng-gateway ./ng-gateway -n ng --create-namespace \
+  --set observability.enabled=true \
+  --set observability.prometheusOperator.selectorLabelValue=<your-kps-release>
+```
+
+3) Grafana dashboards “默认是否可见”取决于 Grafana sidecar 的 namespace watch 策略：
+
+- **方案 A（推荐）**：让 kube-prometheus-stack 的 grafana sidecar watch `ALL` namespaces（或包含 `ng`）
+- **方案 B（无改监控栈）**：把 dashboards ConfigMap 直接创建到 Grafana 所在 namespace：
+
+```bash
+helm upgrade --install ng-gateway ./ng-gateway -n ng --create-namespace \
+  --set observability.enabled=true \
+  --set observability.grafanaDashboards.namespace=<grafana-namespace>
+```
+
+> 注意：方案 B 需要你的 Helm/RBAC 有权限在 `<grafana-namespace>` 创建 ConfigMap。
+
 ## Configuration
 
 The following table lists the configurable parameters and their default values.
@@ -88,8 +131,12 @@ The following table lists the configurable parameters and their default values.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `serviceMonitor.enabled` | Enable ServiceMonitor for Prometheus | `false` |
-| `podMonitor.enabled` | Enable PodMonitor for Prometheus | `false` |
+| `observability.enabled` | Enable one-click observability bundle | `false` |
+| `observability.scrape.kind` | Scrape resource kind (`ServiceMonitor` or `PodMonitor`) | `ServiceMonitor` |
+| `observability.prometheusOperator.selectorLabelKey` | Prometheus Operator selector label key | `release` |
+| `observability.prometheusOperator.selectorLabelValue` | Prometheus Operator selector label value | `kube-prometheus-stack` |
+| `observability.alerts.enabled` | Enable PrometheusRule alerts | `true` |
+| `observability.grafanaDashboards.enabled` | Enable Grafana dashboards ConfigMaps | `true` |
 
 ### Autoscaling Parameters
 

@@ -6,22 +6,22 @@
 //! - Data routing (device -> apps via SubscriptionRouter)
 //! - Topology initialization from DB models
 
-use super::runtime_api::CoreNorthwardRuntimeApi;
 use super::{
+    super::{
+        lifecycle::{start_with_policy, StartPolicy},
+        southward::manager::NGSouthwardManager,
+    },
     actor::AppActor,
     extension::AppExtensionManager,
     router::SubscriptionRouter,
+    runtime_api::CoreNorthwardRuntimeApi,
     subscription_sync::{compute_sync_plan, DeviceSyncStatus, SubscriptionSyncTracker, SyncPlan},
 };
-use crate::lifecycle::{start_with_policy, StartPolicy};
-use crate::southward::manager::NGSouthwardManager;
 use dashmap::DashMap;
-use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
+use ng_gateway_common::metrics::{channel::InstrumentedSender, NGMetricsHub};
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
-    core::metrics::{
-        AppState, NorthwardAppStats, NorthwardManagerMetrics, NorthwardManagerMetricsSnapshot,
-    },
+    core::metrics::{AppActorState, NorthwardAppStatsSnapshot, NorthwardManagerMetricsSnapshot},
     entities::prelude::{AppModel, AppSubModel},
     enums::common::Status,
     NorthwardManager,
@@ -49,8 +49,8 @@ pub struct NGNorthwardManager {
     /// Subscription router for device -> apps resolution
     router: Arc<SubscriptionRouter>,
 
-    /// Manager-level metrics
-    metrics: Arc<NorthwardManagerMetrics>,
+    /// Metrics hub (single source of truth) for creating instrumented queues/observers.
+    metrics_hub: Arc<NGMetricsHub>,
 
     /// Reference to southward manager for runtime snapshots.
     southward_manager: Arc<NGSouthwardManager>,
@@ -63,13 +63,14 @@ impl NGNorthwardManager {
     /// Create a new NorthwardManager
     pub fn new(
         plugin_registry: NorthwardRegistry,
+        metrics_hub: Arc<NGMetricsHub>,
         southward_manager: Arc<NGSouthwardManager>,
     ) -> Arc<Self> {
         Arc::new(Self {
             plugin_registry,
             app_actors: Arc::new(DashMap::new()),
             router: Arc::new(SubscriptionRouter::new()),
-            metrics: Arc::new(NorthwardManagerMetrics::default()),
+            metrics_hub,
             southward_manager,
             subscription_tracker: Arc::new(SubscriptionSyncTracker::new()),
         })
@@ -239,6 +240,7 @@ impl NGNorthwardManager {
             app.id,
             app.name.clone(),
             app.plugin_id,
+            &self.metrics_hub,
             plugin,
             events_rx,
             config,
@@ -283,7 +285,7 @@ impl NGNorthwardManager {
             if let Some(actor) = self.app_actors.get(&app_id) {
                 match actor.send_data(Arc::clone(&filtered_data)).await {
                     Ok(true) => {
-                        self.metrics.increment_data_routed();
+                        self.metrics_hub.inc_northward_data_routed();
                     }
                     Ok(false) => {
                         // Dropped due to backpressure (queue full or timeout)
@@ -291,12 +293,12 @@ impl NGNorthwardManager {
                     }
                     Err(e) => {
                         error!("Failed to send data to app {}: {}", app_id, e);
-                        self.metrics.increment_routing_errors();
+                        self.metrics_hub.inc_northward_routing_errors();
                     }
                 }
             } else {
                 warn!("App {} not found in actors (stale subscription?)", app_id);
-                self.metrics.increment_routing_errors();
+                self.metrics_hub.inc_northward_routing_errors();
             }
         }
     }
@@ -494,7 +496,7 @@ impl NGNorthwardManager {
             .map(|entry| Arc::clone(entry.value()))
             .ok_or(NGError::Error(format!("App {} not found for sync", app_id)))?;
 
-        if actor.state() != AppState::Running {
+        if actor.state() != AppActorState::Running {
             return Err(NGError::InvalidStateError(format!(
                 "App {} not running, cannot synchronize subscription",
                 app_id
@@ -757,10 +759,10 @@ impl NGNorthwardManager {
         let active = self
             .app_actors
             .iter()
-            .filter(|e| e.value().state() == AppState::Running)
+            .filter(|e| e.value().state() == AppActorState::Running)
             .count() as u64;
-        self.metrics.set_total_apps(total);
-        self.metrics.set_active_apps(active);
+        self.metrics_hub.set_northward_apps_total(total);
+        self.metrics_hub.set_northward_apps_active(active);
     }
 
     /// Get all app IDs
@@ -775,37 +777,32 @@ impl NGNorthwardManager {
 
     /// Get manager status
     pub async fn get_status(&self) -> NorthwardManagerMetricsSnapshot {
-        self.metrics.snapshot()
+        self.metrics_hub.snapshot_northward_manager()
     }
 
     /// Get app statistics by ID
-    pub async fn get_app_stats(&self, app_id: i32) -> Option<NorthwardAppStats> {
+    pub async fn get_app_snapshot(&self, app_id: i32) -> Option<NorthwardAppStatsSnapshot> {
         let actor = self.app_actors.get(&app_id)?;
         let actor = actor.value();
 
         let conn_state = actor.get_connection_state();
-        let is_connected = matches!(
-            conn_state,
-            ng_gateway_sdk::NorthwardConnectionState::Connected
-        );
 
-        Some(NorthwardAppStats {
-            app_id: actor.app_id(),
-            plugin_id: actor.plugin_id(),
-            name: actor.app_name(),
-            state: actor.state(),
-            is_connected,
-            metrics: actor.metrics.snapshot(),
-        })
+        Some(self.metrics_hub.build_northward_app_snapshot(
+            actor.app_id(),
+            actor.plugin_id(),
+            actor.app_name(),
+            actor.state(),
+            conn_state.is_connected(),
+        ))
     }
 
     /// Get all app statistics
-    pub async fn get_all_app_stats(&self) -> Vec<NorthwardAppStats> {
+    pub async fn get_all_app_snapshot(&self) -> Vec<NorthwardAppStatsSnapshot> {
         let mut stats = Vec::new();
 
         for entry in self.app_actors.iter() {
             let app_id = *entry.key();
-            if let Some(stat) = self.get_app_stats(app_id).await {
+            if let Some(stat) = self.get_app_snapshot(app_id).await {
                 stats.push(stat);
             }
         }
@@ -838,7 +835,7 @@ impl NGNorthwardManager {
             return;
         };
 
-        let metrics = Arc::clone(&self.metrics);
+        let metrics_hub = Arc::clone(&self.metrics_hub);
 
         // Spawn lightweight bridge task
         tokio::spawn(async move {
@@ -847,7 +844,7 @@ impl NGNorthwardManager {
             // Simple forwarding loop
             while let Some(event) = app_events_rx.recv().await {
                 // Update metrics
-                metrics.increment_events_received();
+                metrics_hub.inc_northward_events_received();
 
                 // Forward to global channel (with app_id tag)
                 if let Err(e) = global_events_tx.send((app_id, event)).await {

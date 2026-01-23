@@ -10,7 +10,6 @@
 //! - **Metrics & Logging**: Comprehensive observability with structured logging
 pub mod casbin;
 pub mod event;
-pub mod instrumented_mpsc;
 mod logger;
 pub mod metrics;
 

@@ -7,11 +7,14 @@
 //! - Lock-free metrics and config hot-reload
 
 use chrono::{DateTime, Utc};
-use ng_gateway_common::instrumented_mpsc::{
-    self, DropReason, InstrumentedReceiver, InstrumentedSender, QueueObserver,
+use ng_gateway_common::metrics::{
+    channel::{bounded, InstrumentedReceiver, InstrumentedSender, QueueObserver},
+    northward::NorthwardAppMetricHandles,
+    queue::DropReason,
+    NGMetricsHub,
 };
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::core::metrics::{AppState, NorthwardAppMetrics};
+use ng_gateway_models::core::metrics::{AppActorState, NorthwardAppMetricsSnapshot};
 use ng_gateway_sdk::{
     DropPolicy, NorthwardConnectionState, NorthwardData, NorthwardEvent, Plugin, PluginConfig,
     QueuePolicy,
@@ -80,8 +83,9 @@ pub struct AppActor {
     // === State (atomic) ===
     state: AtomicU8,
 
-    // === Metrics (lock-free counters) ===
-    pub metrics: Arc<NorthwardAppMetrics>,
+    // === Metrics ===
+    /// Prometheus metric handles (pre-resolved) owned by `NGMetricsHub`.
+    prom: Arc<NorthwardAppMetricHandles>,
 
     // === Buffer queue for unconnected state ===
     /// Buffer queue: (data, timestamp) pairs
@@ -119,20 +123,25 @@ impl AppActor {
         app_id: i32,
         app_name: String,
         plugin_id: i32,
+        metrics_hub: &NGMetricsHub,
         plugin: Box<dyn Plugin>,
         events_rx: mpsc::Receiver<NorthwardEvent>,
         config: Arc<dyn PluginConfig>,
         queue_policy: QueuePolicy,
         shutdown_token: CancellationToken,
     ) -> NGResult<Self> {
+        let prom = metrics_hub.register_northward_app_metrics(app_id, plugin_id)?;
+
         // Create bounded data channel (instrumented for Prometheus queue metrics).
-        let (data_tx, data_rx) = instrumented_mpsc::channel(
+        let (data_tx, data_rx) = bounded(
+            metrics_hub,
             format!("northward_app_{app_id}"),
             queue_policy.capacity as usize,
         )?;
 
         // Create buffer observer (instrumented).
         let buffer_observer = QueueObserver::new(
+            metrics_hub,
             format!("northward_app_buffer_{app_id}"),
             queue_policy.buffer_capacity as u64,
         )?;
@@ -151,12 +160,18 @@ impl AppActor {
             data_rx: Mutex::new(Some(data_rx)),
             events_rx: Mutex::new(Some(events_rx)),
             shutdown_token,
-            state: AtomicU8::new(AppState::Uninitialized as u8),
-            metrics: Arc::new(NorthwardAppMetrics::default()),
+            state: AtomicU8::new(AppActorState::Uninitialized as u8),
+            prom,
             buffer_queue: Arc::new(Mutex::new(VecDeque::new())),
             buffer_observer,
             created_at: Utc::now(),
         })
+    }
+
+    /// Get a consistent northward metrics snapshot for REST/WS.
+    #[inline]
+    pub fn metrics_snapshot(&self) -> NorthwardAppMetricsSnapshot {
+        self.prom.snapshot()
     }
 
     // === Accessors ===
@@ -177,8 +192,8 @@ impl AppActor {
     }
 
     #[inline]
-    pub fn state(&self) -> AppState {
-        AppState::from(self.state.load(Ordering::Acquire))
+    pub fn state(&self) -> AppActorState {
+        AppActorState::from(self.state.load(Ordering::Acquire))
     }
 
     #[inline]
@@ -227,7 +242,7 @@ impl AppActor {
     /// - `Err` if app is not running or channel closed
     pub async fn send_data(&self, data: Arc<NorthwardData>) -> NGResult<bool> {
         let state = self.state();
-        if state != AppState::Running {
+        if state != AppActorState::Running {
             return Err(NGError::InvalidStateError(format!(
                 "App {} is not running (state: {:?})",
                 self.app_id, state
@@ -249,7 +264,7 @@ impl AppActor {
                 app_id = self.app_id,
                 "Data dropped: plugin not connected and buffer disabled"
             );
-            self.metrics.increment_dropped();
+            self.prom.record_uplink_dropped();
             return Ok(false);
         }
 
@@ -265,7 +280,7 @@ impl AppActor {
                             capacity = self.queue_policy.capacity,
                             "Data dropped: queue full (policy: Discard)"
                         );
-                        self.metrics.increment_dropped();
+                        self.prom.record_uplink_dropped();
                         Ok(false)
                     }
                     Err(TrySendError::Closed(_)) => {
@@ -290,7 +305,7 @@ impl AppActor {
                             capacity = self.queue_policy.capacity,
                             "Data dropped: send timeout (policy: Block)"
                         );
-                        self.metrics.increment_dropped();
+                        self.prom.record_uplink_dropped();
                         Ok(false)
                     }
                     Err(SendTimeoutError::Closed(_)) => {
@@ -317,7 +332,7 @@ impl AppActor {
         // If buffer is enabled but capacity is zero, drop immediately to avoid unbounded growth.
         if self.queue_policy.buffer_capacity == 0 {
             self.buffer_observer.dropped(DropReason::BufferFull);
-            self.metrics.increment_dropped();
+            self.prom.record_uplink_dropped();
             return Ok(false);
         }
 
@@ -333,7 +348,7 @@ impl AppActor {
                 "Buffer full: dropped oldest item (FIFO)"
             );
             self.buffer_observer.dropped(DropReason::BufferFull);
-            self.metrics.increment_dropped();
+            self.prom.record_uplink_dropped();
         }
 
         // Add new data to buffer
@@ -369,7 +384,7 @@ impl AppActor {
         data_tx: &InstrumentedSender<Arc<NorthwardData>>,
         queue_policy: QueuePolicy,
         app_id: i32,
-        metrics: &Arc<NorthwardAppMetrics>,
+        prom: &Arc<NorthwardAppMetricHandles>,
         buffer_observer: &QueueObserver,
     ) -> Result<usize, NGError> {
         let mut buffer = buffer_queue.lock().unwrap();
@@ -394,7 +409,7 @@ impl AppActor {
                     // Item expired, skip it
                     debug!(app_id = app_id, "Buffered data expired, skipping");
                     buffer_observer.dropped(DropReason::Expired);
-                    metrics.increment_dropped();
+                    prom.record_uplink_dropped();
                     continue;
                 }
             }
@@ -507,7 +522,7 @@ impl AppActor {
     fn spawn_worker_task(&self) {
         let app_id = self.app_id;
         let plugin = Arc::clone(&self.plugin);
-        let metrics = Arc::clone(&self.metrics);
+        let prom = Arc::clone(&self.prom);
         let token = self.shutdown_token.clone();
 
         // Take the receiver (can only be done once)
@@ -541,7 +556,7 @@ impl AppActor {
                                         app_id = app_id,
                                         "Data skipped: plugin not connected"
                                     );
-                                    metrics.increment_dropped();
+                                    prom.record_uplink_dropped();
                                     continue;
                                 }
 
@@ -550,17 +565,17 @@ impl AppActor {
                                 // Process data through plugin
                                 match plugin.process_data(Arc::clone(&data)).await {
                                     Ok(_) => {
-                                        metrics.increment_sent();
-
-                                        // Update latency metrics
-                                        let elapsed_ns = start.elapsed().as_nanos() as u64;
-                                        metrics.update_latency(elapsed_ns);
+                                        let elapsed = start.elapsed();
+                                        prom.record_uplink_success(
+                                            elapsed.as_nanos() as u64,
+                                            elapsed.as_secs_f64(),
+                                        );
 
                                         debug!("App {} processed data successfully", app_id);
                                     }
                                     Err(e) => {
                                         error!("App {} failed to process data: {}", app_id, e);
-                                        metrics.increment_errors();
+                                        prom.record_uplink_fail(start.elapsed().as_secs_f64());
                                     }
                                 }
                             }
@@ -597,7 +612,8 @@ impl AppActor {
     /// - Fully aligned with southbound Driver + ChannelMonitor design
     pub async fn start(&self) -> NGResult<()> {
         let current_state = self.state();
-        if current_state != AppState::Uninitialized && current_state != AppState::Stopped {
+        if current_state != AppActorState::Uninitialized && current_state != AppActorState::Stopped
+        {
             return Err(NGError::InvalidStateError(format!(
                 "Cannot start app {} from state {:?}",
                 self.app_id, current_state
@@ -605,7 +621,8 @@ impl AppActor {
         }
 
         self.state
-            .store(AppState::Starting as u8, Ordering::Release);
+            .store(AppActorState::Starting as u8, Ordering::Release);
+        self.prom.set_state(AppActorState::Starting as u8 as i64);
         info!(
             "Starting app {} (plugin_id: {})",
             self.app_id, self.plugin_id
@@ -630,7 +647,9 @@ impl AppActor {
         self.spawn_connection_monitor(state_rx);
 
         // 3. Transition to Running (actual connection state tracked via monitor)
-        self.state.store(AppState::Running as u8, Ordering::Release);
+        self.state
+            .store(AppActorState::Running as u8, Ordering::Release);
+        self.prom.set_state(AppActorState::Running as u8 as i64);
         info!(
             "App {} started (connection managed by plugin supervisor)",
             self.app_id
@@ -654,7 +673,7 @@ impl AppActor {
     fn spawn_connection_monitor(&self, mut state_rx: watch::Receiver<NorthwardConnectionState>) {
         let app_id = self.app_id;
         let app_name = self.app_name.clone();
-        let metrics = Arc::clone(&self.metrics);
+        let prom = Arc::clone(&self.prom);
         let token = self.shutdown_token.clone();
         let buffer_queue = Arc::clone(&self.buffer_queue);
         let buffer_observer = self.buffer_observer.clone();
@@ -692,10 +711,20 @@ impl AppActor {
 
                         Self::log_connection_state(app_id, &app_name, &conn_state);
 
+                        // Update connected gauge on every transition.
+                        prom.set_connected(conn_state.is_connected());
+
+                        // Count reconnect transitions.
+                        if conn_state.is_reconnecting()
+                            && !last_state.is_reconnecting()
+                        {
+                            prom.inc_reconnect();
+                        }
+
                         // Handle state transitions: update metrics and flush buffer
                         match conn_state {
                             NorthwardConnectionState::Failed(_) => {
-                                metrics.increment_errors();
+                                prom.record_error_event();
                             }
                             NorthwardConnectionState::Connected if queue_policy.buffer_enabled => {
                                 // Flush buffered data when connection is established
@@ -704,7 +733,7 @@ impl AppActor {
                                     &data_tx,
                                     queue_policy,
                                     app_id,
-                                    &metrics,
+                                    &prom,
                                     &buffer_observer,
                                 ) {
                                     warn!(
@@ -760,7 +789,8 @@ impl AppActor {
     /// 3. Transition to Stopped state
     pub async fn stop(&self) {
         let current_state = self.state();
-        if current_state == AppState::Stopped || current_state == AppState::Uninitialized {
+        if current_state == AppActorState::Stopped || current_state == AppActorState::Uninitialized
+        {
             warn!(
                 "App {} already stopped (state: {:?})",
                 self.app_id, current_state
@@ -769,7 +799,8 @@ impl AppActor {
         }
 
         self.state
-            .store(AppState::Stopping as u8, Ordering::Release);
+            .store(AppActorState::Stopping as u8, Ordering::Release);
+        self.prom.set_state(AppActorState::Stopping as u8 as i64);
         info!("Stopping app {}", self.app_id);
 
         // 1. Cancel the shutdown token (stops worker and monitor tasks)
@@ -782,7 +813,9 @@ impl AppActor {
         }
 
         // 3. Transition to Stopped
-        self.state.store(AppState::Stopped as u8, Ordering::Release);
+        self.state
+            .store(AppActorState::Stopped as u8, Ordering::Release);
+        self.prom.set_state(AppActorState::Stopped as u8 as i64);
         info!("App {} stopped", self.app_id);
     }
 

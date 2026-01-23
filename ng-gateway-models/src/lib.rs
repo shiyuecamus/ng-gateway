@@ -23,6 +23,7 @@ use crate::{
     enums::common::Status,
     event::NGEvent,
     rbac::PermRule,
+    web::PrometheusTextPayload,
 };
 use ::casbin::Error as CasbinError;
 use actix_web::http::Method;
@@ -300,6 +301,14 @@ pub trait Gateway:
 
     /// Stop the gateway
     async fn stop(&self) -> NGResult<()>;
+
+    /// Export Prometheus metrics in text exposition format.
+    ///
+    /// # Notes
+    /// - This method is intentionally synchronous (CPU-only encoding).
+    /// - Implementations MUST avoid heavy blocking work here; perform lightweight
+    ///   scrape-time refresh only (system/queue, etc.).
+    fn export_prometheus_metrics(&self) -> NGResult<PrometheusTextPayload>;
 
     /// Get the southward manager for accessing channel connection states
     fn southward_manager(&self) -> Arc<dyn SouthwardManager>;

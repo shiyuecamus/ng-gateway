@@ -1,21 +1,19 @@
 //! Queue/backpressure metrics registry.
 //!
-//! This module is the backend for `instrumented_mpsc` and any other bounded-queue
+//! This module is the backend for `channel` and any other bounded-queue
 //! instrumentation in the gateway.
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use ng_gateway_error::{NGError, NGResult};
-use once_cell::sync::{Lazy, OnceCell};
 use prometheus::{
     opts, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Registry,
 };
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use tracing::warn;
-
-use super::REGISTRY;
 
 /// Drop reason for queue instrumentation.
 ///
@@ -51,8 +49,12 @@ impl DropReason {
 }
 
 #[inline]
-fn register_collector(collector: Box<dyn prometheus::core::Collector>, name: &'static str) {
-    if let Err(e) = REGISTRY.register(collector) {
+fn register_collector_into(
+    registry: &Registry,
+    collector: Box<dyn prometheus::core::Collector>,
+    name: &'static str,
+) {
+    if let Err(e) = registry.register(collector) {
         // Duplicate registration should not crash the gateway.
         warn!(metric_name = name, error = %e, "Failed to register Prometheus collector");
     }
@@ -119,206 +121,207 @@ impl QueueMetricHandles {
 #[derive(Debug)]
 pub struct QueueObserverInner {
     pub queue_name: String,
-    pub capacity: u64,
     pub depth: Arc<AtomicU64>,
     pub metrics: QueueMetricHandles,
 }
 
-static QUEUE_DEPTH: OnceCell<IntGaugeVec> = OnceCell::new();
-static QUEUE_CAPACITY: OnceCell<IntGaugeVec> = OnceCell::new();
-static QUEUE_DROPPED_TOTAL: OnceCell<IntCounterVec> = OnceCell::new();
-static QUEUE_BLOCKED_SECONDS: OnceCell<HistogramVec> = OnceCell::new();
-
-static QUEUE_REGISTRY: Lazy<DashMap<String, Arc<QueueObserverInner>>> = Lazy::new(DashMap::new);
-
-static QUEUE_METRICS_REGISTERED: Lazy<()> = Lazy::new(|| {
-    // Metrics are registered via `init_queue_metrics()` only.
-});
-
-/// Initialize and register all queue/backpressure metric vectors.
+/// Queue/backpressure metrics owned by `NGMetricsHub`.
 ///
 /// # Notes
-/// - This function is idempotent.
-/// - It returns a `NGResult<()>` instead of panicking.
-pub fn init_queue_metrics() -> NGResult<()> {
-    *QUEUE_METRICS_REGISTERED;
+/// - All metric vectors are created and registered during `new()`.
+/// - Per-queue child handles are resolved once and cached in `QueueObserverInner`.
+#[derive(Debug)]
+pub(crate) struct QueueMetricsHub {
+    depth_vec: IntGaugeVec,
+    cap_vec: IntGaugeVec,
+    drops_vec: IntCounterVec,
+    blocked_vec: HistogramVec,
+    queues: DashMap<String, Arc<QueueObserverInner>>,
+}
 
-    let _depth = QUEUE_DEPTH.get_or_try_init(|| -> NGResult<IntGaugeVec> {
-        let v = IntGaugeVec::new(
+impl QueueMetricsHub {
+    /// Create and register queue/backpressure metrics into the given registry.
+    pub(crate) fn new(registry: &Registry) -> NGResult<Self> {
+        let depth_vec = IntGaugeVec::new(
             opts!(
-                "ng_gateway_queue_depth",
+                "queue_depth",
                 "Current queue depth (best-effort, monotonic under backpressure)."
             ),
             &["queue"],
         )
-        .map_err(|e| NGError::from(format!("Failed to create ng_gateway_queue_depth: {e}")))?;
-        register_collector(Box::new(v.clone()), "ng_gateway_queue_depth");
-        Ok(v)
-    })?;
+        .map_err(|e| NGError::from(format!("Failed to create queue_depth: {e}")))?;
+        register_collector_into(registry, Box::new(depth_vec.clone()), "queue_depth");
 
-    let _cap = QUEUE_CAPACITY.get_or_try_init(|| -> NGResult<IntGaugeVec> {
-        let v = IntGaugeVec::new(
-            opts!("ng_gateway_queue_capacity", "Configured queue capacity."),
+        let cap_vec = IntGaugeVec::new(
+            opts!("queue_capacity", "Configured queue capacity."),
             &["queue"],
         )
-        .map_err(|e| NGError::from(format!("Failed to create ng_gateway_queue_capacity: {e}")))?;
-        register_collector(Box::new(v.clone()), "ng_gateway_queue_capacity");
-        Ok(v)
-    })?;
+        .map_err(|e| NGError::from(format!("Failed to create queue_capacity: {e}")))?;
+        register_collector_into(registry, Box::new(cap_vec.clone()), "queue_capacity");
 
-    let _drops = QUEUE_DROPPED_TOTAL.get_or_try_init(|| -> NGResult<IntCounterVec> {
-        let v = IntCounterVec::new(
+        let drops_vec = IntCounterVec::new(
             opts!(
-                "ng_gateway_queue_dropped_total",
+                "queue_dropped_total",
                 "Total dropped items due to backpressure or policy."
             ),
             &["queue", "reason"],
         )
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to create ng_gateway_queue_dropped_total: {e}"
-            ))
-        })?;
-        register_collector(Box::new(v.clone()), "ng_gateway_queue_dropped_total");
-        Ok(v)
-    })?;
+        .map_err(|e| NGError::from(format!("Failed to create queue_dropped_total: {e}")))?;
+        register_collector_into(registry, Box::new(drops_vec.clone()), "queue_dropped_total");
 
-    let _blocked = QUEUE_BLOCKED_SECONDS.get_or_try_init(|| -> NGResult<HistogramVec> {
-        let opts = HistogramOpts::new(
-            "ng_gateway_queue_blocked_seconds",
+        let blocked_opts = HistogramOpts::new(
+            "queue_blocked_seconds",
             "Time spent blocked waiting for queue capacity (send-side).",
         )
         .buckets(vec![
             0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0,
         ]);
-        let v = HistogramVec::new(opts, &["queue"]).map_err(|e| {
-            NGError::from(format!(
-                "Failed to create ng_gateway_queue_blocked_seconds: {e}"
-            ))
-        })?;
-        register_collector(Box::new(v.clone()), "ng_gateway_queue_blocked_seconds");
-        Ok(v)
-    })?;
+        let blocked_vec = HistogramVec::new(blocked_opts, &["queue"])
+            .map_err(|e| NGError::from(format!("Failed to create queue_blocked_seconds: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(blocked_vec.clone()),
+            "queue_blocked_seconds",
+        );
 
-    Ok(())
-}
-
-/// Register a queue into the global queue registry and return its observer.
-///
-/// # Notes
-/// - Safe to call multiple times for the same `queue_name` and will return the existing entry.
-/// - `capacity` is not changed after registration.
-pub fn register_queue(queue_name: String, capacity: u64) -> NGResult<Arc<QueueObserverInner>> {
-    init_queue_metrics()?;
-
-    if let Some(existing) = QUEUE_REGISTRY.get(&queue_name) {
-        return Ok(Arc::clone(existing.value()));
+        Ok(Self {
+            depth_vec,
+            cap_vec,
+            drops_vec,
+            blocked_vec,
+            queues: DashMap::new(),
+        })
     }
 
-    // Resolve child metrics once to avoid label lookups on hot paths.
-    let depth_vec = QUEUE_DEPTH
-        .get()
-        .ok_or_else(|| NGError::from("Queue metrics not initialized: QUEUE_DEPTH"))?;
-    let cap_vec = QUEUE_CAPACITY
-        .get()
-        .ok_or_else(|| NGError::from("Queue metrics not initialized: QUEUE_CAPACITY"))?;
-    let drops_vec = QUEUE_DROPPED_TOTAL
-        .get()
-        .ok_or_else(|| NGError::from("Queue metrics not initialized: QUEUE_DROPPED_TOTAL"))?;
-    let blocked_vec = QUEUE_BLOCKED_SECONDS
-        .get()
-        .ok_or_else(|| NGError::from("Queue metrics not initialized: QUEUE_BLOCKED_SECONDS"))?;
+    /// Register a queue and return its observer.
+    ///
+    /// # Notes
+    /// - Safe to call multiple times for the same `queue_name` and will return the existing entry.
+    /// - `capacity` is not changed after registration.
+    pub(crate) fn register_queue(
+        &self,
+        queue_name: String,
+        capacity: u64,
+    ) -> NGResult<Arc<QueueObserverInner>> {
+        // Use DashMap entry API to ensure only one observer is created per queue name,
+        // even under concurrent registration.
+        match self.queues.entry(queue_name.clone()) {
+            Entry::Occupied(existing) => Ok(Arc::clone(existing.get())),
+            Entry::Vacant(vacant) => {
+                // Resolve child metrics once to avoid label lookups on hot paths.
+                let depth = self
+                    .depth_vec
+                    .get_metric_with_label_values(&[queue_name.as_str()])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get queue depth gauge for {queue_name}: {e}"
+                        ))
+                    })?;
 
-    let depth = depth_vec
-        .get_metric_with_label_values(&[queue_name.as_str()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get queue depth gauge for {queue_name}: {e}"
-            ))
-        })?;
-    let cap_gauge = cap_vec
-        .get_metric_with_label_values(&[queue_name.as_str()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get queue capacity gauge for {queue_name}: {e}"
-            ))
-        })?;
-    cap_gauge.set(capacity as i64);
+                let cap_gauge = self
+                    .cap_vec
+                    .get_metric_with_label_values(&[queue_name.as_str()])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get queue capacity gauge for {queue_name}: {e}"
+                        ))
+                    })?;
+                cap_gauge.set(capacity as i64);
 
-    let dropped_full_total = drops_vec
-        .get_metric_with_label_values(&[queue_name.as_str(), DropReason::Full.as_label()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get dropped_full_total for {queue_name}: {e}"
-            ))
-        })?;
-    let dropped_timeout_total = drops_vec
-        .get_metric_with_label_values(&[queue_name.as_str(), DropReason::Timeout.as_label()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get dropped_timeout_total for {queue_name}: {e}"
-            ))
-        })?;
-    let dropped_closed_total = drops_vec
-        .get_metric_with_label_values(&[queue_name.as_str(), DropReason::Closed.as_label()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get dropped_closed_total for {queue_name}: {e}"
-            ))
-        })?;
-    let dropped_buffer_full_total = drops_vec
-        .get_metric_with_label_values(&[queue_name.as_str(), DropReason::BufferFull.as_label()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get dropped_buffer_full_total for {queue_name}: {e}"
-            ))
-        })?;
-    let dropped_expired_total = drops_vec
-        .get_metric_with_label_values(&[queue_name.as_str(), DropReason::Expired.as_label()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get dropped_expired_total for {queue_name}: {e}"
-            ))
-        })?;
+                let dropped_full_total = self
+                    .drops_vec
+                    .get_metric_with_label_values(&[
+                        queue_name.as_str(),
+                        DropReason::Full.as_label(),
+                    ])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get dropped_full_total for {queue_name}: {e}"
+                        ))
+                    })?;
+                let dropped_timeout_total = self
+                    .drops_vec
+                    .get_metric_with_label_values(&[
+                        queue_name.as_str(),
+                        DropReason::Timeout.as_label(),
+                    ])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get dropped_timeout_total for {queue_name}: {e}"
+                        ))
+                    })?;
+                let dropped_closed_total = self
+                    .drops_vec
+                    .get_metric_with_label_values(&[
+                        queue_name.as_str(),
+                        DropReason::Closed.as_label(),
+                    ])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get dropped_closed_total for {queue_name}: {e}"
+                        ))
+                    })?;
+                let dropped_buffer_full_total = self
+                    .drops_vec
+                    .get_metric_with_label_values(&[
+                        queue_name.as_str(),
+                        DropReason::BufferFull.as_label(),
+                    ])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get dropped_buffer_full_total for {queue_name}: {e}"
+                        ))
+                    })?;
+                let dropped_expired_total = self
+                    .drops_vec
+                    .get_metric_with_label_values(&[
+                        queue_name.as_str(),
+                        DropReason::Expired.as_label(),
+                    ])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get dropped_expired_total for {queue_name}: {e}"
+                        ))
+                    })?;
 
-    let blocked_seconds = blocked_vec
-        .get_metric_with_label_values(&[queue_name.as_str()])
-        .map_err(|e| {
-            NGError::from(format!(
-                "Failed to get blocked_seconds histogram for {queue_name}: {e}"
-            ))
-        })?;
+                let blocked_seconds = self
+                    .blocked_vec
+                    .get_metric_with_label_values(&[queue_name.as_str()])
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get blocked_seconds histogram for {queue_name}: {e}"
+                        ))
+                    })?;
 
-    let inner = Arc::new(QueueObserverInner {
-        queue_name: queue_name.clone(),
-        capacity,
-        depth: Arc::new(AtomicU64::new(0)),
-        metrics: QueueMetricHandles {
-            depth,
-            capacity: cap_gauge,
-            dropped_full_total,
-            dropped_timeout_total,
-            dropped_closed_total,
-            dropped_buffer_full_total,
-            dropped_expired_total,
-            blocked_seconds,
-        },
-    });
+                let inner = Arc::new(QueueObserverInner {
+                    queue_name: queue_name.clone(),
+                    depth: Arc::new(AtomicU64::new(0)),
+                    metrics: QueueMetricHandles {
+                        depth,
+                        capacity: cap_gauge,
+                        dropped_full_total,
+                        dropped_timeout_total,
+                        dropped_closed_total,
+                        dropped_buffer_full_total,
+                        dropped_expired_total,
+                        blocked_seconds,
+                    },
+                });
 
-    // Set capacity gauge once (if enabled).
-    inner.metrics.set_capacity(capacity as i64);
+                // Set capacity gauge once.
+                inner.metrics.set_capacity(capacity as i64);
 
-    QUEUE_REGISTRY.insert(queue_name, Arc::clone(&inner));
-    Ok(inner)
-}
+                vacant.insert(Arc::clone(&inner));
+                Ok(inner)
+            }
+        }
+    }
 
-/// Refresh all queue depth gauges from their atomic counters.
-///
-/// This should be called right before Prometheus encoding to keep scrape-time
-/// accurate without adding extra cost to hot paths.
-pub fn refresh_all_queue_depths() {
-    for entry in QUEUE_REGISTRY.iter() {
-        let depth = entry.value().depth.load(Ordering::Relaxed) as i64;
-        entry.value().metrics.set_depth(depth);
+    /// Refresh all queue depth gauges from their atomic counters (scrape-time).
+    pub(crate) fn refresh_all_queue_depths(&self) {
+        for entry in self.queues.iter() {
+            let depth = entry.value().depth.load(Ordering::Relaxed) as i64;
+            entry.value().metrics.set_depth(depth);
+        }
     }
 }

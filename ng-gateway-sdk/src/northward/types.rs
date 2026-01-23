@@ -40,6 +40,41 @@ pub enum NorthwardConnectionState {
     Failed(String),
 }
 
+impl NorthwardConnectionState {
+    #[inline]
+    pub fn is_connected(&self) -> bool {
+        matches!(self, Self::Connected)
+    }
+
+    #[inline]
+    pub fn is_disconnected(&self) -> bool {
+        matches!(self, Self::Disconnected)
+    }
+
+    #[inline]
+    pub fn is_connecting(&self) -> bool {
+        matches!(self, Self::Connecting)
+    }
+
+    #[inline]
+    pub fn is_reconnecting(&self) -> bool {
+        matches!(self, Self::Reconnecting)
+    }
+
+    #[inline]
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    #[inline]
+    pub fn failed_reason(&self) -> Option<&str> {
+        match self {
+            Self::Failed(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl serde::Serialize for NorthwardConnectionState {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

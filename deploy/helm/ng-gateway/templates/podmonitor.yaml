@@ -1,4 +1,4 @@
-{{- if and .Values.podMonitor.enabled .Values.gateway.enabled }}
+{{- if and .Values.gateway.enabled .Values.observability.enabled (eq .Values.observability.scrape.kind "PodMonitor") }}
 {{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -6,10 +6,15 @@ metadata:
   name: {{ include "ng-gateway.fullname" . }}-podmonitor
   labels:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
-    {{- with .Values.podMonitor.labels }}
+    {{- $k := .Values.observability.prometheusOperator.selectorLabelKey }}
+    {{- $v := .Values.observability.prometheusOperator.selectorLabelValue }}
+    {{- if and $k $v (not (hasKey (.Values.observability.scrape.labels | default dict) $k)) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+    {{- with .Values.observability.scrape.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.podMonitor.annotations }}
+  {{- with .Values.observability.scrape.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -19,8 +24,8 @@ spec:
       {{- include "ng-gateway.gateway.selectorLabels" . | nindent 6 }}
   podMetricsEndpoints:
     - port: http
-      interval: {{ .Values.podMonitor.interval }}
-      scrapeTimeout: {{ .Values.podMonitor.scrapeTimeout }}
+      interval: {{ .Values.observability.scrape.interval }}
+      scrapeTimeout: {{ .Values.observability.scrape.scrapeTimeout }}
       path: /metrics
 {{- end }}
 {{- end }}

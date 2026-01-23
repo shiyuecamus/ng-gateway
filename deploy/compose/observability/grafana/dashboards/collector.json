@@ -1,0 +1,92 @@
+{
+  "title": "NG Gateway - Collector",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "timezone": "browser",
+  "time": { "from": "now-5m", "to": "now" },
+  "tags": ["ng-gateway", "collector"],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Collect cycles rate (by result) (/s)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(ng_gateway_collector_cycles_total[5m]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Collect cycle p95 (seconds) by result",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, result) (rate(ng_gateway_collector_cycle_seconds_bucket[5m])))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+    },
+    {
+      "type": "stat",
+      "title": "Collector active tasks",
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "ng_gateway_collector_active_tasks", "legendFormat": "active" }],
+      "gridPos": { "x": 0, "y": 16, "w": 8, "h": 6 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Collector concurrency permits",
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "ng_gateway_collector_concurrency_permits{state=\"current\"}", "legendFormat": "current" },
+        { "expr": "ng_gateway_collector_concurrency_permits{state=\"available\"}", "legendFormat": "available" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 8, "y": 16, "w": 16, "h": 6 }
+    }
+  ]
+}
+

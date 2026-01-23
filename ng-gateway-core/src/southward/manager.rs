@@ -7,16 +7,21 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use dashmap::mapref::entry::Entry as DashEntry;
-use dashmap::{mapref::one::Ref, DashMap};
+use dashmap::{
+    mapref::{entry::Entry as DashEntry, one::Ref},
+    DashMap,
+};
 use futures::{
     future::join_all,
     stream::{self, StreamExt},
 };
-use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
+use ng_gateway_common::metrics::{
+    channel::InstrumentedSender, southward::SouthwardChannelMetricHandles, NGMetricsHub,
+    SouthwardChannelSnapshotParams,
+};
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
-    core::metrics::{ChannelMetrics, ChannelStats, DeviceMetrics, SouthwardManagerMetrics},
+    core::metrics::{ChannelStatsSnapshot, SouthwardManagerMetricsSnapshot},
     entities::prelude::{ActionModel, ChannelModel, DeviceModel, PointModel},
     SouthwardManager,
 };
@@ -35,7 +40,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{sync::Mutex, time::timeout};
+use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 /// Build a reverse-lookup key for `(channel_name, device_name, point_key)`.
@@ -143,8 +148,8 @@ pub struct ChannelInstance {
     /// Channel status
     pub status: Status,
 
-    /// Performance metrics
-    pub metrics: ChannelMetrics,
+    /// Southward per-channel metric handles (single source of truth in `NGMetricsHub`).
+    pub prom: Arc<SouthwardChannelMetricHandles>,
 
     /// Last health check result
     pub health: Option<DriverHealth>,
@@ -177,9 +182,6 @@ pub struct DeviceInstance {
     /// Last data change timestamp
     pub last_data_change: Option<DateTime<Utc>>,
 
-    /// Device metrics
-    pub metrics: DeviceMetrics,
-
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
 }
@@ -190,14 +192,14 @@ pub struct NGSouthwardManager {
     /// Aggregated runtime index (channels, devices, points, actions, mappings)
     index: Arc<RuntimeIndex>,
 
-    /// Data manager metrics
-    metrics: Arc<Mutex<SouthwardManagerMetrics>>,
-
     /// Driver registry for creating new drivers
     driver_registry: DriverRegistry,
 
     /// Channel monitor component
     monitor: ChannelMonitor,
+
+    /// Metrics hub (single source of truth).
+    metrics_hub: Arc<NGMetricsHub>,
 
     /// Device data snapshots: device_id -> DeviceDataSnapshot
     ///
@@ -213,14 +215,14 @@ pub struct NGSouthwardManager {
 impl NGSouthwardManager {
     #[inline]
     /// Create a new data manager
-    pub fn new(driver_registry: DriverRegistry) -> Self {
+    pub fn new(driver_registry: DriverRegistry, metrics_hub: Arc<NGMetricsHub>) -> Self {
         let index = Arc::new(RuntimeIndex::new());
-        let monitor = ChannelMonitor::new(Arc::clone(&index));
+        let monitor = ChannelMonitor::new(Arc::clone(&index), Arc::clone(&metrics_hub));
         Self {
             index,
-            metrics: Arc::new(Mutex::new(SouthwardManagerMetrics::default())),
             driver_registry,
             monitor,
+            metrics_hub,
             device_snapshots: Arc::new(DashMap::new()),
         }
     }
@@ -232,6 +234,22 @@ impl NGSouthwardManager {
     #[inline]
     pub(crate) fn runtime_index(&self) -> Arc<RuntimeIndex> {
         Arc::clone(&self.index)
+    }
+
+    /// Get pre-resolved per-channel metric handles for the given channel.
+    ///
+    /// # Notes
+    /// These handles are created during channel instance construction and are backed by
+    /// `NGMetricsHub` (single source of truth).
+    #[inline]
+    pub fn get_channel_metric_handles(
+        &self,
+        channel_id: i32,
+    ) -> Option<Arc<SouthwardChannelMetricHandles>> {
+        self.index
+            .channels
+            .get(&channel_id)
+            .map(|e| Arc::clone(&e.prom))
     }
 
     #[inline]
@@ -509,6 +527,9 @@ impl NGSouthwardManager {
             ));
         }
 
+        // Refresh manager-level snapshot state in the hub after topology initialization.
+        self.refresh_manager_snapshot_from_index().await;
+
         Ok(())
     }
 
@@ -724,13 +745,16 @@ impl NGSouthwardManager {
 
         let now = Utc::now();
         let status = config.status();
+        let prom = self
+            .metrics_hub
+            .register_southward_channel_metrics(config.id(), config.driver_id().to_string())?;
         Ok(ChannelInstance {
             driver,
             driver_factory,
             config,
             state: connection_state,
             status,
-            metrics: ChannelMetrics::default(),
+            prom,
             health: None,
             created_at: now,
             last_activity: now,
@@ -808,13 +832,17 @@ impl NGSouthwardManager {
         let connection_state = SouthwardConnectionState::Disconnected;
         let now = Utc::now();
         let status = runtime_channel.status();
+        let prom = self.metrics_hub.register_southward_channel_metrics(
+            config.id,
+            runtime_channel.driver_id().to_string(),
+        )?;
         Ok(ChannelInstance {
             driver,
             driver_factory,
             config: runtime_channel,
             state: connection_state,
             status,
-            metrics: ChannelMetrics::default(),
+            prom,
             health: None,
             created_at: now,
             last_activity: now,
@@ -853,7 +881,6 @@ impl NGSouthwardManager {
                 driver: Arc::clone(&channel.driver),
                 last_collection: None,
                 last_data_change: None,
-                metrics: DeviceMetrics::default(),
                 created_at: Utc::now(),
             };
 
@@ -1003,6 +1030,8 @@ impl NGSouthwardManager {
             self.start_channel(id, data_tx, StartPolicy::AsyncFireAndForget)
                 .await?;
         }
+        // Ensure hub manager snapshot baseline is up-to-date after start.
+        self.refresh_manager_snapshot_from_index().await;
         Ok(())
     }
 
@@ -1042,6 +1071,8 @@ impl NGSouthwardManager {
             // Remove channel entry itself after stopping
             self.index.channels.remove(&channel_id);
         }
+        // Ensure hub manager snapshot baseline is up-to-date after stop/remove.
+        self.refresh_manager_snapshot_from_index().await;
     }
 
     /// Rebind all devices under a channel to the channel's current driver handle
@@ -1074,6 +1105,7 @@ impl NGSouthwardManager {
         let instance = self.create_channel_instance(config, data_tx).await?;
         self.index.channels.insert(instance.config.id(), instance);
         self.rebind_channel_devices(config.id);
+        self.refresh_manager_snapshot_from_index().await;
         Ok(())
     }
 
@@ -1131,7 +1163,6 @@ impl NGSouthwardManager {
             driver: Arc::clone(&channel.driver),
             last_collection: None,
             last_data_change: None,
-            metrics: DeviceMetrics::default(),
             created_at: Utc::now(),
         };
 
@@ -1175,7 +1206,7 @@ impl NGSouthwardManager {
             .index
             .channels
             .iter()
-            .filter(|entry| entry.value().state == SouthwardConnectionState::Connected)
+            .filter(|entry| entry.value().state.is_connected())
             .map(|entry| {
                 (
                     *entry.key(),
@@ -1235,7 +1266,7 @@ impl NGSouthwardManager {
             let Some(channel) = self.index.channels.get(&channel_id) else {
                 continue;
             };
-            if channel.state != SouthwardConnectionState::Connected {
+            if !channel.state.is_connected() {
                 continue;
             }
 
@@ -1256,6 +1287,18 @@ impl NGSouthwardManager {
     /// Get channel instance by ID
     pub fn get_channel(&self, channel_id: i32) -> Option<Ref<'_, i32, ChannelInstance>> {
         self.index.channels.get(&channel_id)
+    }
+
+    /// Snapshot the driver id string for a channel (best-effort).
+    ///
+    /// # Notes
+    /// This is used by control-plane metrics to keep label cardinality bounded.
+    #[inline]
+    pub fn snapshot_channel_driver_id(&self, channel_id: i32) -> Option<String> {
+        self.index
+            .channels
+            .get(&channel_id)
+            .map(|c| c.config.driver_id().to_string())
     }
 
     #[inline]
@@ -1284,7 +1327,7 @@ impl NGSouthwardManager {
         self.index
             .channels
             .get(&channel_id)
-            .map(|entry| entry.state == SouthwardConnectionState::Connected)
+            .map(|entry| entry.state.is_connected())
             .unwrap_or(false)
     }
 
@@ -1297,7 +1340,7 @@ impl NGSouthwardManager {
             .map(|entry| {
                 entry.status == Status::Enabled
                     && entry.config.collection_type() == CollectionType::Collection
-                    && entry.state == SouthwardConnectionState::Connected
+                    && entry.state.is_connected()
             })
             .unwrap_or(false)
     }
@@ -1842,54 +1885,60 @@ impl NGSouthwardManager {
             .collect()
     }
 
-    /// Update internal metrics
-    async fn update_metrics(&self) {
-        let mut metrics = self.metrics.lock().await;
+    /// Refresh manager-level metrics from the current runtime index.
+    ///
+    /// # Notes
+    /// This is intended to be called on topology mutations (init/add/remove), not on every snapshot.
+    pub async fn refresh_manager_snapshot_from_index(&self) {
+        let total_channels = self.index.channels.len() as u64;
+        let total_devices = self.index.devices.len() as u64;
 
-        metrics.total_channels = self.index.channels.len();
-        metrics.total_devices = self.index.devices.len();
-
-        metrics.connected_channels = self
+        // Baseline connected channels by scan (best-effort). After initialization,
+        // `ChannelMonitor` maintains this value incrementally in the hub.
+        let connected_channels = self
             .index
             .channels
             .iter()
-            .filter(|entry| entry.state == SouthwardConnectionState::Connected)
-            .count();
+            .filter(|entry| entry.state.is_connected())
+            .count() as u64;
 
-        metrics.active_devices = self
+        let active_devices = self
             .index
             .devices
             .iter()
             .filter(|entry| entry.state == DeviceState::Active)
-            .count();
+            .count() as u64;
 
-        metrics.total_data_points = self
+        let total_data_points = self
             .index
             .device_points
             .iter()
-            .map(|entry| entry.value().len())
-            .sum();
+            .map(|entry| entry.value().len() as u64)
+            .sum::<u64>();
 
-        metrics.total_actions = self
+        let total_actions = self
             .index
             .device_actions
             .iter()
-            .map(|entry| entry.value().len())
-            .sum();
+            .map(|entry| entry.value().len() as u64)
+            .sum::<u64>();
 
-        metrics.average_points_per_device = if metrics.total_devices > 0 {
-            metrics.total_data_points as f64 / metrics.total_devices as f64
-        } else {
-            0.0
-        };
-
-        metrics.last_update = Some(Utc::now());
+        // Update the single source of truth in the hub (granular APIs).
+        self.metrics_hub
+            .set_southward_total_channels(total_channels);
+        self.metrics_hub
+            .set_southward_connected_channels(connected_channels);
+        self.metrics_hub.set_southward_total_devices(total_devices);
+        self.metrics_hub
+            .set_southward_active_devices(active_devices);
+        self.metrics_hub
+            .set_southward_total_data_points(total_data_points);
+        self.metrics_hub.set_southward_total_actions(total_actions);
     }
 
     /// Get manager metrics
-    pub async fn get_metrics(&self) -> SouthwardManagerMetrics {
-        self.update_metrics().await;
-        self.metrics.lock().await.clone()
+    pub async fn get_metrics(&self) -> SouthwardManagerMetricsSnapshot {
+        self.metrics_hub.snapshot_southward_manager()
     }
 
     /// Get a best-effort snapshot of a channel's runtime statistics.
@@ -1900,13 +1949,12 @@ impl NGSouthwardManager {
     /// - `driver_name` is currently populated as a stable placeholder (`driver_id`) because the
     ///   runtime layer does not guarantee a human-readable driver name without querying the DB.
     #[inline]
-    pub fn get_channel_stats(&self, channel_id: i32) -> Option<ChannelStats> {
+    pub fn get_channel_snapshot(&self, channel_id: i32) -> Option<ChannelStatsSnapshot> {
         let entry = self.index.channels.get(&channel_id)?;
         let channel_name = entry.config.name().to_string();
         let driver_name = entry.config.driver_id().to_string();
         let state = entry.state.clone();
         let health = entry.health.as_ref().map(|h| h.status);
-        let metrics = entry.metrics;
         let created_at = entry.created_at;
         let last_activity = entry.last_activity;
         drop(entry);
@@ -1918,17 +1966,19 @@ impl NGSouthwardManager {
             .map(|e| e.value().len())
             .unwrap_or(0);
 
-        Some(ChannelStats {
-            channel_id,
-            name: channel_name,
-            driver_name,
-            state,
-            health,
-            device_count,
-            metrics,
-            created_at,
-            last_activity,
-        })
+        Some(
+            self.metrics_hub
+                .build_southward_channel_snapshot(SouthwardChannelSnapshotParams {
+                    channel_id,
+                    name: channel_name,
+                    driver_name,
+                    state,
+                    health,
+                    device_count,
+                    created_at,
+                    last_activity,
+                }),
+        )
     }
 
     /// Shutdown the data manager
@@ -1949,6 +1999,9 @@ impl NGSouthwardManager {
         self.index.channels.clear();
         self.device_snapshots.clear();
         self.monitor.cancel_all();
+
+        // Reset hub manager snapshot state to zeroed baseline.
+        self.refresh_manager_snapshot_from_index().await;
 
         Ok(())
     }

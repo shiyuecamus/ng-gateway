@@ -1,4 +1,4 @@
-use ng_gateway_common::instrumented_mpsc::InstrumentedSender;
+use ng_gateway_common::metrics::channel::InstrumentedSender;
 use ng_gateway_sdk::{NorthwardData, NorthwardError, NorthwardPublisher, NorthwardResult};
 use std::sync::Arc;
 use tokio::sync::mpsc::error::TrySendError;

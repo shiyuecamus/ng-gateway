@@ -100,6 +100,43 @@ pub enum SouthwardConnectionState {
     Failed(String),
 }
 
+impl SouthwardConnectionState {
+    #[inline]
+    pub fn is_connected(&self) -> bool {
+        matches!(self, Self::Connected)
+    }
+
+    #[inline]
+    pub fn is_disconnected(&self) -> bool {
+        matches!(self, Self::Disconnected)
+    }
+
+    #[inline]
+    pub fn is_connecting(&self) -> bool {
+        matches!(self, Self::Connecting)
+    }
+    #[inline]
+    pub fn is_reconnecting(&self) -> bool {
+        matches!(self, Self::Reconnecting)
+    }
+
+    #[inline]
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    #[inline]
+    pub fn as_value(&self) -> i64 {
+        match self {
+            Self::Disconnected => 0,
+            Self::Connecting => 1,
+            Self::Connected => 2,
+            Self::Reconnecting => 3,
+            Self::Failed(_) => 4,
+        }
+    }
+}
+
 impl serde::Serialize for SouthwardConnectionState {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

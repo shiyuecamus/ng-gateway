@@ -4,8 +4,9 @@
 //! The endpoint is intentionally mounted outside the `/api` router prefix to make
 //! Kubernetes `ServiceMonitor` / `PodMonitor` configuration straightforward.
 
+use crate::AppState;
 use actix_web::{web, HttpResponse};
-use ng_gateway_common::metrics;
+use std::sync::Arc;
 use tracing::warn;
 
 /// Configure Prometheus metrics routes.
@@ -19,8 +20,8 @@ pub fn configure_metrics_routes(cfg: &mut web::ServiceConfig) {
 /// # Notes
 /// - For Phase 0, system metrics are updated right before encoding.
 /// - All other metrics registered into the global registry will be included automatically.
-async fn metrics_handler() -> HttpResponse {
-    match metrics::gather_prometheus_text() {
+async fn metrics_handler(state: web::Data<Arc<AppState>>) -> HttpResponse {
+    match state.gateway.export_prometheus_metrics() {
         Ok(payload) => HttpResponse::Ok()
             .content_type(payload.content_type)
             .body(payload.body),

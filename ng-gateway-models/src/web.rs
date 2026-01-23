@@ -11,6 +11,19 @@ pub enum ResponseCode {
     Error = 500,
 }
 
+/// Prometheus text exposition payload.
+///
+/// # Notes
+/// - This DTO is intentionally minimal and does NOT depend on the `prometheus` crate.
+/// - It is used to expose `GET /metrics` without introducing crate dependency cycles.
+#[derive(Debug, Clone)]
+pub struct PrometheusTextPayload {
+    /// HTTP content type for Prometheus text exposition format.
+    pub content_type: String,
+    /// Response body in Prometheus text exposition format.
+    pub body: Vec<u8>,
+}
+
 /// Standard response structure for all REST API endpoints
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebResponse<T> {

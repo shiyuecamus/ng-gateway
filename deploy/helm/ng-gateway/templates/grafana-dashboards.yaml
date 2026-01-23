@@ -1,0 +1,585 @@
+{{- if and .Values.gateway.enabled .Values.observability.enabled .Values.observability.grafanaDashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-grafana-dashboard-gateway-overview
+  {{- with .Values.observability.grafanaDashboards.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+    {{- with .Values.observability.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  gateway-overview.json: |-
+    {
+      "title": "NG Gateway - Overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5s",
+      "timezone": "browser",
+      "time": { "from": "now-5m", "to": "now" },
+      "tags": ["ng-gateway"],
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "text": "Prometheus", "value": "Prometheus" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "System CPU usage (%)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_system_cpu_usage_ratio * 100", "legendFormat": "system_cpu" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "System memory usage (%)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_system_memory_usage_ratio * 100", "legendFormat": "system_mem" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 12, "y": 6, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Process CPU usage (%)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_process_cpu_usage_ratio * 100", "legendFormat": "proc_cpu" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Process memory RSS (MiB)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_process_memory_rss_bytes / 1024 / 1024", "legendFormat": "proc_rss" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none", "decimals": 1, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 }
+        },
+        {
+          "type": "stat",
+          "title": "Southward channels (total/connected)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_southward_channels_total", "legendFormat": "total" },
+            { "expr": "ng_gateway_southward_channels_connected", "legendFormat": "connected" }
+          ],
+          "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 }
+        },
+        {
+          "type": "stat",
+          "title": "Northward apps (total/active)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_northward_apps_total", "legendFormat": "total" },
+            { "expr": "ng_gateway_northward_apps_active", "legendFormat": "active" }
+          ],
+          "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 }
+        },
+        {
+          "type": "stat",
+          "title": "Collector active tasks",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_collector_active_tasks", "legendFormat": "active" }
+          ],
+          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Network rate (KB/s) (sent/recv)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "rate(ng_gateway_network_bytes_sent_total[5m]) / 1024", "legendFormat": "sent_KBps" },
+            { "expr": "rate(ng_gateway_network_bytes_received_total[5m]) / 1024", "legendFormat": "recv_KBps" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none", "decimals": 1, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 22, "w": 24, "h": 6 }
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-grafana-dashboard-backpressure-queues
+  {{- with .Values.observability.grafanaDashboards.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+    {{- with .Values.observability.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  backpressure-queues.json: |-
+    {
+      "title": "NG Gateway - Backpressure & Queues",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5s",
+      "timezone": "browser",
+      "time": { "from": "now-5m", "to": "now" },
+      "tags": ["ng-gateway", "queues"],
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "text": "Prometheus", "value": "Prometheus" }
+          },
+          {
+            "name": "queue",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(ng_gateway_queue_depth, queue)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": ".*" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Queue depth",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_queue_depth{queue=~\"$queue\"}", "legendFormat": "{{ "{{" }}queue{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Queue saturation ratio",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_queue_depth{queue=~\"$queue\"} / clamp_min(ng_gateway_queue_capacity{queue=~\"$queue\"}, 1)", "legendFormat": "{{ "{{" }}queue{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Dropped rate (per reason)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "sum by (queue, reason) (rate(ng_gateway_queue_dropped_total{queue=~\"$queue\"}[5m]))", "legendFormat": "{{ "{{" }}queue{{ "}}" }}/{{ "{{" }}reason{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Blocked time p95 (seconds)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le, queue) (rate(ng_gateway_queue_blocked_seconds_bucket{queue=~\"$queue\"}[5m])))", "legendFormat": "{{ "{{" }}queue{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 }
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-grafana-dashboard-southward-channels
+  {{- with .Values.observability.grafanaDashboards.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+    {{- with .Values.observability.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  southward-channels.json: |-
+    {
+      "title": "NG Gateway - Southward Channels",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5s",
+      "timezone": "browser",
+      "time": { "from": "now-5m", "to": "now" },
+      "tags": ["ng-gateway", "southward"],
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "text": "Prometheus", "value": "Prometheus" }
+          },
+          {
+            "name": "channel_id",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(ng_gateway_southward_channel_connected, channel_id)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": ".*" }
+          },
+          {
+            "name": "driver",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(ng_gateway_southward_channel_connected, driver)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": ".*" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Connected (0/1)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_southward_channel_connected{channel_id=~\"$channel_id\",driver=~\"$driver\"}", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "State (numeric)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_southward_channel_state{channel_id=~\"$channel_id\",driver=~\"$driver\"}", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Reconnect rate (/min)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "rate(ng_gateway_southward_channel_reconnect_total{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m]) * 60", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Collect cycle p95 (seconds) by result",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le, channel_id, driver, result) (rate(ng_gateway_southward_collect_cycle_seconds_bucket{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m])))", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}/{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Point read rate (points/s) by result",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "sum by (channel_id, driver, result) (rate(ng_gateway_southward_point_read_total{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m]))", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}/{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 }
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-grafana-dashboard-northward-apps
+  {{- with .Values.observability.grafanaDashboards.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+    {{- with .Values.observability.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  northward-apps.json: |-
+    {
+      "title": "NG Gateway - Northward Apps",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5s",
+      "timezone": "browser",
+      "time": { "from": "now-5m", "to": "now" },
+      "tags": ["ng-gateway", "northward"],
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "text": "Prometheus", "value": "Prometheus" }
+          },
+          {
+            "name": "app_id",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(ng_gateway_northward_app_connected, app_id)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": ".*" }
+          },
+          {
+            "name": "plugin_id",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(ng_gateway_northward_app_connected, plugin_id)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": ".*" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Connected (0/1)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_northward_app_connected{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}", "legendFormat": "{{ "{{" }}app_id{{ "}}" }}/{{ "{{" }}plugin_id{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Reconnect rate (/min)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "rate(ng_gateway_northward_app_reconnect_total{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}[5m]) * 60", "legendFormat": "{{ "{{" }}app_id{{ "}}" }}/{{ "{{" }}plugin_id{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Messages rate (by direction/result)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "sum by (app_id, plugin_id, direction, result) (rate(ng_gateway_northward_messages_total{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}[5m]))", "legendFormat": "{{ "{{" }}app_id{{ "}}" }}/{{ "{{" }}plugin_id{{ "}}" }}/{{ "{{" }}direction{{ "}}" }}/{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency p95 (seconds) by direction/result",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le, app_id, plugin_id, direction, result) (rate(ng_gateway_northward_message_latency_seconds_bucket{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}[5m])))", "legendFormat": "{{ "{{" }}app_id{{ "}}" }}/{{ "{{" }}plugin_id{{ "}}" }}/{{ "{{" }}direction{{ "}}" }}/{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 }
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-grafana-dashboard-control-plane
+  {{- with .Values.observability.grafanaDashboards.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+    {{- with .Values.observability.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  control-plane.json: |-
+    {
+      "title": "NG Gateway - Control Plane",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5s",
+      "timezone": "browser",
+      "time": { "from": "now-5m", "to": "now" },
+      "tags": ["ng-gateway", "control"],
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "text": "Prometheus", "value": "Prometheus" }
+          },
+          {
+            "name": "channel_id",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(ng_gateway_control_write_requests_total, channel_id)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": ".*" }
+          },
+          {
+            "name": "driver",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+            "query": "label_values(ng_gateway_control_write_requests_total, driver)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": ".*" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Write requests rate (by result)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "sum by (channel_id, driver, result) (rate(ng_gateway_control_write_requests_total{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m]))", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}/{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Write queue wait p95 (seconds)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le, channel_id, driver) (rate(ng_gateway_control_write_queue_wait_seconds_bucket{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m])))", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Write execute p95 (seconds) by result",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le, channel_id, driver, result) (rate(ng_gateway_control_write_execute_seconds_bucket{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m])))", "legendFormat": "{{ "{{" }}channel_id{{ "}}" }}/{{ "{{" }}driver{{ "}}" }}/{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 }
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-grafana-dashboard-collector
+  {{- with .Values.observability.grafanaDashboards.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+    {{- with .Values.observability.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  collector.json: |-
+    {
+      "title": "NG Gateway - Collector",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5s",
+      "timezone": "browser",
+      "time": { "from": "now-5m", "to": "now" },
+      "tags": ["ng-gateway", "collector"],
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "text": "Prometheus", "value": "Prometheus" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Collect cycles rate (by result) (/s)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "sum by (result) (rate(ng_gateway_collector_cycles_total[5m]))", "legendFormat": "{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Collect cycle p95 (seconds) by result",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "histogram_quantile(0.95, sum by (le, result) (rate(ng_gateway_collector_cycle_seconds_bucket[5m])))", "legendFormat": "{{ "{{" }}result{{ "}}" }}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+        },
+        {
+          "type": "stat",
+          "title": "Collector active tasks",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_collector_active_tasks", "legendFormat": "active" }
+          ],
+          "gridPos": { "x": 0, "y": 16, "w": 8, "h": 6 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Collector concurrency permits",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "targets": [
+            { "expr": "ng_gateway_collector_concurrency_permits{state=\"current\"}", "legendFormat": "current" },
+            { "expr": "ng_gateway_collector_concurrency_permits{state=\"available\"}", "legendFormat": "available" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "opacity", "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+          "gridPos": { "x": 8, "y": 16, "w": 16, "h": 6 }
+        }
+      ]
+    }
+{{- end }}
+

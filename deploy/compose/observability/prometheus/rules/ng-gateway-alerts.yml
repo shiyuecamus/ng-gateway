@@ -1,0 +1,53 @@
+groups:
+  - name: ng-gateway.rules
+    rules:
+      - alert: NGGatewayQueueSaturation
+        expr: (ng_gateway_queue_depth / clamp_min(ng_gateway_queue_capacity, 1)) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue saturation detected"
+          description: 'Queue {{ $labels.queue }} saturation ratio is above 0.8 for 5m.'
+
+      - alert: NGGatewayQueueDropsDetected
+        expr: sum by (queue, reason) (rate(ng_gateway_queue_dropped_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue drops detected"
+          description: 'Queue {{ $labels.queue }} has drops (reason={{ $labels.reason }}).'
+
+      - alert: NGGatewayQueueBlockedTimeSpike
+        expr: histogram_quantile(0.95, sum by (le, queue) (rate(ng_gateway_queue_blocked_seconds_bucket[5m]))) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue blocked time spike"
+          description: 'Queue {{ $labels.queue }} p95 blocked time is above 0.2s.'
+
+      - alert: NGGatewaySouthwardReconnectStorm
+        expr: rate(ng_gateway_southward_channel_reconnect_total[5m]) * 60 > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Southward reconnect storm"
+          description: 'Channel {{ $labels.channel_id }} (driver={{ $labels.driver }}) reconnect rate is high.'
+
+      - alert: NGGatewayNorthwardPublishSuccessRateLow
+        expr: |
+          (
+            sum by (app_id, plugin_id) (rate(ng_gateway_northward_messages_total{direction="uplink",result="success"}[5m]))
+            /
+            clamp_min(sum by (app_id, plugin_id) (rate(ng_gateway_northward_messages_total{direction="uplink",result=~"success|fail"}[5m])), 1e-9)
+          ) < 0.95
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Northward publish success rate low"
+          description: 'App {{ $labels.app_id }}/{{ $labels.plugin_id }} uplink success rate is below 0.95.'
+

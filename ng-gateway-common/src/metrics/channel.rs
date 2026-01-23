@@ -1,27 +1,29 @@
-//! Instrumented bounded `tokio::sync::mpsc` channels for backpressure observability.
+//! Instrumented Tokio channels for queue/backpressure observability.
 //!
-//! This module provides a high-quality, production-oriented wrapper around Tokio bounded mpsc
-//! channels that exposes **low-cardinality** Prometheus metrics for:
-//! - queue depth / capacity
-//! - drops (full / timeout / closed / buffer_full / expired)
-//! - blocked time (when producers wait for capacity)
+//! This module provides a small wrapper around `tokio::sync::mpsc` that:
+//! - Tracks queue depth using a cheap atomic counter (best-effort).
+//! - Records dropped items with bounded, low-cardinality reasons.
+//! - Observes send-side blocked time (for backpressure visibility).
 //!
-//! # Design principles
-//! - **Hot path is atomic only**: depth changes update an `AtomicU64` only.
-//! - **Scrape-time gauge refresh**: Prometheus gauges are refreshed right before encoding.
-//! - **Low cardinality by default**: queue identity is a bounded string set (do not use device/point).
-//! - **No unwrap/expect**: all errors are handled and converted into metrics + returned errors.
+//! # Design notes
+//! - Metrics are registered via `NGMetricsHub` and `metrics::queue`.
+//! - This module is intentionally small and allocation-free on hot paths.
+//! - The counter is best-effort and does not provide strict ordering guarantees.
 
+use crate::metrics::{
+    queue::{DropReason, QueueObserverInner},
+    NGMetricsHub,
+};
+use ng_gateway_error::NGResult;
 use std::{
     fmt,
     sync::{atomic::Ordering, Arc},
     time::Instant,
 };
-
-pub use crate::metrics::queue::DropReason;
-use crate::metrics::queue::{register_queue, QueueObserverInner};
-use ng_gateway_error::NGResult;
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::mpsc::{
+    self,
+    error::{SendError, SendTimeoutError, TrySendError},
+};
 
 /// Create a new bounded instrumented channel.
 ///
@@ -33,14 +35,17 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 /// - The returned sender/receiver share the same depth counter.
 /// - Metrics are registered (best-effort) on first creation for this `queue_name`.
 #[inline]
-pub fn channel<T>(
+pub fn bounded<T>(
+    metrics_hub: &NGMetricsHub,
     queue_name: impl Into<String>,
     capacity: usize,
 ) -> NGResult<(InstrumentedSender<T>, InstrumentedReceiver<T>)> {
     let queue_name = queue_name.into();
     let capacity_u64 = capacity as u64;
 
-    let observer = register_queue(queue_name, capacity_u64)?;
+    let observer = metrics_hub
+        .queue()
+        .register_queue(queue_name, capacity_u64)?;
     let (tx, rx) = mpsc::channel::<T>(capacity);
 
     Ok((
@@ -55,6 +60,17 @@ pub fn channel<T>(
     ))
 }
 
+/// Backward-compatible alias for `bounded`.
+#[deprecated(note = "use `ng_gateway_common::channel::bounded()` instead")]
+#[inline]
+pub fn channel<T>(
+    metrics_hub: &NGMetricsHub,
+    queue_name: impl Into<String>,
+    capacity: usize,
+) -> NGResult<(InstrumentedSender<T>, InstrumentedReceiver<T>)> {
+    bounded(metrics_hub, queue_name, capacity)
+}
+
 /// A non-mpsc queue observer for instrumenting custom buffers (e.g. VecDeque buffer).
 ///
 /// This is useful for bounded buffers that are not implemented as Tokio channels but still need
@@ -67,9 +83,15 @@ pub struct QueueObserver {
 impl QueueObserver {
     /// Register a queue observer with a fixed capacity.
     #[inline]
-    pub fn new(queue_name: impl Into<String>, capacity: u64) -> NGResult<Self> {
+    pub fn new(
+        metrics_hub: &NGMetricsHub,
+        queue_name: impl Into<String>,
+        capacity: u64,
+    ) -> NGResult<Self> {
         Ok(Self {
-            inner: register_queue(queue_name.into(), capacity)?,
+            inner: metrics_hub
+                .queue()
+                .register_queue(queue_name.into(), capacity)?,
         })
     }
 
@@ -107,7 +129,7 @@ impl<T> fmt::Debug for InstrumentedSender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InstrumentedSender")
             .field("queue", &self.observer.queue_name)
-            .field("capacity", &self.observer.capacity)
+            .field("capacity", &self.capacity())
             .field("depth", &self.len())
             .finish()
     }
@@ -133,7 +155,7 @@ impl<T> InstrumentedSender<T> {
     /// Get the configured capacity.
     #[inline]
     pub fn capacity(&self) -> u64 {
-        self.observer.capacity
+        self.observer.metrics.capacity.get().max(0) as u64
     }
 
     /// Try to enqueue without blocking.
@@ -160,7 +182,7 @@ impl<T> InstrumentedSender<T> {
     /// Enqueue with backpressure (await until there is capacity).
     ///
     /// This observes blocked time in `ng_gateway_queue_blocked_seconds`.
-    pub async fn send(&self, value: T) -> Result<(), mpsc::error::SendError<T>> {
+    pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
         let start = Instant::now();
         let res = self.inner.send(value).await;
         self.observer
@@ -188,7 +210,7 @@ impl<T> InstrumentedSender<T> {
         &self,
         value: T,
         timeout: std::time::Duration,
-    ) -> Result<(), mpsc::error::SendTimeoutError<T>> {
+    ) -> Result<(), SendTimeoutError<T>> {
         let start = Instant::now();
         let res = self.inner.send_timeout(value, timeout).await;
         self.observer
@@ -200,13 +222,13 @@ impl<T> InstrumentedSender<T> {
                 self.observer.depth.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
-            Err(mpsc::error::SendTimeoutError::Timeout(v)) => {
+            Err(SendTimeoutError::Timeout(v)) => {
                 self.observer.metrics.inc_dropped(DropReason::Timeout);
-                Err(mpsc::error::SendTimeoutError::Timeout(v))
+                Err(SendTimeoutError::Timeout(v))
             }
-            Err(mpsc::error::SendTimeoutError::Closed(v)) => {
+            Err(SendTimeoutError::Closed(v)) => {
                 self.observer.metrics.inc_dropped(DropReason::Closed);
-                Err(mpsc::error::SendTimeoutError::Closed(v))
+                Err(SendTimeoutError::Closed(v))
             }
         }
     }
@@ -222,7 +244,7 @@ impl<T> fmt::Debug for InstrumentedReceiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InstrumentedReceiver")
             .field("queue", &self.observer.queue_name)
-            .field("capacity", &self.observer.capacity)
+            .field("capacity", &self.observer.metrics.capacity.get().max(0))
             .field("depth", &self.observer.depth.load(Ordering::Relaxed))
             .finish()
     }
