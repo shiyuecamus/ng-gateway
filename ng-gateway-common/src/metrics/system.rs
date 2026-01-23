@@ -1,10 +1,18 @@
 //! System-level metrics updated at scrape time.
 
+#[cfg(target_os = "macos")]
+use libc;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::core::metrics::SystemInfoSnapshot;
 use prometheus::{Gauge, IntCounter, Registry};
-use std::{path::Path, sync::Mutex};
-use sysinfo::{get_current_pid, Disks, Networks, ProcessesToUpdate, System};
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
+#[cfg(not(target_os = "macos"))]
+use std::path::Path;
+use std::sync::Mutex;
+#[cfg(not(target_os = "macos"))]
+use sysinfo::Disks;
+use sysinfo::{get_current_pid, Networks, ProcessesToUpdate, System};
 use tracing::warn;
 
 /// Internal system state guarded by a mutex.
@@ -102,17 +110,8 @@ impl SystemMetrics {
                 .set((state.sys.used_memory() as f64) / total);
         }
 
-        let disks = Disks::new_with_refreshed_list();
-        if let Some(root_disk) = disks
-            .list()
-            .iter()
-            .find(|d| d.mount_point() == Path::new("/"))
-        {
-            let total = root_disk.total_space() as f64;
-            if total > 0.0 {
-                let used = (root_disk.total_space() - root_disk.available_space()) as f64;
-                self.disk_usage_ratio.set(used / total);
-            }
+        if let Some(ratio) = root_disk_ratio() {
+            self.disk_usage_ratio.set(ratio);
         }
 
         // Process metrics (best-effort; sysinfo APIs vary by platform).
@@ -198,13 +197,7 @@ impl SystemMetrics {
         };
 
         // Disk information (aggregate)
-        let disks = Disks::new_with_refreshed_list();
-        let (total_disk, used_disk) = disks.list().iter().fold((0u64, 0u64), |acc, disk| {
-            let total = disk.total_space();
-            let available = disk.available_space();
-            let used = total.saturating_sub(available);
-            (acc.0 + total, acc.1 + used)
-        });
+        let (total_disk, used_disk) = disk_total_used_bytes();
         let disk_usage_percent = if total_disk > 0 {
             (used_disk as f64 / total_disk as f64) * 100.0
         } else {
@@ -268,4 +261,85 @@ fn register_int_counter(
         ))
     })?;
     Ok(c)
+}
+
+/// Compute root filesystem disk usage ratio in \([0,1]\) (best-effort).
+///
+/// # Why this exists
+/// On macOS, enumerating all mounted volumes can trigger noisy system logs like:
+/// `CacheDeleteCopyAvailableSpaceForVolume ... Not Valid`.
+/// These logs are emitted by macOS frameworks and are not actionable for the gateway itself.
+/// To avoid the noise, we compute disk usage directly from `/` without scanning all volumes.
+#[inline]
+fn root_disk_ratio() -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        let (total, used) = disk_total_used_bytes_macos()?;
+        if total == 0 {
+            return None;
+        }
+        Some((used as f64) / (total as f64))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let disks = Disks::new_with_refreshed_list();
+        let root_disk = disks
+            .list()
+            .iter()
+            .find(|d| d.mount_point() == Path::new("/"))?;
+        let total = root_disk.total_space() as f64;
+        if total <= 0.0 {
+            return None;
+        }
+        let used = (root_disk.total_space() - root_disk.available_space()) as f64;
+        Some(used / total)
+    }
+}
+
+/// Compute total/used disk bytes (best-effort).
+///
+/// # Platform notes
+/// - **macOS**: use `statfs("/")` to avoid volume enumeration side effects.
+/// - **Others**: fall back to `sysinfo::Disks` aggregation.
+#[inline]
+fn disk_total_used_bytes() -> (u64, u64) {
+    #[cfg(target_os = "macos")]
+    {
+        disk_total_used_bytes_macos().unwrap_or_default()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let disks = Disks::new_with_refreshed_list();
+        disks.list().iter().fold((0u64, 0u64), |acc, disk| {
+            let total = disk.total_space();
+            let available = disk.available_space();
+            let used = total.saturating_sub(available);
+            (acc.0.saturating_add(total), acc.1.saturating_add(used))
+        })
+    }
+}
+
+/// macOS: compute total/used disk bytes for `/` via `statfs`.
+///
+/// This avoids scanning all mount points/volumes, which can emit noisy system logs on macOS.
+#[cfg(target_os = "macos")]
+fn disk_total_used_bytes_macos() -> Option<(u64, u64)> {
+    let c_path = CString::new("/").ok()?;
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statfs(c_path.as_ptr(), &mut s as *mut libc::statfs) };
+    if rc != 0 {
+        return None;
+    }
+
+    // NOTE: `statfs` fields are signed on some platforms; clamp at 0 defensively.
+    let bsize = (s.f_bsize as i64).max(0) as u64;
+    let blocks = (s.f_blocks as i64).max(0) as u64;
+    let bavail = (s.f_bavail as i64).max(0) as u64;
+
+    let total = blocks.saturating_mul(bsize);
+    let available = bavail.saturating_mul(bsize);
+    let used = total.saturating_sub(available);
+    Some((total, used))
 }

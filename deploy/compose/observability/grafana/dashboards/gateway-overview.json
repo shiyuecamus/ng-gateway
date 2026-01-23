@@ -4,7 +4,7 @@
   "version": 1,
   "refresh": "5s",
   "timezone": "browser",
-  "time": { "from": "now-5m", "to": "now" },
+  "time": { "from": "now-15m", "to": "now" },
   "tags": ["ng-gateway"],
   "panels": [
     {
@@ -38,6 +38,7 @@
       "type": "timeseries",
       "title": "System CPU usage (%)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "ng_gateway_system_cpu_usage_ratio * 100",
@@ -66,6 +67,7 @@
       "type": "timeseries",
       "title": "System memory usage (%)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "ng_gateway_system_memory_usage_ratio * 100",
@@ -94,6 +96,7 @@
       "type": "timeseries",
       "title": "Process CPU usage (%)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         { "expr": "ng_gateway_process_cpu_usage_ratio * 100", "legendFormat": "process" }
       ],
@@ -119,6 +122,7 @@
       "type": "timeseries",
       "title": "Process memory RSS (MiB)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "ng_gateway_process_memory_rss_bytes / 1024 / 1024",
@@ -146,6 +150,7 @@
       "type": "timeseries",
       "title": "Network rate (KB/s)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "rate(ng_gateway_network_bytes_sent_total[5m]) / 1024",
@@ -160,6 +165,35 @@
         "defaults": {
           "unit": "none",
           "decimals": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "System disk usage (%)",
+      "datasource": "Prometheus",
+      "interval": "1s",
+      "targets": [
+        {
+          "expr": "ng_gateway_system_disk_usage_ratio * 100",
+          "legendFormat": "system"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
           "custom": {
             "drawStyle": "line",
             "lineWidth": 1,

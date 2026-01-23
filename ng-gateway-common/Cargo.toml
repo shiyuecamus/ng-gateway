@@ -6,10 +6,15 @@ version = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-colored = "3.0.0"
-prometheus = "0.14.0"
-sys-locale = "0.3.2"
-term_size = "0.3.2"
+
+[dependencies.colored]
+workspace = true
+[dependencies.prometheus]
+workspace = true
+[dependencies.sys-locale]
+workspace = true
+[dependencies.term_size]
+workspace = true
 
 # Local
 [dependencies.ng-gateway-error]
@@ -102,4 +107,7 @@ workspace = true
 
 # System Information
 [dependencies.sysinfo]
+workspace = true
+
+[dependencies.libc]
 workspace = true

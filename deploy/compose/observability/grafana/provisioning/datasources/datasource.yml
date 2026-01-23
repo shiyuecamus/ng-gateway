@@ -7,4 +7,8 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    # Grafana will not query Prometheus with a step smaller than this value.
+    # To visualize 1s~2s resolution, this must be <= Prometheus scrape_interval.
+    jsonData:
+      timeInterval: 1s
 

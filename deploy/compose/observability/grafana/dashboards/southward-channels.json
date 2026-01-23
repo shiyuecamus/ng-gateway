@@ -4,7 +4,7 @@
   "version": 1,
   "refresh": "5s",
   "timezone": "browser",
-  "time": { "from": "now-5m", "to": "now" },
+  "time": { "from": "now-15m", "to": "now" },
   "tags": ["ng-gateway", "southward"],
   "templating": {
     "list": [
@@ -33,6 +33,7 @@
       "type": "timeseries",
       "title": "Connected (0/1)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "ng_gateway_southward_channel_connected{channel_id=~\"$channel_id\",driver=~\"$driver\"}",
@@ -58,6 +59,7 @@
       "type": "timeseries",
       "title": "State (numeric)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "ng_gateway_southward_channel_state{channel_id=~\"$channel_id\",driver=~\"$driver\"}",
@@ -83,6 +85,7 @@
       "type": "timeseries",
       "title": "Reconnect rate (/min)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "rate(ng_gateway_southward_channel_reconnect_total{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m]) * 60",
@@ -108,6 +111,7 @@
       "type": "timeseries",
       "title": "Collect cycle p95 (seconds) by result",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (le, channel_id, driver, result) (rate(ng_gateway_southward_collect_cycle_seconds_bucket{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m])))",
@@ -133,6 +137,7 @@
       "type": "timeseries",
       "title": "Point read rate (points/s) by result",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "sum by (channel_id, driver, result) (rate(ng_gateway_southward_point_read_total{channel_id=~\"$channel_id\",driver=~\"$driver\"}[5m]))",

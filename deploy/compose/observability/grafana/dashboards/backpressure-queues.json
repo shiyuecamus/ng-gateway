@@ -4,7 +4,7 @@
   "version": 1,
   "refresh": "5s",
   "timezone": "browser",
-  "time": { "from": "now-5m", "to": "now" },
+  "time": { "from": "now-15m", "to": "now" },
   "tags": ["ng-gateway", "queues"],
   "templating": {
     "list": [
@@ -24,6 +24,7 @@
       "type": "timeseries",
       "title": "Queue depth",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [{ "expr": "ng_gateway_queue_depth{queue=~\"$queue\"}", "legendFormat": "{{queue}}" }],
       "fieldConfig": {
         "defaults": {
@@ -44,6 +45,7 @@
       "type": "timeseries",
       "title": "Queue saturation ratio",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "ng_gateway_queue_depth{queue=~\"$queue\"} / clamp_min(ng_gateway_queue_capacity{queue=~\"$queue\"}, 1)",
@@ -69,6 +71,7 @@
       "type": "timeseries",
       "title": "Dropped rate (per reason)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "sum by (queue, reason) (rate(ng_gateway_queue_dropped_total{queue=~\"$queue\"}[5m]))",
@@ -94,6 +97,7 @@
       "type": "timeseries",
       "title": "Blocked time p95 (seconds)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (le, queue) (rate(ng_gateway_queue_blocked_seconds_bucket{queue=~\"$queue\"}[5m])))",

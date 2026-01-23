@@ -4,7 +4,7 @@
   "version": 1,
   "refresh": "5s",
   "timezone": "browser",
-  "time": { "from": "now-5m", "to": "now" },
+  "time": { "from": "now-15m", "to": "now" },
   "tags": ["ng-gateway", "northward"],
   "templating": {
     "list": [
@@ -33,6 +33,7 @@
       "type": "timeseries",
       "title": "Connected (0/1)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         { "expr": "ng_gateway_northward_app_connected{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}", "legendFormat": "{{app_id}}/{{plugin_id}}" }
       ],
@@ -55,6 +56,7 @@
       "type": "timeseries",
       "title": "Reconnect rate (/min)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         { "expr": "rate(ng_gateway_northward_app_reconnect_total{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}[5m]) * 60", "legendFormat": "{{app_id}}/{{plugin_id}}" }
       ],
@@ -77,6 +79,7 @@
       "type": "timeseries",
       "title": "Messages rate (by direction/result)",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         { "expr": "sum by (app_id, plugin_id, direction, result) (rate(ng_gateway_northward_messages_total{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}[5m]))", "legendFormat": "{{app_id}}/{{plugin_id}}/{{direction}}/{{result}}" }
       ],
@@ -99,6 +102,7 @@
       "type": "timeseries",
       "title": "Latency p95 (seconds) by direction/result",
       "datasource": "Prometheus",
+      "interval": "1s",
       "targets": [
         { "expr": "histogram_quantile(0.95, sum by (le, app_id, plugin_id, direction, result) (rate(ng_gateway_northward_message_latency_seconds_bucket{app_id=~\"$app_id\",plugin_id=~\"$plugin_id\"}[5m])))", "legendFormat": "{{app_id}}/{{plugin_id}}/{{direction}}/{{result}}" }
       ],

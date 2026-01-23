@@ -141,6 +141,21 @@ version = "2.0"
 [workspace.dependencies.sysinfo]
 version = "0.37"
 
+[workspace.dependencies.libc]
+version = "0.2"
+
+# Console / Terminal
+[workspace.dependencies.colored]
+version = "3.0"
+[workspace.dependencies.sys-locale]
+version = "0.3"
+[workspace.dependencies.term_size]
+version = "0.3"
+
+# Metrics / Observability
+[workspace.dependencies.prometheus]
+version = "0.14"
+
 # Error Handling
 [workspace.dependencies.thiserror]
 version = "2.0"
