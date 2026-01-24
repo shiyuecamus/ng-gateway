@@ -4,6 +4,7 @@
 //! scope to keep them separate from standard REST APIs while still sharing
 //! the same authentication and versioning scheme.
 
+mod common;
 mod metrics;
 mod monitor;
 

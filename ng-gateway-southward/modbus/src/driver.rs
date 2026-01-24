@@ -1,10 +1,12 @@
 use super::{
     codec::ModbusCodec,
     planner::{ModbusPlanner, ModbusPlannerConfig},
-    supervisor::{SessionEntry, SessionSupervisor, SharedSession},
-    types::{ModbusDevice, ModbusFunctionCode, ModbusParameter, ModbusPoint},
+    supervisor::{ModbusObservability, SessionEntry, SessionSupervisor, SharedSession},
+    types::{
+        ModbusChannel, ModbusConnection, ModbusDevice, ModbusFunctionCode, ModbusParameter,
+        ModbusPoint,
+    },
 };
-use crate::types::ModbusChannel;
 use async_trait::async_trait;
 use chrono::Utc;
 use ng_gateway_sdk::{
@@ -19,7 +21,7 @@ use std::{
     collections::HashMap,
     future::Future,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration as StdDuration, Instant},
@@ -60,6 +62,8 @@ pub struct ModbusDriver {
     /// Connection state channel
     conn_tx: watch::Sender<SouthwardConnectionState>,
     conn_rx: watch::Receiver<SouthwardConnectionState>,
+    /// Host-injected observability config, taken once in `start()` (avoid clone).
+    observability: Mutex<Option<ModbusObservability>>,
     /// Metrics
     total_requests: AtomicU64,
     successful_requests: AtomicU64,
@@ -81,10 +85,8 @@ impl ModbusDriver {
     #[inline]
     fn effective_pool_size(&self) -> usize {
         match &self.inner.config.connection {
-            crate::types::ModbusConnection::Tcp { .. } => {
-                self.inner.config.tcp_pool_size.clamp(1, 8) as usize
-            }
-            crate::types::ModbusConnection::Rtu { .. } => 1,
+            ModbusConnection::Tcp { .. } => self.inner.config.tcp_pool_size.clamp(1, 8) as usize,
+            ModbusConnection::Rtu { .. } => 1,
         }
     }
 
@@ -207,14 +209,22 @@ impl ModbusDriver {
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(1);
         let shared = Arc::new(SessionEntry::new_empty(reconnect_tx));
 
+        let obs = ModbusObservability {
+            channel_id: ctx.channel_id,
+            driver: ctx.driver,
+            meter: ctx.transport_meter,
+            transport: ctx.transport_factory,
+        };
+
         Ok(Self {
             inner,
             session: shared,
             reconnect_rx: Mutex::new(Some(reconnect_rx)),
-            started: std::sync::atomic::AtomicBool::new(false),
+            started: AtomicBool::new(false),
             cancel_token: CancellationToken::new(),
             conn_tx,
             conn_rx,
+            observability: Mutex::new(Some(obs)),
             total_requests: AtomicU64::new(0),
             successful_requests: AtomicU64::new(0),
             failed_requests: AtomicU64::new(0),
@@ -511,7 +521,13 @@ impl Driver for ModbusDriver {
         ))?;
         let supervisor = SessionSupervisor::new(shared, cancel, self.conn_tx.clone(), reconnect_rx);
         let inner = Arc::clone(&self.inner);
-        supervisor.run(inner).await;
+        let obs = {
+            let mut g = self.observability.lock().await;
+            g.take().ok_or(DriverError::ExecutionError(
+                "observability context already consumed".into(),
+            ))?
+        };
+        supervisor.run(inner, obs).await;
         Ok(())
     }
 

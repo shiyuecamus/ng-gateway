@@ -2,11 +2,16 @@ use crate::NGSouthwardManager;
 
 use chrono::Utc;
 use futures::{future::join_all, StreamExt};
-use ng_gateway_common::metrics::{channel::InstrumentedSender, NGMetricsHub};
+use ng_gateway_common::metrics::{
+    channel::InstrumentedSender,
+    southward::{CollectBatchOutcome, SouthwardChannelMetricHandles},
+    NGMetricsHub,
+};
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{core::metrics::CollectorMetricsSnapshot, settings::CollectorConfig};
 use ng_gateway_sdk::{
-    CollectItem, CollectionGroupKey, CollectionType, NorthwardData, RuntimeDevice, RuntimePoint,
+    CollectItem, CollectionGroupKey, CollectionType, Driver, NorthwardData, RuntimeDevice,
+    RuntimePoint,
 };
 use std::{
     collections::HashMap,
@@ -39,6 +44,12 @@ struct DeviceEntry {
 #[derive(Clone)]
 struct GroupCall {
     items: Vec<CollectItem>,
+}
+
+#[derive(Debug)]
+struct GroupCollectError {
+    _err: NGError,
+    is_timeout: bool,
 }
 
 /// Collection engine with enhanced performance and reliability
@@ -224,6 +235,194 @@ impl Collector {
         Ok(())
     }
 
+    /// Build device entries for one channel tick, ensuring a single driver instance.
+    ///
+    /// # Notes
+    /// Devices without points are skipped.
+    #[inline]
+    fn build_device_entries(
+        southward_manager: &Arc<NGSouthwardManager>,
+        device_ids: Vec<i32>,
+    ) -> NGResult<(Arc<dyn Driver>, Vec<DeviceEntry>)> {
+        let mut driver_handle = None;
+        let mut entries = Vec::with_capacity(device_ids.len());
+
+        for device_id in device_ids.into_iter() {
+            let (driver, runtime_device) = {
+                let dev = southward_manager
+                    .get_device(device_id)
+                    .ok_or(NGError::Error(format!("Device {} not found", device_id)))?;
+                (dev.driver.clone(), dev.config.clone())
+            };
+
+            let points = southward_manager.get_device_points(device_id);
+            if points.is_empty() {
+                continue;
+            }
+
+            if let Some(existing) = &driver_handle {
+                debug_assert!(
+                    Arc::ptr_eq(existing, &driver),
+                    "Collector observed multiple driver instances in one channel tick"
+                );
+            } else {
+                driver_handle = Some(Arc::clone(&driver));
+            }
+
+            entries.push(DeviceEntry {
+                device_id,
+                runtime_device,
+                points,
+            });
+        }
+
+        let driver =
+            driver_handle.ok_or_else(|| NGError::Error("No driver for channel tick".into()))?;
+        Ok((driver, entries))
+    }
+
+    /// Build driver group calls from device entries.
+    ///
+    /// # Performance
+    /// This keeps the batching strategy in one place: first group by driver-provided key,
+    /// then emit singleton calls for devices without a key.
+    #[inline]
+    fn build_group_calls(driver: &Arc<dyn Driver>, entries: Vec<DeviceEntry>) -> Vec<GroupCall> {
+        let mut groups = Vec::new();
+
+        // Second-level grouping by driver-provided group key.
+        let mut keyed: HashMap<CollectionGroupKey, Vec<DeviceEntry>> = HashMap::new();
+        let mut singles: Vec<DeviceEntry> = Vec::new();
+
+        for e in entries.into_iter() {
+            match driver.collection_group_key(e.runtime_device.as_ref()) {
+                Some(k) => keyed.entry(k).or_default().push(e),
+                None => singles.push(e),
+            }
+        }
+
+        for (_k, mut vec) in keyed {
+            vec.sort_by_key(|e| e.device_id);
+            let items: Vec<CollectItem> = vec
+                .into_iter()
+                .map(|e| (e.runtime_device, e.points))
+                .collect();
+            if !items.is_empty() {
+                groups.push(GroupCall { items });
+            }
+        }
+
+        for e in singles.into_iter() {
+            groups.push(GroupCall {
+                items: vec![(e.runtime_device, e.points)],
+            });
+        }
+
+        groups
+    }
+
+    /// Record one collector cycle with unified success/fail/timeout semantics.
+    #[inline]
+    fn record_collector_cycle(
+        metrics_hub: &NGMetricsHub,
+        ok: bool,
+        is_timeout: bool,
+        elapsed_ns: u64,
+        elapsed_seconds: f64,
+    ) {
+        if ok {
+            metrics_hub.record_collector_cycle_success(elapsed_ns, elapsed_seconds);
+        } else if is_timeout {
+            metrics_hub.record_collector_cycle_timeout(elapsed_ns, elapsed_seconds);
+        } else {
+            metrics_hub.record_collector_cycle_fail(elapsed_ns, elapsed_seconds);
+        }
+    }
+
+    /// Execute one driver group call with cancellation + semaphore bounding.
+    async fn collect_one_group(
+        driver: Arc<dyn Driver>,
+        group: GroupCall,
+        group_timeout: Duration,
+        semaphore: Arc<Semaphore>,
+        metrics_hub: Arc<NGMetricsHub>,
+        prom: Option<Arc<SouthwardChannelMetricHandles>>,
+        token: CancellationToken,
+    ) -> Result<Vec<NorthwardData>, GroupCollectError> {
+        // Make semaphore acquire cancellable (owned permit).
+        let acquired = tokio::select! {
+            _ = token.cancelled() => {
+                return Err(GroupCollectError {
+                    _err: NGError::Error("Group collection cancelled".to_string()),
+                    is_timeout: false,
+                });
+            }
+            p = semaphore.acquire_owned() => p.map_err(|_| GroupCollectError {
+                _err: NGError::Error("Semaphore closed".to_string()),
+                is_timeout: false,
+            }),
+        }?;
+        let _permit = acquired;
+
+        // Per-group timeout (NOT per-device) to preserve batching semantics.
+        tokio::select! {
+            _ = token.cancelled() => {
+                Err(GroupCollectError {
+                    _err: NGError::Error("Group collection cancelled".to_string()),
+                    is_timeout: false,
+                })
+            }
+            result = async {
+                let io_start = Instant::now();
+                let (res, is_timeout) = match timeout(group_timeout, driver.collect_data(&group.items)).await {
+                    Ok(inner) => (inner.map_err(|e| NGError::DriverError(e.to_string())), false),
+                    Err(_) => (Err(NGError::Error("Group collection timeout".to_string())), true),
+                };
+
+                let elapsed = io_start.elapsed();
+                let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+                let elapsed_seconds = elapsed.as_secs_f64();
+                let points_read = group
+                    .items
+                    .iter()
+                    .map(|(_dev, pts)| pts.len() as u64)
+                    .sum::<u64>();
+
+                let ok = res.is_ok();
+                if let Some(h) = &prom {
+                    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    h.record_collect_batch(
+                        group.items.iter().map(|(dev, _pts)| dev.id()),
+                        CollectBatchOutcome {
+                            ok,
+                            is_timeout,
+                            points: points_read,
+                            elapsed_ns,
+                            elapsed_seconds,
+                            now_ms,
+                        },
+                    );
+                }
+
+                Self::record_collector_cycle(
+                    &metrics_hub,
+                    ok,
+                    is_timeout,
+                    elapsed_ns,
+                    elapsed_seconds,
+                );
+
+                match res {
+                    Ok(v) => Ok(v),
+                    Err(err) => Err(GroupCollectError {
+                        _err: err,
+                        is_timeout,
+                    }),
+                }
+            } => result,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "channel-collection", skip_all)]
     /// Channel data collection with simplified device handling
@@ -259,87 +458,24 @@ impl Collector {
 
         let start_time = Utc::now();
 
-        // In this gateway architecture, a channel tick should never mix multiple driver
-        // instances: devices within the channel share the same `Arc<dyn Driver>`.
-        //
-        // Keep this as a debug assertion to detect unexpected topology bugs without
-        // paying HashMap overhead on the hot path.
-        let mut driver_handle = None;
-        let mut entries = Vec::with_capacity(device_ids.len());
-
-        for device_id in device_ids.into_iter() {
-            let (driver, runtime_device) = {
-                let dev = southward_manager
-                    .get_device(device_id)
-                    .ok_or(NGError::Error(format!("Device {} not found", device_id)))?;
-                (dev.driver.clone(), dev.config.clone())
-            };
-
-            let points = southward_manager.get_device_points(device_id);
-            if points.is_empty() {
-                continue;
-            }
-
-            if let Some(existing) = &driver_handle {
-                debug_assert!(
-                    Arc::ptr_eq(existing, &driver),
-                    "Collector observed multiple driver instances in one channel tick"
-                );
-            } else {
-                driver_handle = Some(Arc::clone(&driver));
-            }
-
-            entries.push(DeviceEntry {
-                device_id,
-                runtime_device,
-                points,
-            });
-        }
-
+        // Build device entries and group calls (batching plan) up-front.
+        let (driver, entries) = Self::build_device_entries(southward_manager, device_ids)?;
         if entries.is_empty() {
             return Ok(());
         }
-
-        let mut groups: Vec<GroupCall> = Vec::new();
-        let driver = match driver_handle {
-            Some(d) => d,
-            None => return Ok(()),
-        };
-
-        // Second-level grouping by driver-provided group key.
-        let mut keyed: HashMap<CollectionGroupKey, Vec<DeviceEntry>> = HashMap::new();
-        let mut singles: Vec<DeviceEntry> = Vec::new();
-
-        for e in entries.into_iter() {
-            match driver.collection_group_key(e.runtime_device.as_ref()) {
-                Some(k) => keyed.entry(k).or_default().push(e),
-                None => singles.push(e),
-            }
-        }
-
-        for (_k, mut vec) in keyed {
-            vec.sort_by_key(|e| e.device_id);
-            let items: Vec<CollectItem> = vec
-                .into_iter()
-                .map(|e| (e.runtime_device, e.points))
-                .collect();
-            if !items.is_empty() {
-                groups.push(GroupCall { items });
-            }
-        }
-
-        for e in singles.into_iter() {
-            groups.push(GroupCall {
-                items: vec![(e.runtime_device, e.points)],
-            });
+        let groups = Self::build_group_calls(&driver, entries);
+        if groups.is_empty() {
+            return Ok(());
         }
 
         debug!(
             "📦 Channel [{channel_name}] built {} collection groups",
             groups.len(),
         );
-        let driver = Arc::new(driver);
+
         let prom = southward_manager.get_channel_metric_handles(channel_id);
+        let group_timeout = Duration::from_millis(config.collection_timeout_ms);
+        let max_in_flight = config.max_concurrent_collections.max(1);
 
         // Execute groups concurrently without spawning per-device tasks.
         //
@@ -352,72 +488,25 @@ impl Collector {
         let mut stream = futures::stream::iter(groups.into_iter())
             .map(|group| {
                 let driver = Arc::clone(&driver);
+                let semaphore = Arc::clone(semaphore);
+                let metrics_hub = Arc::clone(metrics_hub);
                 let token = cancellation_token.clone();
                 let prom = prom.clone();
                 async move {
-                    // Make semaphore acquire cancellable (owned permit)
-                    let acquired = tokio::select! {
-                        _ = token.cancelled() => {
-                            return Err(NGError::Error("Group collection cancelled".to_string()));
-                        }
-                        p = Arc::clone(semaphore).acquire_owned() => p.map_err(|_| NGError::Error("Semaphore closed".to_string())),
-                    }?;
-
-                    let _permit = acquired;
-
-                    // Per-group timeout (NOT per-device) to preserve batching semantics.
-                    tokio::select! {
-                        _ = token.cancelled() => {
-                            Err(NGError::Error("Group collection cancelled".to_string()))
-                        }
-                        result = async {
-                            let group_timeout = Duration::from_millis(config.collection_timeout_ms);
-                            let io_start = Instant::now();
-                            let (res, is_timeout) = match timeout(group_timeout, driver.collect_data(&group.items)).await {
-                                Ok(inner) => (inner.map_err(|e| NGError::DriverError(e.to_string())), false),
-                                Err(_) => (Err(NGError::Error("Group collection timeout".to_string())), true),
-                            };
-
-                            let elapsed = io_start.elapsed();
-                            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
-                            let elapsed_seconds = elapsed.as_secs_f64();
-                            let points_read = group
-                                .items
-                                .iter()
-                                .map(|(_dev, pts)| pts.len() as u64)
-                                .sum::<u64>();
-
-                            // Southward per-channel I/O metrics (success/fail).
-                            if let Some(h) = &prom {
-                                if res.is_ok() {
-                                    h.record_io_success(elapsed_ns, elapsed_seconds);
-                                    h.record_collect_success(points_read, elapsed_seconds);
-                                } else {
-                                    h.record_io_failed(elapsed_ns, elapsed_seconds);
-                                    if is_timeout {
-                                        h.record_collect_timeout(points_read, elapsed_seconds);
-                                    } else {
-                                        h.record_collect_fail(points_read, elapsed_seconds);
-                                    }
-                                }
-                            }
-
-                            // Collector cycle metrics (success/fail/timeout).
-                            if res.is_ok() {
-                                metrics_hub.record_collector_cycle_success(elapsed_ns, elapsed_seconds);
-                            } else if is_timeout {
-                                metrics_hub.record_collector_cycle_timeout(elapsed_ns, elapsed_seconds);
-                            } else {
-                                metrics_hub.record_collector_cycle_fail(elapsed_ns, elapsed_seconds);
-                            }
-
-                            res
-                        } => result,
-                    }
+                    Self::collect_one_group(
+                        driver,
+                        group,
+                        group_timeout,
+                        semaphore,
+                        metrics_hub,
+                        prom,
+                        token,
+                    )
+                    .await
                 }
             })
             // Keep at most N futures in-flight per channel tick to limit memory and polling work.
-            .buffer_unordered(config.max_concurrent_collections.max(1));
+            .buffer_unordered(max_in_flight);
 
         while let Some(result) = stream.next().await {
             match result {
@@ -428,8 +517,7 @@ impl Collector {
                     }
                 }
                 Err(e) => {
-                    let msg = e.to_string().to_lowercase();
-                    if msg.contains("timeout") {
+                    if e.is_timeout {
                         timeouts += 1;
                     } else {
                         failed += 1;

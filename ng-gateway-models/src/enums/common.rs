@@ -45,6 +45,15 @@ impl From<Status> for ng_gateway_sdk::Status {
     }
 }
 
+impl From<ng_gateway_sdk::Status> for Status {
+    fn from(value: ng_gateway_sdk::Status) -> Self {
+        match value {
+            ng_gateway_sdk::Status::Enabled => Status::Enabled,
+            ng_gateway_sdk::Status::Disabled => Status::Disabled,
+        }
+    }
+}
+
 #[derive(
     Debug,
     Clone,

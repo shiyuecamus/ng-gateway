@@ -412,6 +412,12 @@ impl Gateway for NGGateway {
     }
 
     #[inline]
+    async fn get_snapshot(&self) -> GatewayStatusSnapshot {
+        // Call the inherent snapshot builder (UFCS avoids trait recursion).
+        NGGateway::get_snapshot(self).await
+    }
+
+    #[inline]
     fn southward_manager(&self) -> Arc<dyn SouthwardManager> {
         Arc::clone(&self.southward_manager) as Arc<dyn SouthwardManager>
     }

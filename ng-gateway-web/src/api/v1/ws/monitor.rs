@@ -9,9 +9,8 @@
 //! - Sends an initial snapshot per device, followed by incremental updates
 //!   driven by the northward routing pipeline.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
+use super::common::ws_upgrade_and_spawn;
+use crate::AppState;
 use actix_web::{web, Error as ActixError, HttpRequest, HttpResponse};
 use actix_ws::{Message as WsMessage, Session};
 use futures::StreamExt;
@@ -21,11 +20,11 @@ use ng_gateway_models::RealtimeMonitorHub;
 use ng_gateway_sdk::{NGValue, NGValueJsonOptions, NorthwardData};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
-
-use crate::AppState;
 
 /// Incoming WebSocket messages from client.
 #[derive(Debug, Deserialize)]
@@ -339,18 +338,7 @@ pub async fn monitor_ws(
     body: web::Payload,
     state: web::Data<Arc<AppState>>,
 ) -> Result<HttpResponse, ActixError> {
-    let (res, session, msg_stream) = actix_ws::handle(&req, body)?;
-
-    // Extract the inner `Arc<AppState>` from `web::Data<Arc<AppState>>`.
-    let state: Arc<AppState> = state.get_ref().clone();
-
-    actix_rt::spawn(async move {
-        if let Err(e) = monitor_ws_loop(state, session, msg_stream).await {
-            error!("Monitor WS loop error: {}", e);
-        }
-    });
-
-    Ok(res)
+    ws_upgrade_and_spawn(req, body, state, monitor_ws_loop).await
 }
 
 /// Core monitor WebSocket loop.

@@ -87,6 +87,11 @@ impl SessionSupervisor {
         // If the library's `connect` defaults to direct connection (which works for CompactLogix often),
         // `with_route_path` allows explicit routing.
 
+        // TODO(observability-bytes):
+        // - Goal: wrap transport with SDK MeteredStream/MeteredUdpSocket to provide measured bytes_in/out (Transport Bytes).
+        // - Blocker: `rust-ethernet-ip` does not expose connector/attach/from_stream yet, so we cannot inject a metered transport here.
+        // - Change point: `EipClient::connect(...)` / `EipClient::with_route_path(...)` below where the client is created.
+        // - Unblock: implement once upstream adds a "connect_with_stream/attach/from_stream" style API (track upstream issue/TODO).
         let client_res = if slot == 0 {
             // Try default connection for Slot 0 (often direct or default backplane)
             EipClient::connect(&addr).await

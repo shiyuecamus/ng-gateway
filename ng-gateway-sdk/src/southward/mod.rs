@@ -1,6 +1,7 @@
 pub(crate) mod codec;
 pub(crate) mod loader;
 pub(crate) mod model;
+pub mod transport;
 pub(crate) mod types;
 pub(crate) mod validation;
 pub mod wire;

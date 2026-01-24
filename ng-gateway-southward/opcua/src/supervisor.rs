@@ -210,6 +210,11 @@ impl SessionSupervisor {
             "OPC UA selected endpoint for connection"
         );
 
+        // TODO(observability-bytes):
+        // - Goal: wrap the underlying transport with SDK MeteredStream to provide measured bytes_in/out (Transport Bytes).
+        // - Blocker: `opcua` client API does not expose connector/attach/from_stream yet, so we cannot inject a metered transport here.
+        // - Change point: the `connect_to_endpoint_directly(...)` call below where the session/connection is created.
+        // - Unblock: implement once upstream adds a "connect_with_stream/attach/from_stream" style API (track upstream issue/TODO).
         // Connect directly to the selected endpoint. This bypasses the stricter
         // `connect_to_matching_endpoint` URL path comparison and behaves more like
         // Prosys / KepServer, which accept the server's advertised endpoint path.

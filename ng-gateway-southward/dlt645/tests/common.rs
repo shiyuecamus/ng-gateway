@@ -3,9 +3,9 @@ use ng_driver_dlt645::{
     Dl645Channel, Dl645ChannelConfig, Dl645Connection, Dl645Device, Dl645Point, Dl645Version,
 };
 use ng_gateway_sdk::{
-    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NorthwardData,
-    NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status, Transform,
+    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NGTransportFactory,
+    NoopSouthwardTransportMeter, NorthwardData, NorthwardPublisher, ReportType, RuntimeChannel,
+    RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -160,6 +160,7 @@ pub fn build_init_context(
     device: Dl645Device,
     points: Vec<Dl645Point>,
 ) -> InitContextBundle {
+    let channel_id = channel.id;
     let device_id = device.id;
 
     // Move owned test models into trait objects; avoid cloning the entire models.
@@ -180,6 +181,10 @@ pub fn build_init_context(
         points_by_device,
         runtime_channel,
         publisher: Arc::new(TestPublisher),
+        channel_id,
+        driver: Arc::from("dlt645"),
+        transport_meter: Arc::new(NoopSouthwardTransportMeter),
+        transport_factory: Arc::new(NGTransportFactory),
     };
 
     (ctx, device_arc, runtime_points)

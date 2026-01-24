@@ -19,12 +19,11 @@ mod system;
 use self::{
     collector::{CollectorMetricsHub, CollectorResult},
     control::{ControlChannelMetricHandles, ControlMetricsHub},
-    northward::NorthwardMetricsHub,
+    northward::{NorthwardAppMetricHandles, NorthwardMetricsHub},
     queue::QueueMetricsHub,
+    southward::{SouthwardChannelMetricHandles, SouthwardMetricsHub},
     system::SystemMetrics,
 };
-use crate::metrics::northward::NorthwardAppMetricHandles;
-use crate::metrics::southward::SouthwardChannelMetricHandles;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
     core::metrics::{
@@ -66,7 +65,7 @@ pub struct NGMetricsHub {
     system: SystemMetrics,
     queue: QueueMetricsHub,
     northward: NorthwardMetricsHub,
-    southward: southward::SouthwardMetricsHub,
+    southward: SouthwardMetricsHub,
     collector: CollectorMetricsHub,
     control: ControlMetricsHub,
 }
@@ -87,7 +86,7 @@ impl NGMetricsHub {
         let system = SystemMetrics::new(&registry)?;
         let queue = QueueMetricsHub::new(&registry)?;
         let northward = NorthwardMetricsHub::new(&registry)?;
-        let southward = southward::SouthwardMetricsHub::new(&registry)?;
+        let southward = SouthwardMetricsHub::new(&registry)?;
         let collector = CollectorMetricsHub::new(&registry)?;
         let control = ControlMetricsHub::new(&registry)?;
 
@@ -376,6 +375,7 @@ impl NGMetricsHub {
         let southward_metrics = self.snapshot_southward_manager();
         let northward_metrics = self.snapshot_northward_manager();
         let collector_metrics = self.snapshot_collector();
+        let process_rss_bytes = self.system.snapshot_process_rss_bytes();
 
         let metrics = GatewayMetricsSnapshot {
             uptime,
@@ -390,7 +390,8 @@ impl NGMetricsHub {
             timeout_collections: collector_metrics.timeout_collections,
             average_collection_time_ms: collector_metrics.average_collection_time_ms,
             active_tasks: collector_metrics.active_tasks,
-            memory_usage: system_info.used_memory,
+            // Process RSS memory in bytes (best-effort).
+            memory_usage: process_rss_bytes,
             cpu_usage: system_info.cpu_usage_percent,
             network_bytes_sent,
             network_bytes_received,

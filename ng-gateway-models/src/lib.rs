@@ -15,6 +15,7 @@ pub mod web;
 use crate::{
     cache::NGBaseCache,
     casbin::{CasbinCmd, CasbinResult},
+    core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
         Claims, NewAction, NewApp, NewAppSub, NewChannel, NewDevice, NewPoint, UpdateAction,
         UpdateApp, UpdateAppSub, UpdateChannel, UpdateDevice, UpdatePoint,
@@ -309,6 +310,13 @@ pub trait Gateway:
     /// - Implementations MUST avoid heavy blocking work here; perform lightweight
     ///   scrape-time refresh only (system/queue, etc.).
     fn export_prometheus_metrics(&self) -> NGResult<PrometheusTextPayload>;
+
+    /// Get a fully-serializable gateway status snapshot for REST/WS consumers.
+    ///
+    /// # Notes
+    /// - This is intentionally part of the public `Gateway` trait so web layers do not need
+    ///   to downcast the gateway implementation just to build observability payloads.
+    async fn get_snapshot(&self) -> GatewayStatusSnapshot;
 
     /// Get the southward manager for accessing channel connection states
     fn southward_manager(&self) -> Arc<dyn SouthwardManager>;

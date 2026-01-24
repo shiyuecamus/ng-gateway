@@ -3,6 +3,7 @@ use crate::{
     southward::{
         index::{PointEntry, RuntimeIndex},
         monitor::ChannelMonitor,
+        observability::ChannelBoundTransportMeter,
         publisher::MpscNorthwardPublisher,
     },
 };
@@ -21,15 +22,19 @@ use ng_gateway_common::metrics::{
 };
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
-    core::metrics::{ChannelStatsSnapshot, SouthwardManagerMetricsSnapshot},
+    core::metrics::{
+        ChannelStatsSnapshot, DeviceMetricsSnapshot, DeviceStatsSnapshot,
+        SouthwardManagerMetricsSnapshot,
+    },
     entities::prelude::{ActionModel, ChannelModel, DeviceModel, PointModel},
     SouthwardManager,
 };
 use ng_gateway_sdk::{
     AccessMode, AttributeData, CollectionType, DeviceState, Driver, DriverFactory, DriverHealth,
-    DriverRegistry, NGValue, NorthwardData, PointMeta, ReportType, RuntimeAction, RuntimeChannel,
-    RuntimeDelta, RuntimeDevice, RuntimePoint, SouthwardConnectionState, SouthwardInitContext,
-    Status, TelemetryData,
+    DriverRegistry, InstrumentedTransportFactory, NGInstrumentedTransportFactory, NGValue,
+    NorthwardData, PointMeta, ReportType, RuntimeAction, RuntimeChannel, RuntimeDelta,
+    RuntimeDevice, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, Status,
+    TelemetryData,
 };
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
@@ -97,6 +102,19 @@ pub struct ConnectedDeviceSnapshot {
     pub channel_name: Arc<str>,
     /// Last activity timestamp recorded on the channel.
     pub last_activity: DateTime<Utc>,
+}
+
+/// Basic device info snapshot for observability/monitoring UIs.
+#[derive(Debug, Clone)]
+pub struct DeviceBasicSnapshot {
+    pub device_id: i32,
+    pub channel_id: i32,
+    pub device_name: String,
+    pub device_type: String,
+    pub status: Status,
+    pub state: DeviceState,
+    pub last_collection: Option<DateTime<Utc>>,
+    pub last_data_change: Option<DateTime<Utc>>,
 }
 
 /// Device data snapshot containing the latest telemetry and attribute values
@@ -201,6 +219,9 @@ pub struct NGSouthwardManager {
     /// Metrics hub (single source of truth).
     metrics_hub: Arc<NGMetricsHub>,
 
+    /// Transport factory used by drivers to create instrumented I/O.
+    transport_factory: Arc<dyn InstrumentedTransportFactory>,
+
     /// Device data snapshots: device_id -> DeviceDataSnapshot
     ///
     /// Maintains the latest telemetry and attribute values for each device.
@@ -223,6 +244,7 @@ impl NGSouthwardManager {
             driver_registry,
             monitor,
             metrics_hub,
+            transport_factory: Arc::new(NGInstrumentedTransportFactory::default()),
             device_snapshots: Arc::new(DashMap::new()),
         }
     }
@@ -261,7 +283,7 @@ impl NGSouthwardManager {
     // === Arc-slice index helpers (control-plane path, OK to rebuild slices) ===
 
     #[inline]
-    fn channel_device_ids(&self, channel_id: i32) -> Vec<i32> {
+    pub fn channel_device_ids(&self, channel_id: i32) -> Vec<i32> {
         self.index
             .channel_devices
             .get(&channel_id)
@@ -730,9 +752,15 @@ impl NGSouthwardManager {
             .convert_runtime_channel(config.clone().into())
             .map_err(|e| NGError::DriverError(e.to_string()))?;
 
+        // Register metrics handles early so transport metering can be bound without lookups.
+        let prom = self
+            .metrics_hub
+            .register_southward_channel_metrics(config.id(), config.driver_id().to_string())?;
+
         // Build init context with best-effort preload from current indexes.
         // At gateway boot, devices/points may already be present; at runtime add, they may be empty.
-        let ctx = self.build_channel_runtime_context(Arc::clone(&config), data_tx);
+        let ctx =
+            self.build_channel_runtime_context(Arc::clone(&config), Arc::clone(&prom), data_tx);
 
         // Create driver (Box) and convert to Arc
         let driver = driver_factory
@@ -745,9 +773,6 @@ impl NGSouthwardManager {
 
         let now = Utc::now();
         let status = config.status();
-        let prom = self
-            .metrics_hub
-            .register_southward_channel_metrics(config.id(), config.driver_id().to_string())?;
         Ok(ChannelInstance {
             driver,
             driver_factory,
@@ -784,6 +809,12 @@ impl NGSouthwardManager {
             .convert_runtime_channel(config.clone().into())
             .map_err(|e| NGError::DriverError(e.to_string()))?;
 
+        // Register metrics handles early so transport metering can be bound without lookups.
+        let prom = self.metrics_hub.register_southward_channel_metrics(
+            config.id,
+            runtime_channel.driver_id().to_string(),
+        )?;
+
         // Convert devices and points from the provided topology into runtime forms
         // to supply a complete init context without relying on runtime indexes.
         let mut devices: Vec<Arc<dyn RuntimeDevice>> = Vec::with_capacity(dev_triples.len());
@@ -815,11 +846,17 @@ impl NGSouthwardManager {
         }
 
         // Assemble init context directly from converted topology
+        let meter = Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom)));
+        let driver_key: Arc<str> = Arc::from(runtime_channel.driver_id().to_string());
         let ctx = SouthwardInitContext {
             devices,
             points_by_device,
             runtime_channel: Arc::clone(&runtime_channel),
             publisher: Arc::new(MpscNorthwardPublisher::new(data_tx.clone())),
+            channel_id: runtime_channel.id(),
+            driver: driver_key,
+            transport_meter: meter,
+            transport_factory: Arc::clone(&self.transport_factory),
         };
 
         // Create driver and wrap
@@ -832,10 +869,6 @@ impl NGSouthwardManager {
         let connection_state = SouthwardConnectionState::Disconnected;
         let now = Utc::now();
         let status = runtime_channel.status();
-        let prom = self.metrics_hub.register_southward_channel_metrics(
-            config.id,
-            runtime_channel.driver_id().to_string(),
-        )?;
         Ok(ChannelInstance {
             driver,
             driver_factory,
@@ -944,6 +977,7 @@ impl NGSouthwardManager {
     fn build_channel_runtime_context(
         &self,
         runtime_channel: Arc<dyn RuntimeChannel>,
+        prom: Arc<SouthwardChannelMetricHandles>,
         data_tx: &InstrumentedSender<Arc<NorthwardData>>,
     ) -> SouthwardInitContext {
         let channel_id = runtime_channel.id();
@@ -964,11 +998,17 @@ impl NGSouthwardManager {
             }
         }
 
+        let meter = Arc::new(ChannelBoundTransportMeter::new(prom));
+        let driver_key: Arc<str> = Arc::from(runtime_channel.driver_id().to_string());
         SouthwardInitContext {
             devices,
             points_by_device,
             runtime_channel,
             publisher: Arc::new(MpscNorthwardPublisher::new(data_tx.clone())),
+            channel_id,
+            driver: driver_key,
+            transport_meter: meter,
+            transport_factory: Arc::clone(&self.transport_factory),
         }
     }
 
@@ -1775,6 +1815,69 @@ impl NGSouthwardManager {
     /// This is primarily used by monitoring APIs to filter online/active devices.
     pub fn get_device_state(&self, device_id: i32) -> Option<DeviceState> {
         self.index.devices.get(&device_id).map(|entry| entry.state)
+    }
+
+    /// Snapshot basic device info for UIs (best-effort, O(1)).
+    #[inline]
+    pub fn snapshot_device_basic(&self, device_id: i32) -> Option<DeviceBasicSnapshot> {
+        let dev = self.index.devices.get(&device_id)?;
+        let channel_id = dev.config.channel_id();
+        let device_name = dev.config.device_name().to_string();
+        let device_type = dev.config.device_type().to_string();
+        let status = dev.status;
+        let state = dev.state;
+        let last_collection = dev.last_collection;
+        let last_data_change = dev.last_data_change;
+        drop(dev);
+
+        Some(DeviceBasicSnapshot {
+            device_id,
+            channel_id,
+            device_name,
+            device_type,
+            status,
+            state,
+            last_collection,
+            last_data_change,
+        })
+    }
+
+    /// Build per-device stats snapshots for a channel, intended for WS/observability UIs.
+    ///
+    /// This follows the same style as `get_channel_snapshot`: acquire DashMap guard, copy fields,
+    /// drop guard, then build fully-serializable DTOs.
+    #[inline]
+    pub fn get_channel_device_snapshots(&self, channel_id: i32) -> Vec<DeviceStatsSnapshot> {
+        let prom = self.get_channel_metric_handles(channel_id);
+        let device_ids = self.channel_device_ids(channel_id);
+        let mut out = Vec::with_capacity(device_ids.len());
+
+        for device_id in device_ids {
+            let Some(dev) = self.snapshot_device_basic(device_id) else {
+                continue;
+            };
+
+            let metrics_opt = prom
+                .as_ref()
+                .and_then(|h| h.snapshot_device_metrics(device_id));
+            let (metrics, metrics_attributed) = match metrics_opt {
+                Some(m) => (m, true),
+                None => (DeviceMetricsSnapshot::default(), false),
+            };
+
+            out.push(DeviceStatsSnapshot {
+                device_id,
+                channel_id,
+                device_name: dev.device_name,
+                device_type: dev.device_type,
+                status: dev.status as i32,
+                runtime_state: Some(dev.state),
+                bytes_attributed: metrics_attributed,
+                metrics,
+            });
+        }
+
+        out
     }
 
     #[inline]

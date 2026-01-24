@@ -9,6 +9,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 /// This struct is a **snapshot DTO** only and MUST NOT contain runtime state
 /// (Atomics, Locks, DashMap, etc.).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GatewayMetricsSnapshot {
     /// System uptime.
     pub uptime: Duration,
@@ -33,6 +34,7 @@ pub struct GatewayMetricsSnapshot {
     pub active_tasks: usize,
 
     /// Performance metrics.
+    /// Gateway process RSS memory in bytes (best-effort).
     pub memory_usage: u64,
     pub cpu_usage: f64,
     pub network_bytes_sent: u64,
@@ -51,6 +53,7 @@ pub struct GatewayMetricsSnapshot {
 ///
 /// This is the only gateway status type exposed to REST/WS.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GatewayStatusSnapshot {
     /// Gateway running state.
     pub state: GatewayState,
@@ -70,6 +73,7 @@ pub struct GatewayStatusSnapshot {
 
 /// System information snapshot (real-time at the moment of snapshot).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemInfoSnapshot {
     /// Operating system type (e.g., "Linux", "Windows", "macOS").
     pub os_type: String,
@@ -95,36 +99,9 @@ pub struct SystemInfoSnapshot {
     pub disk_usage_percent: f64,
 }
 
-/// Device performance metrics snapshot.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DeviceMetricsSnapshot {
-    pub total_collections: u64,
-    pub successful_collections: u64,
-    pub failed_collections: u64,
-    pub data_points_collected: u64,
-    pub average_collection_time: Duration,
-    pub last_collection_time: Duration,
-    pub data_change_count: u64,
-    pub error_count: u64,
-}
-
-/// Device statistics snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceStatsSnapshot {
-    pub device_id: i32,
-    pub name: String,
-    pub device_type: String,
-    pub state: DeviceState,
-    pub data_point_count: usize,
-    pub action_count: usize,
-    pub metrics: DeviceMetricsSnapshot,
-    pub last_collection: Option<DateTime<Utc>>,
-    pub last_data_change: Option<DateTime<Utc>>,
-    pub uptime: Duration,
-}
-
 /// Channel performance metrics snapshot.
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChannelMetricsSnapshot {
     pub total_operations: u64,
     pub successful_operations: u64,
@@ -136,8 +113,53 @@ pub struct ChannelMetricsSnapshot {
     pub reconnection_count: u32,
 }
 
+/// Southward per-device metrics snapshot (in-memory / WS / REST use-cases).
+///
+/// # Notes
+/// - This is a **snapshot DTO**; it must remain fully serializable.
+/// - Per-device data MUST NOT be exposed as Prometheus labels (cardinality).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceMetricsSnapshot {
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+
+    pub collect_success_total: u64,
+    pub collect_fail_total: u64,
+    pub collect_timeout_total: u64,
+
+    /// EWMA of collection latency (best-effort), milliseconds.
+    pub avg_collect_latency_ms: u64,
+    /// Last collection latency (best-effort), milliseconds.
+    pub last_collect_latency_ms: u64,
+
+    /// Unix timestamp in milliseconds (best-effort).
+    pub last_activity_ms: u64,
+}
+
+/// Southward channel per-device observability row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceStatsSnapshot {
+    pub device_id: i32,
+    pub channel_id: i32,
+    pub device_name: String,
+    pub device_type: String,
+    /// Device enablement status (0=enabled, 1=disabled). Matches `ng_gateway_sdk::Status` repr.
+    pub status: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_state: Option<DeviceState>,
+
+    /// Whether bytes and metrics are attributed to this device (best-effort).
+    pub bytes_attributed: bool,
+
+    #[serde(flatten)]
+    pub metrics: DeviceMetricsSnapshot,
+}
+
 /// Southward manager metrics snapshot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SouthwardManagerMetricsSnapshot {
     /// Channel metrics.
     pub total_channels: usize,
@@ -155,6 +177,7 @@ pub struct SouthwardManagerMetricsSnapshot {
 
 /// Collector metrics snapshot.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CollectorMetricsSnapshot {
     /// Total number of collections started.
     pub total_collections: u64,
@@ -178,6 +201,7 @@ pub struct CollectorMetricsSnapshot {
 
 /// Serializable snapshot of app metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NorthwardAppMetricsSnapshot {
     pub messages_sent: u64,
     pub messages_dropped: u64,
@@ -190,6 +214,7 @@ pub struct NorthwardAppMetricsSnapshot {
 
 /// Serializable snapshot of northward manager metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NorthwardManagerMetricsSnapshot {
     pub total_apps: u64,
     pub active_apps: u64,
@@ -205,6 +230,7 @@ pub struct NorthwardManagerMetricsSnapshot {
 
 /// Complete channel statistics snapshot with state and metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChannelStatsSnapshot {
     /// Channel ID.
     pub channel_id: i32,
@@ -227,6 +253,7 @@ pub struct ChannelStatsSnapshot {
 
 /// Complete northward app statistics snapshot with state and metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NorthwardAppStatsSnapshot {
     /// App ID.
     pub app_id: i32,

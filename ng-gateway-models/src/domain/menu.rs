@@ -77,6 +77,7 @@ pub struct ChangeMenuStatus {
 
 /// Menu metadata structure
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MenuMeta {
     /// Sorting order value
     #[serde(rename = "order")]

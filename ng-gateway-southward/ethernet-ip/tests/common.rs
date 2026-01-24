@@ -2,9 +2,9 @@ use ng_driver_ethernet_ip::types::{
     EthernetIpChannel, EthernetIpChannelConfig, EthernetIpDevice, EthernetIpPoint,
 };
 use ng_gateway_sdk::{
-    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NorthwardData,
-    NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status, Transform,
+    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NGTransportFactory,
+    NoopSouthwardTransportMeter, NorthwardData, NorthwardPublisher, ReportType, RuntimeChannel,
+    RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -122,6 +122,7 @@ pub fn build_init_context(
     device: EthernetIpDevice,
     points: Vec<EthernetIpPoint>,
 ) -> InitContextBundle {
+    let channel_id = channel.id;
     let device_id = device.id;
 
     let runtime_channel: Arc<dyn RuntimeChannel> = Arc::new(channel);
@@ -141,6 +142,10 @@ pub fn build_init_context(
         points_by_device,
         runtime_channel,
         publisher: Arc::new(TestPublisher),
+        channel_id,
+        driver: Arc::from("ethernet-ip"),
+        transport_meter: Arc::new(NoopSouthwardTransportMeter),
+        transport_factory: Arc::new(NGTransportFactory),
     };
 
     (ctx, device_arc, runtime_points)

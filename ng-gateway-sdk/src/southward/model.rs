@@ -10,6 +10,11 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use super::transport::{
+    InstrumentedTransportFactory, NGTransportFactory, NoopSouthwardTransportMeter,
+    SouthwardTransportMeter,
+};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelModel {
     pub id: i32,
@@ -132,6 +137,26 @@ pub struct SouthwardInitContext {
     pub runtime_channel: Arc<dyn RuntimeChannel>,
     /// Northbound publisher injected by the host
     pub publisher: Arc<dyn NorthwardPublisher>,
+    /// Channel id (fast access; avoid repeated downcasts).
+    pub channel_id: i32,
+    /// Driver type/name (stable, low-cardinality).
+    pub driver: Arc<str>,
+    /// Host-injected transport meter (authoritative measured bytes).
+    pub transport_meter: Arc<dyn SouthwardTransportMeter>,
+    /// Host-injected transport factory for instrumented I/O.
+    pub transport_factory: Arc<dyn InstrumentedTransportFactory>,
+}
+
+impl SouthwardInitContext {
+    /// Attach a disabled/no-op observability configuration.
+    ///
+    /// This is intended for tests and offline tools that do not run inside the gateway host.
+    #[inline]
+    pub fn with_noop_observability(mut self) -> Self {
+        self.transport_meter = Arc::new(NoopSouthwardTransportMeter);
+        self.transport_factory = Arc::new(NGTransportFactory);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

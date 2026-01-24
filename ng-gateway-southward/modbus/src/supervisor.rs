@@ -3,7 +3,8 @@ use crate::types::{ModbusChannel, ModbusChannelConfig};
 use arc_swap::ArcSwapOption;
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use ng_gateway_sdk::{
-    build_exponential_backoff, DriverError, DriverResult, SouthwardConnectionState,
+    build_exponential_backoff, DriverError, DriverResult, InstrumentedTransportFactory,
+    MeteredStream, SouthwardConnectionState, SouthwardTransportMeter,
 };
 use std::{
     net::SocketAddr,
@@ -21,6 +22,17 @@ use tokio::{
 use tokio_modbus::client::{rtu, tcp, Client as _, Context};
 use tokio_serial::SerialPortBuilderExt;
 use tokio_util::sync::CancellationToken;
+
+/// Transport observability wiring needed by the Modbus supervisor.
+///
+/// This is moved into the supervisor at `start()` time to avoid any cloning at call sites.
+#[derive(Debug)]
+pub(super) struct ModbusObservability {
+    pub channel_id: i32,
+    pub driver: Arc<str>,
+    pub meter: Arc<dyn SouthwardTransportMeter>,
+    pub transport: Arc<dyn InstrumentedTransportFactory>,
+}
 
 /// A pool of Modbus contexts (each is single-flight via `Mutex<Context>`).
 ///
@@ -125,7 +137,10 @@ impl SessionSupervisor {
         }
     }
 
-    async fn connect_pool(cfg: &ModbusChannelConfig) -> DriverResult<SessionPool> {
+    async fn connect_pool(
+        cfg: &ModbusChannelConfig,
+        obs: &ModbusObservability,
+    ) -> DriverResult<SessionPool> {
         match &cfg.connection {
             ModbusConnection::Tcp { host, port } => {
                 let addr = format!("{}:{}", host, port)
@@ -137,9 +152,20 @@ impl SessionSupervisor {
                 let size = cfg.tcp_pool_size.clamp(1, 8) as usize;
                 let mut contexts = Vec::with_capacity(size);
                 for _ in 0..size {
-                    let ctx = tcp::connect(addr).await.map_err(|e| {
-                        DriverError::SessionError(format!("Modbus TCP connect error: {e}"))
-                    })?;
+                    let stream = obs
+                        .transport
+                        .connect_tcp(
+                            obs.channel_id,
+                            Arc::clone(&obs.driver),
+                            None,
+                            addr,
+                            Arc::clone(&obs.meter),
+                        )
+                        .await
+                        .map_err(|e| {
+                            DriverError::SessionError(format!("Modbus TCP connect error: {e}"))
+                        })?;
+                    let ctx = tcp::attach(stream);
                     contexts.push(ctx);
                 }
                 Ok(SessionPool::new(contexts))
@@ -156,7 +182,16 @@ impl SessionSupervisor {
                     .stop_bits((*stop_bits).into())
                     .parity((*parity).into());
                 match builder.open_native_async() {
-                    Ok(stream) => Ok(SessionPool::new(vec![rtu::attach(stream)])),
+                    Ok(stream) => {
+                        let metered = MeteredStream::new(
+                            stream,
+                            Arc::clone(&obs.meter),
+                            obs.channel_id,
+                            Arc::clone(&obs.driver),
+                            None,
+                        );
+                        Ok(SessionPool::new(vec![rtu::attach(metered)]))
+                    }
                     Err(e) => Err(DriverError::SessionError(format!(
                         "Failed to open serial port {port}: {e}"
                     ))),
@@ -167,11 +202,12 @@ impl SessionSupervisor {
 
     /// Run supervisor loop: maintain a single healthy connection and reconnect on demand.
     /// This method spawns a background task and returns immediately.
-    pub async fn run(self, channel: Arc<ModbusChannel>) {
+    pub async fn run(self, channel: Arc<ModbusChannel>, obs: ModbusObservability) {
         let shared = Arc::clone(&self.shared);
         let cancel = self.cancel_token.clone();
         let state_tx = self.state_tx.clone();
         let mut reconnect_rx = self.reconnect_rx;
+        let obs = Arc::new(obs);
 
         // reset flags
         shared.shutdown.store(false, Ordering::Release);
@@ -191,7 +227,7 @@ impl SessionSupervisor {
                             .send(SouthwardConnectionState::Failed("cancelled".to_string()));
                         return;
                     }
-                    match Self::connect_pool(&channel.config).await {
+                    match Self::connect_pool(&channel.config, obs.as_ref()).await {
                         Ok(pool) => break pool,
                         Err(e) => {
                             shared.healthy.store(false, Ordering::Relaxed);

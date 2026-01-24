@@ -54,6 +54,11 @@ pub use southward::{
         ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverHealth, DriverMetrics,
         Parameter, PointModel, SouthwardInitContext,
     },
+    transport::{
+        InstrumentedTransportFactory, MeteredStream, MeteredUdpSocket,
+        NGInstrumentedTransportFactory, NGTransportFactory, NoopSouthwardTransportMeter,
+        SouthwardTransportMeter,
+    },
     types::{
         AccessMode, CollectionType, DataPointType, DataType, DeviceState, HealthStatus, ReportType,
         SouthwardConnectionState, Status,

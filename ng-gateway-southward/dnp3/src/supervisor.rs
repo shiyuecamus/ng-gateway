@@ -267,6 +267,11 @@ impl Dnp3Supervisor {
 
                 let master_config = MasterChannelConfig::new(master_addr);
 
+                // TODO(observability-bytes):
+                // - Goal: wrap the underlying TCP transport with SDK MeteredStream to provide measured bytes_in/out (Transport Bytes).
+                // - Blocker: `dnp3` crate APIs currently do not accept an externally created stream/socket (no connector/attach/from_stream).
+                // - Change point: `spawn_master_tcp_client(...)` call below where the TCP client/session is created.
+                // - Unblock: implement once upstream adds a "spawn/connect with existing stream/socket" API (track upstream issue/TODO).
                 let mut master_channel = spawn_master_tcp_client(
                     LinkErrorMode::Close,
                     master_config,
@@ -339,6 +344,11 @@ impl Dnp3Supervisor {
 
                 let master_config = MasterChannelConfig::new(master_addr);
 
+                // TODO(observability-bytes):
+                // - Goal: wrap the underlying UDP socket with SDK MeteredUdpSocket to provide measured bytes_in/out (Transport Bytes).
+                // - Blocker: `dnp3` crate APIs currently do not accept an externally created UDP socket (no connector/attach/from_socket).
+                // - Change point: `spawn_master_udp(...)` call below where the UDP socket/channel is created.
+                // - Unblock: implement once upstream adds a "spawn/connect with existing UDP socket" API (track upstream issue/TODO).
                 let mut master_channel = spawn_master_udp(
                     local_endpoint,
                     LinkReadMode::Datagram,
@@ -404,6 +414,11 @@ impl Dnp3Supervisor {
                     flow_control: dnp3::serial::FlowControl::None,
                 };
 
+                // TODO(observability-bytes):
+                // - Goal: wrap the underlying serial transport with SDK MeteredStream to provide measured bytes_in/out (Transport Bytes).
+                // - Blocker: `dnp3` crate APIs currently do not accept an externally opened serial stream (no connector/attach/from_stream).
+                // - Change point: `spawn_master_serial(...)` call below where the serial port is opened and session is created.
+                // - Unblock: implement once upstream adds a "spawn/connect with existing serial stream" API (track upstream issue/TODO).
                 let mut master_channel = spawn_master_serial(
                     master_config,
                     path,

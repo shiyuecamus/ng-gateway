@@ -10,7 +10,9 @@
 use chrono::{DateTime, Utc};
 use dashmap::{mapref::entry::Entry, DashMap};
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::core::metrics::{ChannelMetricsSnapshot, SouthwardManagerMetricsSnapshot};
+use ng_gateway_models::core::metrics::{
+    ChannelMetricsSnapshot, DeviceMetricsSnapshot, SouthwardManagerMetricsSnapshot,
+};
 use prometheus::{
     core::Collector, opts, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
     IntGauge, IntGaugeVec, Registry,
@@ -21,12 +23,36 @@ use std::sync::{
 };
 use tracing::warn;
 
+#[derive(Debug, Default)]
+struct SouthwardDeviceMetricEntry {
+    bytes_sent: AtomicU64,
+    bytes_received: AtomicU64,
+    collect_success_total: AtomicU64,
+    collect_fail_total: AtomicU64,
+    collect_timeout_total: AtomicU64,
+    // EWMA + last collection latency (ns)
+    avg_collect_latency_ns: AtomicU64,
+    last_collect_latency_ns: AtomicU64,
+    // unix millis for last activity (collection end)
+    last_activity_ms: AtomicU64,
+}
+
 #[inline]
 fn register_collector_into(registry: &Registry, collector: Box<dyn Collector>, name: &'static str) {
     if let Err(e) = registry.register(collector) {
         // Duplicate registration should not crash the gateway.
         warn!(metric_name = name, error = %e, "Failed to register Prometheus collector");
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CollectBatchOutcome {
+    pub ok: bool,
+    pub is_timeout: bool,
+    pub points: u64,
+    pub elapsed_ns: u64,
+    pub elapsed_seconds: f64,
+    pub now_ms: u64,
 }
 
 /// Pre-resolved metric handles for one `(channel_id, driver)` pair.
@@ -37,6 +63,8 @@ pub struct SouthwardChannelMetricHandles {
     reconnect_total: IntCounter,
     io_success_total: IntCounter,
     io_failed_total: IntCounter,
+    bytes_sent_total: IntCounter,
+    bytes_received_total: IntCounter,
     io_latency_success_seconds: Histogram,
     io_latency_failed_seconds: Histogram,
     // southward collection (per channel)
@@ -50,6 +78,9 @@ pub struct SouthwardChannelMetricHandles {
     avg_latency_ns: AtomicU64,
     /// Snapshot-only latency state for REST/WS snapshots (EWMA + last).
     last_latency_ns: AtomicU64,
+
+    // per-device (in-memory, non-Prometheus): owned by this channel handle
+    device_metrics: DashMap<i32, SouthwardDeviceMetricEntry>,
 }
 
 impl SouthwardChannelMetricHandles {
@@ -69,6 +100,101 @@ impl SouthwardChannelMetricHandles {
     #[inline]
     pub fn inc_reconnect(&self) {
         self.reconnect_total.inc();
+    }
+
+    /// Add measured transport bytes sent (gateway -> field).
+    #[inline]
+    pub fn add_bytes_sent(&self, device_id: Option<i32>, bytes: u64) {
+        if bytes > 0 {
+            self.bytes_sent_total.inc_by(bytes);
+            if let Some(device_id) = device_id {
+                let entry = self
+                    .device_metrics
+                    .entry(device_id)
+                    .or_insert_with(SouthwardDeviceMetricEntry::default);
+                entry.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Add measured transport bytes received (field -> gateway).
+    #[inline]
+    pub fn add_bytes_received(&self, device_id: Option<i32>, bytes: u64) {
+        if bytes > 0 {
+            self.bytes_received_total.inc_by(bytes);
+            if let Some(device_id) = device_id {
+                let entry = self
+                    .device_metrics
+                    .entry(device_id)
+                    .or_insert_with(SouthwardDeviceMetricEntry::default);
+                entry.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Record one per-device collection result (in-memory).
+    #[inline]
+    pub fn record_device_collect_result(
+        &self,
+        device_id: i32,
+        ok: bool,
+        is_timeout: bool,
+        elapsed_ns: u64,
+        now_ms: u64,
+    ) {
+        let entry = self
+            .device_metrics
+            .entry(device_id)
+            .or_insert_with(SouthwardDeviceMetricEntry::default);
+
+        if ok {
+            entry.collect_success_total.fetch_add(1, Ordering::Relaxed);
+        } else if is_timeout {
+            entry.collect_timeout_total.fetch_add(1, Ordering::Relaxed);
+        } else {
+            entry.collect_fail_total.fetch_add(1, Ordering::Relaxed);
+        }
+
+        entry
+            .last_collect_latency_ns
+            .store(elapsed_ns, Ordering::Relaxed);
+        let old = entry.avg_collect_latency_ns.load(Ordering::Relaxed);
+        let new = if old == 0 {
+            elapsed_ns
+        } else {
+            (old * 9 + elapsed_ns) / 10
+        };
+        entry.avg_collect_latency_ns.store(new, Ordering::Relaxed);
+        entry.last_activity_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn ns_to_ms(ns: u64) -> u64 {
+        // Best-effort: truncate sub-ms fractions.
+        ns / 1_000_000
+    }
+
+    /// Snapshot per-device metrics for WS/UI. Returns `None` if never seen.
+    #[inline]
+    pub fn snapshot_device_metrics(&self, device_id: i32) -> Option<DeviceMetricsSnapshot> {
+        self.device_metrics.get(&device_id).map(|e| {
+            let v = e.value();
+
+            DeviceMetricsSnapshot {
+                bytes_sent: v.bytes_sent.load(Ordering::Relaxed),
+                bytes_received: v.bytes_received.load(Ordering::Relaxed),
+                collect_success_total: v.collect_success_total.load(Ordering::Relaxed),
+                collect_fail_total: v.collect_fail_total.load(Ordering::Relaxed),
+                collect_timeout_total: v.collect_timeout_total.load(Ordering::Relaxed),
+                avg_collect_latency_ms: Self::ns_to_ms(
+                    v.avg_collect_latency_ns.load(Ordering::Relaxed),
+                ),
+                last_collect_latency_ms: Self::ns_to_ms(
+                    v.last_collect_latency_ns.load(Ordering::Relaxed),
+                ),
+                last_activity_ms: v.last_activity_ms.load(Ordering::Relaxed),
+            }
+        })
     }
 
     /// Record a successful southward I/O operation with latency.
@@ -114,6 +240,47 @@ impl SouthwardChannelMetricHandles {
         }
     }
 
+    /// Record one batched collection attempt and attribute the outcome to:
+    /// - channel-level collect metrics (Prometheus, low-cardinality)
+    /// - per-device collect metrics (in-memory, snapshot-only)
+    ///
+    /// # Semantics
+    /// - This function treats a timeout as an **I/O failure** at the channel level, while
+    ///   still recording a distinct *collect-timeout* outcome for UI friendliness.
+    /// - The outcome is attributed to every `device_id` in the batch. This matches the
+    ///   batching semantics of `driver.collect_data(&[(dev, pts)])` where per-device errors
+    ///   are not currently surfaced.
+    #[inline]
+    pub fn record_collect_batch<DeviceIds>(
+        &self,
+        device_ids: DeviceIds,
+        outcome: CollectBatchOutcome,
+    ) where
+        DeviceIds: IntoIterator<Item = i32>,
+    {
+        if outcome.ok {
+            self.record_io_success(outcome.elapsed_ns, outcome.elapsed_seconds);
+            self.record_collect_success(outcome.points, outcome.elapsed_seconds);
+        } else {
+            self.record_io_failed(outcome.elapsed_ns, outcome.elapsed_seconds);
+            if outcome.is_timeout {
+                self.record_collect_timeout(outcome.points, outcome.elapsed_seconds);
+            } else {
+                self.record_collect_fail(outcome.points, outcome.elapsed_seconds);
+            }
+        }
+
+        for device_id in device_ids {
+            self.record_device_collect_result(
+                device_id,
+                outcome.ok,
+                outcome.is_timeout,
+                outcome.elapsed_ns,
+                outcome.now_ms,
+            );
+        }
+    }
+
     /// Build a channel metrics snapshot for REST/WS.
     pub fn snapshot_metrics(&self) -> ChannelMetricsSnapshot {
         let successful = self.io_success_total.get();
@@ -131,8 +298,8 @@ impl SouthwardChannelMetricHandles {
             last_operation_time: chrono::Duration::nanoseconds(
                 (last_ns.min(i64::MAX as u64)) as i64,
             ),
-            bytes_sent: 0,
-            bytes_received: 0,
+            bytes_sent: self.bytes_sent_total.get(),
+            bytes_received: self.bytes_received_total.get(),
             reconnection_count: self.reconnect_total.get() as u32,
         }
     }
@@ -182,6 +349,7 @@ pub(crate) struct SouthwardMetricsHub {
     channel_state: IntGaugeVec,
     channel_reconnect_total: IntCounterVec,
     channel_io_total: IntCounterVec,
+    channel_bytes_total: IntCounterVec,
     channel_collect_cycle_seconds: HistogramVec,
     channel_point_read_total: IntCounterVec,
     channel_io_latency_seconds: HistogramVec,
@@ -299,6 +467,24 @@ impl SouthwardMetricsHub {
             "southward_io_total",
         );
 
+        let channel_bytes_total = IntCounterVec::new(
+            opts!(
+                "southward_channel_bytes_total",
+                "Measured transport bytes for southward channels (direction=in|out)."
+            ),
+            &["channel_id", "driver", "direction"],
+        )
+        .map_err(|e| {
+            NGError::from(format!(
+                "Failed to create southward_channel_bytes_total: {e}"
+            ))
+        })?;
+        register_collector_into(
+            registry,
+            Box::new(channel_bytes_total.clone()),
+            "southward_channel_bytes_total",
+        );
+
         let collect_opts = HistogramOpts::new(
             "southward_collect_cycle_seconds",
             "Duration of southward collection cycles (seconds), labeled by result.",
@@ -367,6 +553,7 @@ impl SouthwardMetricsHub {
             channel_state,
             channel_reconnect_total,
             channel_io_total,
+            channel_bytes_total,
             channel_collect_cycle_seconds,
             channel_point_read_total,
             channel_io_latency_seconds,
@@ -534,6 +721,26 @@ impl SouthwardMetricsHub {
                 let failed_labels = [labels[0], labels[1], "failed"];
                 let timeout_labels = [labels[0], labels[1], "timeout"];
 
+                let bytes_out_labels = [labels[0], labels[1], "out"];
+                let bytes_in_labels = [labels[0], labels[1], "in"];
+
+                let bytes_sent_total = self
+                    .channel_bytes_total
+                    .get_metric_with_label_values(&bytes_out_labels)
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get channel_bytes_total(out) for channel_id={channel_id}, driver={driver}: {e}"
+                        ))
+                    })?;
+                let bytes_received_total = self
+                    .channel_bytes_total
+                    .get_metric_with_label_values(&bytes_in_labels)
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get channel_bytes_total(in) for channel_id={channel_id}, driver={driver}: {e}"
+                        ))
+                    })?;
+
                 let io_success_total = self
                     .channel_io_total
                     .get_metric_with_label_values(&success_labels)
@@ -624,6 +831,8 @@ impl SouthwardMetricsHub {
                     reconnect_total,
                     io_success_total,
                     io_failed_total,
+                    bytes_sent_total,
+                    bytes_received_total,
                     io_latency_success_seconds,
                     io_latency_failed_seconds,
                     collect_cycle_success_seconds,
@@ -634,6 +843,7 @@ impl SouthwardMetricsHub {
                     point_read_timeout_total,
                     avg_latency_ns: AtomicU64::new(0),
                     last_latency_ns: AtomicU64::new(0),
+                    device_metrics: DashMap::new(),
                 });
                 v.insert(Arc::clone(&handles));
                 Ok(handles)
