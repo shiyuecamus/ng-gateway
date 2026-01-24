@@ -141,10 +141,9 @@ SouthwardInitContext（ng-gateway-sdk）
 
 关键点（这是“统一语义”的根基）：
 
-- **优先测量，必要时降级**：
-  - **Measured**：能拿到 socket/stream 时，`bytes_in/out` 由 transport wrapper 真实测量（推荐，语义最强）
-  - **Estimated**：对“完全不暴露 transport 的第三方库”（opaque transport），允许按协议/调用参数做**可解释的估算**并在 API/UI 标注为 Estimated（语义弱，用于趋势与相对对比，不用于计费）
-  - **Unavailable**：连估算都不可靠时允许不提供（返回 0 + quality=Unavailable，或仅提供 channel 级）
+- **统一语义，拒绝估算**：
+  - `bytes_in/out` **只允许**来自 transport wrapper 的真实读写计量（Measured transport bytes）
+  - 不做任何“按协议/按调用参数”的估算口径，避免语义漂移与误导
 - **非阻塞与低开销**：wrapper 只做原子累加或写入 lock-free 环形缓冲（由 hub 实现），绝不在热路径做分配/格式化。
 - **device_id 归属策略**：
   - 单设备连接：transport 绑定 `device_id`（最优）
@@ -221,73 +220,62 @@ pub trait InstrumentedTransportFactory: Send + Sync {
 
 可切入性结论矩阵（基于当前仓库代码与调用方式）：
 
-| Driver | 当前连接入口（本仓库） | 能否在不改库前提下“测量 transport bytes”？ | 推荐落地动作（不 fork / 不代理 / 可跨平台） |
+| Driver | 当前连接入口（本仓库） | 能否注入/包裹 transport（Measured）？ | 状态 |
 |---|---|---:|---|
-| Modbus TCP | `tcp::connect(addr)` | 可能（若能改成“外部 stream + attach”） | 优先尝试 attach；不行则进入 Estimated（按 Modbus ADU 长度估算，标注 quality） |
-| Modbus RTU | `open_native_async()` + `rtu::attach(stream)` | 是（stream 在我们手里） | Measured（wrap SerialStream） |
-| OPC UA | `connect_to_endpoint_directly(...)` | 否（opaque transport） | Estimated 或 Unavailable：按 UA 调用边界做保守估算，并强制标注 quality |
-| DNP3 TCP/UDP/Serial | `spawn_master_tcp_client/udp/serial(...)` | 否（opaque transport） | Estimated 或 Unavailable：按 DNP3 APDU/请求参数估算，或仅提供 channel 级 |
-| EtherNet/IP | `EipClient::connect/with_route_path(...)` | 否（opaque transport） | Estimated 或 Unavailable：按 CIP/请求参数估算，并标注 quality |
+| Modbus TCP | `tcp::connect(addr)` | **是**（tokio-modbus v0.17 提供 `tokio_modbus::client::tcp::attach<T: AsyncRead+AsyncWrite+...>(transport)`） | **计划：改造为 `TcpStream::connect` + `MeteredStream` + `tcp::attach`** |
+| Modbus RTU | `open_native_async()` + `rtu::attach(stream)` | 是 | 可实现（Measured） |
+| OPC UA | `connect_to_endpoint_directly(...)` | 否（当前 API 不暴露 transport） | **TODO**（已向上游提 issue，等待 connector/attach/from_stream） |
+| DNP3 TCP/UDP/Serial | `spawn_master_tcp_client/udp/serial(...)` | 否（当前 API 不接受外部 socket/stream） | **TODO**（已向上游提 issue，等待 connector/attach/from_stream） |
+| EtherNet/IP | `EipClient::connect/with_route_path(...)` | 否（当前 API 不暴露 transport） | **TODO**（已向上游提 issue，等待 connector/attach/from_stream） |
 
-### 4.5 纯编码可实现的降级方案（Portable Best-Effort，不依赖 Linux 特性）
+### 4.5 代码内 TODO 注释规范（必须落到 driver/supervisor 的连接创建处）
 
-你要求不采用“代理转发 / OS 内核观测”这类方案，并且希望：
+你要求的不只是“文档里列 TODO”，还要 **在代码里** 对应位置写清楚：这块需要做 Transport wrap/bytes 计量，但依赖上游第三方库提供 connector/attach/from_stream，等上游支持后再落地。
 
-- 串口、未来蓝牙驱动可行
-- macOS / Windows 也可行
-- 不要求所有驱动都能拿到精确 transport bytes（你接受“部分驱动用 wire bytes 语义或更弱语义”）
+规范建议（写入代码注释的内容要包含 4 点）：
 
-因此建议引入一个**可观测质量标识**，把 bytes 指标从“硬承诺精确”升级为“可解释的 best-effort”：
+1) **为什么**：为了统一 `bytes_in/out` 的 Transport Bytes 语义（Measured）  
+2) **缺什么能力**：上游库当前不支持 connector/attach/from_stream（无法注入/包裹 transport）  
+3) **应该改哪里**：指出要改的具体连接创建语句/函数  
+4) **解除条件**：等上游 issue 落地后（写上 issue 链接/编号）再实施
 
-#### 4.5.1 定义：BytesObservationQuality（建议对外暴露）
+建议注释模板：
 
-- **Measured**：真实测量的 Transport Bytes（来自 `MeteredStream/MeteredUdpSocket`）
-- **Estimated**：按协议/调用参数估算的 bytes（用于趋势，不用于精确计费）
-- **Unavailable**：无法可靠估算（显示为 `-` 或 0，并明确提示）
+```rust
+// TODO(observability-bytes):
+// - Goal: wrap transport with MeteredStream/MeteredUdpSocket to provide measured bytes_in/out (Transport Bytes).
+// - Blocker: upstream library does not expose connector/attach/from_stream yet, so we cannot inject the transport here.
+// - Change point: <function/line> where the session/client/connection is created.
+// - Unblock: implement once upstream adds <API>; see issue: <link or number>.
+```
 
-> UI 必须展示 quality（例如 badge：Measured/Estimated），避免误导用户把 Estimated 当计费口径。
+### 4.5 不支持注入的驱动：待办（TODO）
 
-#### 4.5.2 串口（Serial）：跨平台可直接 Measured（推荐）
+本设计要求 **统一走 Transport wrap（Measured transport bytes）**。因此对“不支持 connector/attach/from_stream”的驱动，直接列为待办，直到上游能力就绪：
 
-串口在当前仓库中多由驱动自行 `open`（例如 tokio-serial）。这类场景在 macOS/Windows/Linux 都可以：
+- **TODO(opcua)**：在 `ng-gateway-southward/opcua/src/supervisor.rs` 的连接创建处添加 TODO 注释；等待 `async-opcua` 支持 transport connector / connect_with_stream 后，将底层连接改为 SDK `MeteredStream`。
+- **TODO(dnp3)**：在 `ng-gateway-southward/dnp3/src/supervisor.rs` 中 `spawn_master_tcp_client/udp/serial` 调用处添加 TODO 注释；等待 `dnp3` 支持注入 tcp/udp/serial transport（connector/from_socket/from_stream）后落地。
+- **TODO(ethernet-ip)**：在 `ng-gateway-southward/ethernet-ip/src/supervisor.rs` 的 `EipClient::connect/with_route_path` 调用处添加 TODO 注释；等待 `rust-ethernet-ip` 支持 connect_with_stream / connector 后落地。
 
-- 串口由 SDK/驱动创建 `SerialStream`
-- wrap 为 `MeteredStream<SerialStream>`
-- **直接得到 Measured 的 bytes_in/out**
+### 4.6 Modbus（计划）：用 tokio-modbus `tcp::attach` 实现 Measured bytes（不依赖上游）
 
-#### 4.5.3 未来蓝牙（BLE/BT Classic）：要求“transport 由我们掌控”即可 Measured
+#### 4.6.1 目标
 
-蓝牙本质也是一个 transport（GATT characteristic notify/write 或 RFCOMM/SPP）。最佳实践是：
+把 Modbus TCP 的连接创建改造成 “我们创建 stream → SDK wrap → attach”，从而把 `bytes_in/out` 计量权收敛到 SDK 的 `MeteredStream`（全局权威）。
 
-- 驱动架构要求：**不要选“完全隐藏 I/O”且无法 hook 的库**
-- 选择/实现能把收发数据回调/流对象暴露出来的抽象（例如 async stream / callback）
-- 在“写入 API”与“收到通知/数据回调”处计量 bytes（Measured）
+#### 4.6.2 现状与依据
 
-如果未来某个蓝牙库也完全不暴露数据边界，那它会落入 **Estimated/Unavailable**（与 OPC UA 类似）。
+- 当前实现：`ng-gateway-southward/modbus/src/supervisor.rs` 中使用 `tokio_modbus::client::tcp::connect(addr).await`
+- tokio-modbus v0.17 提供：`tokio_modbus::client::tcp::attach<T: AsyncRead + AsyncWrite + ...>(transport) -> Context`
+  - 这意味着 Modbus TCP **无需等待上游**，可以直接接入 `MeteredStream<TcpStream>`
 
-#### 4.5.4 Opaque transport 第三方库：Estimated 的可落地做法（纯编码）
+#### 4.6.3 改造步骤（文档级计划）
 
-当库完全隐藏 transport 时，仍可在“我们能控制的边界”做估算：
+1) 在 supervisor 中用 `tokio::net::TcpStream::connect(addr).await` 建立连接
+2) 在 SDK 层提供/使用 `MeteredStream<TcpStream>`（实现 `AsyncRead+AsyncWrite`）
+3) 用 `tokio_modbus::client::tcp::attach(metered_stream)` 创建 `Context`
+4) 保持现有 pool/重连语义不变（只是替换 Context 的构造方式）
 
-- **基于协议规范的长度公式（推荐用于 Modbus）**
-  - 例如按 function code + 寄存器数量估算 request/response ADU 字节数
-  - 优点：可解释、实现简单、可单元测试
-
-- **基于库返回的“原始帧/原始 payload”长度（若库暴露）**
-  - 有些库虽然不暴露 socket，但会暴露编码后的 frame bytes
-  - 直接用其 `len()` 作为 Estimated（更接近真实）
-
-- **基于调用参数的保守估算（用于 OPC UA / EtherNet-IP / DNP3）**
-  - 例如：OPC UA 的 `read(nodes)` 按节点数、nodeid 长度等估算一个“最小可接受的下界/近似值”
-  - 这类估算必须标注 Estimated，并在文档中写清“仅用于趋势与相对对比”
-
-#### 4.5.5 API/模型需要的最小改动
-
-在 `SouthwardChannelObservabilitySnapshot` / `SouthwardDeviceObservabilityRow` 增加字段：
-
-- `bytes_quality: "measured" | "estimated" | "unavailable"`
-
-并在 UI 的 bytes 卡片/列上展示 badge。
 
 ---
 
@@ -501,7 +489,7 @@ Split Layout 顶部固定工具条：
 - 自研驱动：停止按 frame/pdu 估算字节，统一改为使用 `MeteredStream/MeteredUdpSocket` 作为底层 I/O
 - 第三方库驱动：按 4.4 的结论执行：
   - 能通过 “attach/from_stream” 接受外部 stream 的：直接改造使用 SDK transport
-  - 不支持注入的：使用 4.5 的 Portable Best-Effort（Estimated/Unavailable + quality 标注）
+  - 不支持注入的：按 4.5 TODO 清单跟踪；在能力就绪前不提供 bytes（保持语义一致）
 
 ### 8.4 Phase 3：Web API（REST + RBAC）
 
@@ -544,7 +532,7 @@ Split Layout 顶部固定工具条：
 
 - `ng-gateway-sdk/src/southward/model.rs`：`SouthwardInitContext` 注入 observability/meter
 - 新增：`ng-gateway-sdk/src/southward/transport/`（建议目录）
-  - `metered_stream.rs` / `metered_udp.rs` / `tcp_proxy.rs` / `udp_forwarder.rs`
+  - `metered_stream.rs` / `metered_udp.rs`
 
 ### 9.3 common metrics
 
@@ -558,10 +546,10 @@ Split Layout 顶部固定工具条：
 
 - 自研驱动 session：各 `ng-gateway-southward/*/src/protocol/session/*`（按实际路径）
 - 第三方库驱动：
-  - `ng-gateway-southward/modbus/src/{driver,supervisor}.rs`（优先尝试 attach；不行就 proxy）
-  - `ng-gateway-southward/opcua/src/{driver,supervisor}.rs`（proxy）
-  - `ng-gateway-southward/dnp3/src/{driver,supervisor}.rs`（tcp/udp forwarder）
-  - `ng-gateway-southward/ethernet-ip/src/{driver,supervisor}.rs`（proxy）
+  - `ng-gateway-southward/modbus/src/{driver,supervisor}.rs`（仅当可注入 transport 时）
+  - `ng-gateway-southward/opcua/src/{driver,supervisor}.rs`（TODO：等待上游 connector/attach/from_stream）
+  - `ng-gateway-southward/dnp3/src/{driver,supervisor}.rs`（TODO：等待上游 connector/attach/from_stream）
+  - `ng-gateway-southward/ethernet-ip/src/{driver,supervisor}.rs`（TODO：等待上游 connector/attach/from_stream）
 
 ### 9.5 web
 
@@ -591,5 +579,5 @@ Split Layout 顶部固定工具条：
 - **指标闭环**
   - Channel bytes_in/out（Transport Bytes）语义清晰且非 0
   - per-device bytes 与质量指标可查可排序（能归属则必须归属；不能归属需明确标注）
-  - 第三方库驱动：能注入则 Measured；不支持注入则 Estimated/Unavailable 但必须显式标注 quality
+  - 第三方库驱动：能注入则提供 bytes；不支持注入则按 TODO 跟踪，暂不提供 bytes（保持语义一致）
 
