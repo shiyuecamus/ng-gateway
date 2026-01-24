@@ -252,6 +252,22 @@ async fn get_menu_seed_data(_: &mut InitContext) -> Result<Option<Vec<NewMenuWit
             keep_alive: true,
             ..Default::default()
         },
+        // Observability pages are hidden entries (navigated from list/detail actions).
+        NewMenuWithId {
+            id: 17,
+            name: "应用监控".into(),
+            // Mount under Northward BasicLayout to ensure a valid router-view parent.
+            parent_id: 6,
+            r#type: MenuType::Menu,
+            path: Some("/northward/app/:id/observability".into()),
+            component: "/northward/app/observability/index".into(),
+            sort: Some(99),
+            title: "page.northward.app.observability.title".into(),
+            icon: Some("mdi:chart-bell-curve".into()),
+            hide_in_menu: true,
+            keep_alive: false,
+            ..Default::default()
+        },
         NewMenuWithId {
             id: 9,
             name: "南向".into(),
@@ -275,6 +291,21 @@ async fn get_menu_seed_data(_: &mut InitContext) -> Result<Option<Vec<NewMenuWit
             title: "page.southward.channel.title".into(),
             icon: Some("mdi:radio-tower".into()),
             keep_alive: true,
+            ..Default::default()
+        },
+        NewMenuWithId {
+            id: 16,
+            name: "通道监控".into(),
+            // Mount under Southward BasicLayout to ensure a valid router-view parent.
+            parent_id: 9,
+            r#type: MenuType::Menu,
+            path: Some("/southward/channel/:id/observability".into()),
+            component: "/southward/channel/observability/index".into(),
+            sort: Some(99),
+            title: "page.southward.channel.observability.title".into(),
+            icon: Some("mdi:chart-line".into()),
+            hide_in_menu: true,
+            keep_alive: false,
             ..Default::default()
         },
         NewMenuWithId {
