@@ -46,7 +46,7 @@ pub use northward::{
     EventReceiver, NorthwardData, NorthwardEvent, NorthwardInitContext, NorthwardPublisher, Plugin,
     PluginConfig, PluginFactory,
 };
-pub use retry::{build_exponential_backoff, RetryPolicy};
+pub use retry::{build_exponential_backoff, RetryController, RetryDecision, RetryPolicy};
 pub use southward::{
     codec::ValueCodec,
     loader::{probe_driver_library, DriverLoader, DriverProbeInfo, DriverRegistry},
@@ -55,9 +55,9 @@ pub use southward::{
         Parameter, PointModel, SouthwardInitContext,
     },
     transport::{
-        InstrumentedTransportFactory, MeteredStream, MeteredUdpSocket,
-        NGInstrumentedTransportFactory, NGTransportFactory, NoopSouthwardTransportMeter,
-        SouthwardTransportMeter,
+        bind_udp_metered, bind_udp_metered_with_timeout, connect_serial_metered,
+        connect_tcp_metered, connect_tcp_metered_with_timeout, MeteredStream, MeteredUdpSocket,
+        NoopSouthwardTransportMeter, SerialConnectConfig, SouthwardTransportMeter,
     },
     types::{
         AccessMode, CollectionType, DataPointType, DataType, DeviceState, HealthStatus, ReportType,

@@ -28,8 +28,8 @@ use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
     core::metrics::{
         AppActorState, ChannelMetricsSnapshot, ChannelStatsSnapshot, CollectorMetricsSnapshot,
-        GatewayMetricsSnapshot, GatewayStatusSnapshot, NorthwardAppMetricsSnapshot,
-        NorthwardAppStatsSnapshot, NorthwardManagerMetricsSnapshot,
+        ControlMetricsSnapshot, GatewayMetricsSnapshot, GatewayStatusSnapshot,
+        NorthwardAppMetricsSnapshot, NorthwardAppStatsSnapshot, NorthwardManagerMetricsSnapshot,
         SouthwardManagerMetricsSnapshot,
     },
     enums::core::GatewayState,
@@ -37,7 +37,10 @@ use ng_gateway_models::{
 };
 use ng_gateway_sdk::{HealthStatus, SouthwardConnectionState};
 use prometheus::{Encoder, Registry, TextEncoder};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 /// Parameters for building a southward channel snapshot.
 #[derive(Debug)]
@@ -68,6 +71,10 @@ pub struct NGMetricsHub {
     southward: SouthwardMetricsHub,
     collector: CollectorMetricsHub,
     control: ControlMetricsHub,
+
+    // Snapshot-only: gateway-level derived error rate state (best-effort).
+    last_error_rate_total_errors: AtomicU64,
+    last_error_rate_ts_ms: AtomicU64,
 }
 
 impl NGMetricsHub {
@@ -98,6 +105,8 @@ impl NGMetricsHub {
             southward,
             collector,
             control,
+            last_error_rate_total_errors: AtomicU64::new(0),
+            last_error_rate_ts_ms: AtomicU64::new(0),
         })
     }
 
@@ -130,6 +139,14 @@ impl NGMetricsHub {
         plugin_id: i32,
     ) -> NGResult<Arc<NorthwardAppMetricHandles>> {
         self.northward.register_app(app_id, plugin_id)
+    }
+
+    /// Unregister northward app metrics and remove labeled Prometheus series (best-effort).
+    ///
+    /// This should be called when an app is removed at runtime to avoid "zombie" series.
+    #[inline]
+    pub fn unregister_northward_app_metrics(&self, app_id: i32, plugin_id: i32) {
+        self.northward.unregister_app(app_id, plugin_id);
     }
 
     /// Set total apps count for northward manager (scrape-time gauge).
@@ -222,6 +239,14 @@ impl NGMetricsHub {
         self.southward.register_channel(channel_id, driver)
     }
 
+    /// Unregister southward channel metrics and remove labeled Prometheus series (best-effort).
+    ///
+    /// This should be called when a channel is removed at runtime to avoid "zombie" series.
+    #[inline]
+    pub fn unregister_southward_channel_metrics(&self, channel_id: i32, driver: &str) {
+        self.southward.unregister_channel(channel_id, driver);
+    }
+
     /// Register control-plane metrics for a channel and return pre-resolved handles.
     ///
     /// # Notes
@@ -232,6 +257,24 @@ impl NGMetricsHub {
         driver: String,
     ) -> NGResult<Arc<ControlChannelMetricHandles>> {
         self.control.register_channel(channel_id, driver)
+    }
+
+    /// Unregister control-plane channel metrics and remove labeled Prometheus series (best-effort).
+    ///
+    /// This should be called when a channel is removed at runtime to avoid "zombie" series.
+    #[inline]
+    pub fn unregister_control_channel_metrics(&self, channel_id: i32, driver: &str) {
+        self.control.unregister_channel(channel_id, driver);
+    }
+
+    /// Snapshot control-plane metrics for a channel (if registered).
+    #[inline]
+    pub fn snapshot_control_channel_metrics(
+        &self,
+        channel_id: i32,
+        driver: &str,
+    ) -> Option<ControlMetricsSnapshot> {
+        self.control.snapshot_channel(channel_id, driver)
     }
 
     /// Set total channels gauge for southward subsystem.
@@ -306,6 +349,8 @@ impl NGMetricsHub {
     ) -> ChannelStatsSnapshot {
         let metrics =
             self.snapshot_southward_channel_metrics(params.channel_id, params.driver_name.as_str());
+        let control_metrics =
+            self.snapshot_control_channel_metrics(params.channel_id, params.driver_name.as_str());
         ChannelStatsSnapshot {
             channel_id: params.channel_id,
             name: params.name,
@@ -314,6 +359,7 @@ impl NGMetricsHub {
             health: params.health,
             device_count: params.device_count,
             metrics,
+            control_metrics,
             created_at: params.created_at,
             last_activity: params.last_activity,
         }
@@ -370,12 +416,42 @@ impl NGMetricsHub {
         version: String,
         uptime: chrono::Duration,
     ) -> GatewayStatusSnapshot {
+        let now = chrono::Utc::now();
+        let now_ms = now.timestamp_millis().max(0) as u64;
         let system_info = self.system.snapshot_system_info();
         let (network_bytes_sent, network_bytes_received) = self.system.snapshot_network_bytes();
         let southward_metrics = self.snapshot_southward_manager();
         let northward_metrics = self.snapshot_northward_manager();
         let collector_metrics = self.snapshot_collector();
         let process_rss_bytes = self.system.snapshot_process_rss_bytes();
+
+        // Gateway error aggregation (best-effort).
+        //
+        // Definition (current):
+        // - Collector errors: failed + timeout collections
+        // - Northward routing errors: manager routing_errors
+        //
+        // NOTE: This is intentionally low-cost and does not scan per-channel/app series.
+        let total_errors = collector_metrics.failed_collections
+            + collector_metrics.timeout_collections
+            + northward_metrics.routing_errors;
+
+        // Derive a best-effort error rate (errors/min) from successive snapshots.
+        let last_ms = self.last_error_rate_ts_ms.swap(now_ms, Ordering::Relaxed);
+        let last_total = self
+            .last_error_rate_total_errors
+            .swap(total_errors, Ordering::Relaxed);
+        let error_rate = if last_ms == 0 || now_ms <= last_ms {
+            0.0
+        } else {
+            let dt_sec = (now_ms - last_ms) as f64 / 1000.0;
+            if dt_sec <= 0.0 {
+                0.0
+            } else {
+                let delta = total_errors.saturating_sub(last_total) as f64;
+                (delta / dt_sec) * 60.0
+            }
+        };
 
         let metrics = GatewayMetricsSnapshot {
             uptime,
@@ -395,9 +471,9 @@ impl NGMetricsHub {
             cpu_usage: system_info.cpu_usage_percent,
             network_bytes_sent,
             network_bytes_received,
-            total_errors: 0,
-            error_rate: 0.0,
-            last_update: Some(chrono::Utc::now()),
+            total_errors,
+            error_rate,
+            last_update: Some(now),
         };
 
         GatewayStatusSnapshot {

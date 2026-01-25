@@ -25,11 +25,13 @@ use tracing::warn;
 
 #[derive(Debug, Default)]
 struct SouthwardDeviceMetricEntry {
-    bytes_sent: AtomicU64,
-    bytes_received: AtomicU64,
     collect_success_total: AtomicU64,
     collect_fail_total: AtomicU64,
     collect_timeout_total: AtomicU64,
+    report_success_total: AtomicU64,
+    report_dropped_total: AtomicU64,
+    report_fail_total: AtomicU64,
+    last_report_ms: AtomicU64,
     // EWMA + last collection latency (ns)
     avg_collect_latency_ns: AtomicU64,
     last_collect_latency_ns: AtomicU64,
@@ -61,6 +63,8 @@ pub struct SouthwardChannelMetricHandles {
     connected: IntGauge,
     state: IntGauge,
     reconnect_total: IntCounter,
+    connect_failed_total: IntCounter,
+    disconnect_total: IntCounter,
     io_success_total: IntCounter,
     io_failed_total: IntCounter,
     bytes_sent_total: IntCounter,
@@ -74,10 +78,20 @@ pub struct SouthwardChannelMetricHandles {
     point_read_success_total: IntCounter,
     point_read_fail_total: IntCounter,
     point_read_timeout_total: IntCounter,
+
+    // report/push (publisher.try_publish)
+    report_publish_success_total: IntCounter,
+    report_publish_dropped_total: IntCounter,
+    report_publish_fail_total: IntCounter,
+
     /// Snapshot-only latency state for REST/WS snapshots (EWMA + last).
     avg_latency_ns: AtomicU64,
     /// Snapshot-only latency state for REST/WS snapshots (EWMA + last).
     last_latency_ns: AtomicU64,
+    /// Snapshot-only timestamps (unix millis) for REST/WS snapshots.
+    last_state_change_ms: AtomicU64,
+    /// Snapshot-only timestamps (unix millis) for REST/WS snapshots.
+    last_report_ms: AtomicU64,
 
     // per-device (in-memory, non-Prometheus): owned by this channel handle
     device_metrics: DashMap<i32, SouthwardDeviceMetricEntry>,
@@ -102,33 +116,101 @@ impl SouthwardChannelMetricHandles {
         self.reconnect_total.inc();
     }
 
+    /// Increment connect failed counter.
+    #[inline]
+    pub fn inc_connect_failed(&self) {
+        self.connect_failed_total.inc();
+    }
+
+    /// Increment disconnect counter.
+    #[inline]
+    pub fn inc_disconnect(&self) {
+        self.disconnect_total.inc();
+    }
+
+    /// Record a state change timestamp (unix millis).
+    #[inline]
+    pub fn record_state_change_ms(&self, now_ms: u64) {
+        if now_ms > 0 {
+            self.last_state_change_ms.store(now_ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Record one publish attempt from a report/subscription driver.
+    #[inline]
+    pub fn record_report_success(&self, now_ms: u64) {
+        self.report_publish_success_total.inc();
+        if now_ms > 0 {
+            self.last_report_ms.store(now_ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a dropped publish attempt due to backpressure.
+    #[inline]
+    pub fn record_report_dropped(&self) {
+        self.report_publish_dropped_total.inc();
+    }
+
+    /// Record a failed publish attempt (closed/other errors).
+    #[inline]
+    pub fn record_report_fail(&self) {
+        self.report_publish_fail_total.inc();
+    }
+
+    /// Best-practice: record a report publish outcome for a specific device.
+    ///
+    /// This is the **single entrypoint** for Report/Subscribe drivers to update:
+    /// - channel-level report counters (`southward_report_publish_total{result=...}`)
+    /// - per-device in-memory report counters + timestamps (WS/UI rows)
+    #[inline]
+    pub fn record_device_report_success(&self, device_id: i32, now_ms: u64) {
+        self.record_report_success(now_ms);
+        let entry = self
+            .device_metrics
+            .entry(device_id)
+            .or_insert_with(SouthwardDeviceMetricEntry::default);
+        entry.report_success_total.fetch_add(1, Ordering::Relaxed);
+        entry.last_report_ms.store(now_ms, Ordering::Relaxed);
+        entry.last_activity_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_device_report_dropped(&self, device_id: i32, now_ms: u64) {
+        self.record_report_dropped();
+        let entry = self
+            .device_metrics
+            .entry(device_id)
+            .or_insert_with(SouthwardDeviceMetricEntry::default);
+        entry.report_dropped_total.fetch_add(1, Ordering::Relaxed);
+        entry.last_report_ms.store(now_ms, Ordering::Relaxed);
+        entry.last_activity_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_device_report_fail(&self, device_id: i32, now_ms: u64) {
+        self.record_report_fail();
+        let entry = self
+            .device_metrics
+            .entry(device_id)
+            .or_insert_with(SouthwardDeviceMetricEntry::default);
+        entry.report_fail_total.fetch_add(1, Ordering::Relaxed);
+        entry.last_report_ms.store(now_ms, Ordering::Relaxed);
+        entry.last_activity_ms.store(now_ms, Ordering::Relaxed);
+    }
+
     /// Add measured transport bytes sent (gateway -> field).
     #[inline]
-    pub fn add_bytes_sent(&self, device_id: Option<i32>, bytes: u64) {
+    pub fn add_bytes_sent(&self, bytes: u64) {
         if bytes > 0 {
             self.bytes_sent_total.inc_by(bytes);
-            if let Some(device_id) = device_id {
-                let entry = self
-                    .device_metrics
-                    .entry(device_id)
-                    .or_insert_with(SouthwardDeviceMetricEntry::default);
-                entry.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
-            }
         }
     }
 
     /// Add measured transport bytes received (field -> gateway).
     #[inline]
-    pub fn add_bytes_received(&self, device_id: Option<i32>, bytes: u64) {
+    pub fn add_bytes_received(&self, bytes: u64) {
         if bytes > 0 {
             self.bytes_received_total.inc_by(bytes);
-            if let Some(device_id) = device_id {
-                let entry = self
-                    .device_metrics
-                    .entry(device_id)
-                    .or_insert_with(SouthwardDeviceMetricEntry::default);
-                entry.bytes_received.fetch_add(bytes, Ordering::Relaxed);
-            }
         }
     }
 
@@ -181,8 +263,6 @@ impl SouthwardChannelMetricHandles {
             let v = e.value();
 
             DeviceMetricsSnapshot {
-                bytes_sent: v.bytes_sent.load(Ordering::Relaxed),
-                bytes_received: v.bytes_received.load(Ordering::Relaxed),
                 collect_success_total: v.collect_success_total.load(Ordering::Relaxed),
                 collect_fail_total: v.collect_fail_total.load(Ordering::Relaxed),
                 collect_timeout_total: v.collect_timeout_total.load(Ordering::Relaxed),
@@ -192,6 +272,10 @@ impl SouthwardChannelMetricHandles {
                 last_collect_latency_ms: Self::ns_to_ms(
                     v.last_collect_latency_ns.load(Ordering::Relaxed),
                 ),
+                report_success_total: v.report_success_total.load(Ordering::Relaxed),
+                report_dropped_total: v.report_dropped_total.load(Ordering::Relaxed),
+                report_fail_total: v.report_fail_total.load(Ordering::Relaxed),
+                last_report_ms: v.last_report_ms.load(Ordering::Relaxed),
                 last_activity_ms: v.last_activity_ms.load(Ordering::Relaxed),
             }
         })
@@ -281,12 +365,22 @@ impl SouthwardChannelMetricHandles {
         }
     }
 
+    #[inline]
+    fn from_ms(ms: u64) -> Option<DateTime<Utc>> {
+        if ms == 0 {
+            return None;
+        }
+        DateTime::<Utc>::from_timestamp_millis(ms as i64)
+    }
+
     /// Build a channel metrics snapshot for REST/WS.
     pub fn snapshot_metrics(&self) -> ChannelMetricsSnapshot {
         let successful = self.io_success_total.get();
         let failed = self.io_failed_total.get();
         let total = successful + failed;
         let (avg_ns, last_ns) = self.snapshot_latency_ns();
+        let last_state_change_ms = self.last_state_change_ms.load(Ordering::Relaxed);
+        let last_report_ms = self.last_report_ms.load(Ordering::Relaxed);
 
         ChannelMetricsSnapshot {
             total_operations: total,
@@ -301,6 +395,19 @@ impl SouthwardChannelMetricHandles {
             bytes_sent: self.bytes_sent_total.get(),
             bytes_received: self.bytes_received_total.get(),
             reconnection_count: self.reconnect_total.get() as u32,
+
+            point_read_success_total: self.point_read_success_total.get(),
+            point_read_fail_total: self.point_read_fail_total.get(),
+            point_read_timeout_total: self.point_read_timeout_total.get(),
+
+            connect_failed_count: self.connect_failed_total.get(),
+            disconnect_count: self.disconnect_total.get(),
+            last_state_change_at: Self::from_ms(last_state_change_ms),
+
+            report_publish_success_total: self.report_publish_success_total.get(),
+            report_publish_dropped_total: self.report_publish_dropped_total.get(),
+            report_publish_fail_total: self.report_publish_fail_total.get(),
+            last_report_at: Self::from_ms(last_report_ms),
         }
     }
 
@@ -348,8 +455,11 @@ pub(crate) struct SouthwardMetricsHub {
     channel_connected: IntGaugeVec,
     channel_state: IntGaugeVec,
     channel_reconnect_total: IntCounterVec,
+    channel_connect_failed_total: IntCounterVec,
+    channel_disconnect_total: IntCounterVec,
     channel_io_total: IntCounterVec,
     channel_bytes_total: IntCounterVec,
+    channel_report_publish_total: IntCounterVec,
     channel_collect_cycle_seconds: HistogramVec,
     channel_point_read_total: IntCounterVec,
     channel_io_latency_seconds: HistogramVec,
@@ -453,6 +563,42 @@ impl SouthwardMetricsHub {
             "southward_channel_reconnect_total",
         );
 
+        let channel_connect_failed_total = IntCounterVec::new(
+            opts!(
+                "southward_channel_connect_failed_total",
+                "Total times a southward channel entered Failed state."
+            ),
+            &["channel_id", "driver"],
+        )
+        .map_err(|e| {
+            NGError::from(format!(
+                "Failed to create southward_channel_connect_failed_total: {e}"
+            ))
+        })?;
+        register_collector_into(
+            registry,
+            Box::new(channel_connect_failed_total.clone()),
+            "southward_channel_connect_failed_total",
+        );
+
+        let channel_disconnect_total = IntCounterVec::new(
+            opts!(
+                "southward_channel_disconnect_total",
+                "Total disconnect transitions from Connected for southward channel."
+            ),
+            &["channel_id", "driver"],
+        )
+        .map_err(|e| {
+            NGError::from(format!(
+                "Failed to create southward_channel_disconnect_total: {e}"
+            ))
+        })?;
+        register_collector_into(
+            registry,
+            Box::new(channel_disconnect_total.clone()),
+            "southward_channel_disconnect_total",
+        );
+
         let channel_io_total = IntCounterVec::new(
             opts!(
                 "southward_io_total",
@@ -465,6 +611,24 @@ impl SouthwardMetricsHub {
             registry,
             Box::new(channel_io_total.clone()),
             "southward_io_total",
+        );
+
+        let channel_report_publish_total = IntCounterVec::new(
+            opts!(
+                "southward_report_publish_total",
+                "Total report/push publish attempts from drivers, labeled by result."
+            ),
+            &["channel_id", "driver", "result"],
+        )
+        .map_err(|e| {
+            NGError::from(format!(
+                "Failed to create southward_report_publish_total: {e}"
+            ))
+        })?;
+        register_collector_into(
+            registry,
+            Box::new(channel_report_publish_total.clone()),
+            "southward_report_publish_total",
         );
 
         let channel_bytes_total = IntCounterVec::new(
@@ -552,8 +716,11 @@ impl SouthwardMetricsHub {
             channel_connected,
             channel_state,
             channel_reconnect_total,
+            channel_connect_failed_total,
+            channel_disconnect_total,
             channel_io_total,
             channel_bytes_total,
+            channel_report_publish_total,
             channel_collect_cycle_seconds,
             channel_point_read_total,
             channel_io_latency_seconds,
@@ -716,10 +883,27 @@ impl SouthwardMetricsHub {
                             "Failed to get channel_reconnect_total for channel_id={channel_id}, driver={driver}: {e}"
                         ))
                     })?;
+                let connect_failed_total = self
+                    .channel_connect_failed_total
+                    .get_metric_with_label_values(&labels)
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get channel_connect_failed_total for channel_id={channel_id}, driver={driver}: {e}"
+                        ))
+                    })?;
+                let disconnect_total = self
+                    .channel_disconnect_total
+                    .get_metric_with_label_values(&labels)
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get channel_disconnect_total for channel_id={channel_id}, driver={driver}: {e}"
+                        ))
+                    })?;
 
                 let success_labels = [labels[0], labels[1], "success"];
                 let failed_labels = [labels[0], labels[1], "failed"];
                 let timeout_labels = [labels[0], labels[1], "timeout"];
+                let dropped_labels = [labels[0], labels[1], "dropped"];
 
                 let bytes_out_labels = [labels[0], labels[1], "out"];
                 let bytes_in_labels = [labels[0], labels[1], "in"];
@@ -825,10 +1009,37 @@ impl SouthwardMetricsHub {
                         ))
                     })?;
 
+                let report_publish_success_total = self
+                    .channel_report_publish_total
+                    .get_metric_with_label_values(&success_labels)
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get report_publish_total(success) for channel_id={channel_id}, driver={driver}: {e}"
+                        ))
+                    })?;
+                let report_publish_dropped_total = self
+                    .channel_report_publish_total
+                    .get_metric_with_label_values(&dropped_labels)
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get report_publish_total(dropped) for channel_id={channel_id}, driver={driver}: {e}"
+                        ))
+                    })?;
+                let report_publish_fail_total = self
+                    .channel_report_publish_total
+                    .get_metric_with_label_values(&failed_labels)
+                    .map_err(|e| {
+                        NGError::from(format!(
+                            "Failed to get report_publish_total(fail) for channel_id={channel_id}, driver={driver}: {e}"
+                        ))
+                    })?;
+
                 let handles = Arc::new(SouthwardChannelMetricHandles {
                     connected,
                     state,
                     reconnect_total,
+                    connect_failed_total,
+                    disconnect_total,
                     io_success_total,
                     io_failed_total,
                     bytes_sent_total,
@@ -841,12 +1052,152 @@ impl SouthwardMetricsHub {
                     point_read_success_total,
                     point_read_fail_total,
                     point_read_timeout_total,
+                    report_publish_success_total,
+                    report_publish_dropped_total,
+                    report_publish_fail_total,
                     avg_latency_ns: AtomicU64::new(0),
                     last_latency_ns: AtomicU64::new(0),
+                    last_state_change_ms: AtomicU64::new(0),
+                    last_report_ms: AtomicU64::new(0),
                     device_metrics: DashMap::new(),
                 });
                 v.insert(Arc::clone(&handles));
                 Ok(handles)
+            }
+        }
+    }
+
+    /// Unregister a channel and best-effort remove its labeled time series.
+    ///
+    /// # Notes
+    /// - This prevents "zombie" Prometheus series when channels are removed at runtime.
+    /// - Removal is best-effort: failures are logged and ignored.
+    pub(crate) fn unregister_channel(&self, channel_id: i32, driver: &str) {
+        self.channels.remove(&(channel_id, driver.to_string()));
+
+        let channel_id_s = channel_id.to_string();
+        let base = [channel_id_s.as_str(), driver];
+
+        // (channel_id, driver) series
+        if let Err(e) = self.channel_connected.remove_label_values(&base) {
+            warn!(
+                metric_name = "southward_channel_connected",
+                channel_id,
+                driver,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+        if let Err(e) = self.channel_state.remove_label_values(&base) {
+            warn!(
+                metric_name = "southward_channel_state",
+                channel_id,
+                driver,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+        if let Err(e) = self.channel_reconnect_total.remove_label_values(&base) {
+            warn!(
+                metric_name = "southward_channel_reconnect_total",
+                channel_id,
+                driver,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+        if let Err(e) = self.channel_connect_failed_total.remove_label_values(&base) {
+            warn!(
+                metric_name = "southward_channel_connect_failed_total",
+                channel_id,
+                driver,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+        if let Err(e) = self.channel_disconnect_total.remove_label_values(&base) {
+            warn!(
+                metric_name = "southward_channel_disconnect_total",
+                channel_id,
+                driver,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+
+        // (channel_id, driver, direction)
+        for direction in ["in", "out"] {
+            let labels = [base[0], base[1], direction];
+            if let Err(e) = self.channel_bytes_total.remove_label_values(&labels) {
+                warn!(
+                    metric_name = "southward_channel_bytes_total",
+                    channel_id,
+                    driver,
+                    direction,
+                    error = %e,
+                    "Failed to remove labeled series"
+                );
+            }
+        }
+
+        // (channel_id, driver, result)
+        for result in ["success", "failed", "timeout", "dropped"] {
+            let labels = [base[0], base[1], result];
+            if let Err(e) = self.channel_io_total.remove_label_values(&labels) {
+                warn!(
+                    metric_name = "southward_io_total",
+                    channel_id,
+                    driver,
+                    result,
+                    error = %e,
+                    "Failed to remove labeled series"
+                );
+            }
+            if let Err(e) = self
+                .channel_report_publish_total
+                .remove_label_values(&labels)
+            {
+                warn!(
+                    metric_name = "southward_report_publish_total",
+                    channel_id,
+                    driver,
+                    result,
+                    error = %e,
+                    "Failed to remove labeled series"
+                );
+            }
+            if let Err(e) = self
+                .channel_collect_cycle_seconds
+                .remove_label_values(&labels)
+            {
+                warn!(
+                    metric_name = "southward_collect_cycle_seconds",
+                    channel_id,
+                    driver,
+                    result,
+                    error = %e,
+                    "Failed to remove labeled series"
+                );
+            }
+            if let Err(e) = self.channel_point_read_total.remove_label_values(&labels) {
+                warn!(
+                    metric_name = "southward_point_read_total",
+                    channel_id,
+                    driver,
+                    result,
+                    error = %e,
+                    "Failed to remove labeled series"
+                );
+            }
+            if let Err(e) = self.channel_io_latency_seconds.remove_label_values(&labels) {
+                warn!(
+                    metric_name = "southward_io_latency_seconds",
+                    channel_id,
+                    driver,
+                    result,
+                    error = %e,
+                    "Failed to remove labeled series"
+                );
             }
         }
     }

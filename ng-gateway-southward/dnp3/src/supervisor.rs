@@ -3,7 +3,6 @@ use crate::{
     types::{Dnp3Channel, Dnp3Connection, Dnp3PointGroup, PointMeta},
 };
 use arc_swap::ArcSwap;
-use backoff::backoff::Backoff;
 use dashmap::DashMap;
 use dnp3::{
     app::{ConnectStrategy, Listener, MaybeAsync, Timeout, Variation},
@@ -17,7 +16,7 @@ use dnp3::{
     udp::spawn_master_udp,
 };
 use ng_gateway_sdk::{
-    build_exponential_backoff, DriverError, DriverResult, NorthwardPublisher,
+    DriverError, DriverResult, NorthwardPublisher, RetryController, RetryDecision,
     SouthwardConnectionState,
 };
 use std::{
@@ -158,8 +157,7 @@ impl Dnp3Supervisor {
             // Build an exponential backoff strategy based on the shared
             // `ConnectionPolicy` so that DNP3 behaves consistently with
             // other southbound drivers (Modbus, S7, DL/T 645, etc.).
-            let mut backoff = build_exponential_backoff(&self.channel.connection_policy.backoff);
-            let mut attempt: u64 = 0;
+            let mut retry = RetryController::new(&self.channel.connection_policy.backoff);
 
             loop {
                 if self.cancel.is_cancelled() {
@@ -169,7 +167,10 @@ impl Dnp3Supervisor {
                     return;
                 }
 
-                info!("Starting DNP3 Master Supervisor (attempt={})", attempt + 1);
+                info!(
+                    "Starting DNP3 Master Supervisor (retries_used={})",
+                    retry.retries_used()
+                );
                 let _ = self.conn_tx.send(SouthwardConnectionState::Connecting);
 
                 // Perform a single connect + association lifecycle.
@@ -192,30 +193,21 @@ impl Dnp3Supervisor {
                     }
                     Err(e) => {
                         error!("DNP3 connect_once failed: {:?}", e);
-                        let _ = self.conn_tx.send(SouthwardConnectionState::Failed(format!(
-                            "connect_once failed: {:?}",
-                            e
-                        )));
-
-                        attempt = attempt.saturating_add(1);
-                        let delay = backoff.next_backoff().unwrap_or_else(|| {
-                            Duration::from_millis(
-                                self.channel.connection_policy.backoff.max_interval_ms,
-                            )
-                        });
-
-                        warn!(
-                            attempt = attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            "DNP3 supervisor retry after failure"
-                        );
-
-                        tokio::select! {
-                            _ = tokio::time::sleep(delay) => {}
-                            _ = self.cancel.cancelled() => {
-                                let _ = self.conn_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
-                                return;
+                        let msg = format!("connect_once failed: {e:?}");
+                        let _ = self.conn_tx.send(SouthwardConnectionState::Failed(msg));
+                        match retry.on_failure() {
+                            RetryDecision::RetryAfter(delay) => {
+                                let _ = self.conn_tx.send(SouthwardConnectionState::Reconnecting);
+                                tokio::select! {
+                                    _ = tokio::time::sleep(delay) => {}
+                                    _ = self.cancel.cancelled() => {
+                                        let _ = self.conn_tx.send(SouthwardConnectionState::Disconnected);
+                                        return;
+                                    }
+                                }
+                                continue;
                             }
+                            RetryDecision::Exhausted => return,
                         }
                     }
                 }

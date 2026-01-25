@@ -75,6 +75,8 @@ impl ChannelMonitor {
                         return None;
                     }
 
+                    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+
                     // Maintain manager-level connected channels count in the hub (single source of truth).
                     let was_connected = last_state.is_connected();
                     let is_connected = state.is_connected();
@@ -87,8 +89,15 @@ impl ChannelMonitor {
                     // Update Prometheus gauges and reconnect counter.
                     prom.set_connected(state.is_connected());
                     prom.set_state_value(state.as_value());
+                    prom.record_state_change_ms(now_ms);
                     if state.is_reconnecting() && !last_state.is_reconnecting() {
                         prom.inc_reconnect();
+                    }
+                    if state.is_failed() && !last_state.is_failed() {
+                        prom.inc_connect_failed();
+                    }
+                    if was_connected && (state.is_disconnected() || state.is_failed()) {
+                        prom.inc_disconnect();
                     }
 
                     last_state = state.clone();

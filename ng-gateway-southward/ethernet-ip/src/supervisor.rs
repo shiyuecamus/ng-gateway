@@ -1,8 +1,8 @@
 use crate::types::{EthernetIpChannel, EthernetIpChannelConfig};
 use arc_swap::ArcSwapOption;
-use backoff::{backoff::Backoff, ExponentialBackoff};
 use ng_gateway_sdk::{
-    build_exponential_backoff, DriverError, DriverResult, SouthwardConnectionState,
+    connect_tcp_metered_with_timeout, DriverError, DriverResult, RetryController, RetryDecision,
+    SouthwardConnectionState, SouthwardTransportMeter,
 };
 use rust_ethernet_ip::{EipClient, RoutePath};
 use std::{
@@ -17,7 +17,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Shared session entry guarded by a single async mutex.
 /// The supervisor owns lifecycle and reconnection.
@@ -55,7 +55,9 @@ pub struct SessionSupervisor {
     pub shared: SharedSession,
     pub cancel_token: CancellationToken,
     pub state_tx: watch::Sender<SouthwardConnectionState>,
-    pub reconnect_rx: mpsc::Receiver<()>,
+    reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    started: AtomicBool,
+    transport_meter: Arc<dyn SouthwardTransportMeter>,
 }
 
 impl SessionSupervisor {
@@ -65,16 +67,23 @@ impl SessionSupervisor {
         cancel_token: CancellationToken,
         state_tx: watch::Sender<SouthwardConnectionState>,
         reconnect_rx: mpsc::Receiver<()>,
+        transport_meter: Arc<dyn SouthwardTransportMeter>,
     ) -> Self {
         Self {
             shared,
             cancel_token,
             state_tx,
-            reconnect_rx,
+            reconnect_rx: Mutex::new(Some(reconnect_rx)),
+            started: AtomicBool::new(false),
+            transport_meter,
         }
     }
 
-    async fn connect_once(cfg: &EthernetIpChannelConfig) -> DriverResult<EipClient> {
+    async fn connect_once(
+        cfg: &EthernetIpChannelConfig,
+        connect_timeout_ms: u64,
+        transport_meter: &Arc<dyn SouthwardTransportMeter>,
+    ) -> DriverResult<EipClient> {
         let addr = format!("{}:{}", cfg.host, cfg.port);
         let slot = cfg.slot;
         info!("Connecting to Ethernet/IP PLC at {} (Slot {})", addr, slot);
@@ -87,43 +96,56 @@ impl SessionSupervisor {
         // If the library's `connect` defaults to direct connection (which works for CompactLogix often),
         // `with_route_path` allows explicit routing.
 
-        // TODO(observability-bytes):
-        // - Goal: wrap transport with SDK MeteredStream/MeteredUdpSocket to provide measured bytes_in/out (Transport Bytes).
-        // - Blocker: `rust-ethernet-ip` does not expose connector/attach/from_stream yet, so we cannot inject a metered transport here.
-        // - Change point: `EipClient::connect(...)` / `EipClient::with_route_path(...)` below where the client is created.
-        // - Unblock: implement once upstream adds a "connect_with_stream/attach/from_stream" style API (track upstream issue/TODO).
-        let client_res = if slot == 0 {
-            // Try default connection for Slot 0 (often direct or default backplane)
-            EipClient::connect(&addr).await
+        let socket_addr = addr.parse::<std::net::SocketAddr>().map_err(|e| {
+            DriverError::ConfigurationError(format!("Invalid Ethernet/IP address {addr}: {e}"))
+        })?;
+        let io = connect_tcp_metered_with_timeout(
+            socket_addr,
+            Arc::clone(transport_meter),
+            connect_timeout_ms,
+        )
+        .await
+        .map_err(|e| DriverError::SessionError(format!("Ethernet/IP TCP connect failed: {e}")))?;
+
+        // Best-effort TCP_NODELAY for small CIP packets.
+        let _ = io.inner_ref().set_nodelay(true);
+
+        let route = if slot == 0 {
+            None
         } else {
-            // Explicit backplane routing
-            // Note: route path logic might vary by chassis type, but typically it's Backplane -> Slot
-            // rust-ethernet-ip example: RoutePath::new().add_slot(0).add_slot(2)
-            // We assume Port 1 (Backplane) is implicit or handled by add_slot logic?
-            // Looking at library docs (from memory/search):
-            // RoutePath logic is specific.
-            // Let's assume simplest backplane routing:
-            // path = Port 1, Address <slot>
-            let route = RoutePath::new().add_slot(slot);
-            EipClient::with_route_path(&addr, route).await
+            Some(RoutePath::new().add_slot(slot))
         };
 
-        match client_res {
-            Ok(client) => Ok(client),
-            Err(e) => Err(DriverError::SessionError(format!(
-                "Failed to connect to {} (Slot {}): {}",
-                addr, slot, e
-            ))),
-        }
+        EipClient::connect_with_stream(io, route)
+            .await
+            .map_err(|e| {
+                DriverError::SessionError(format!("Failed to connect to {addr} (Slot {slot}): {e}"))
+            })
     }
 
     /// Run supervisor loop: maintain a single healthy connection and reconnect on demand.
     /// Spawns the loop in a background task.
-    pub async fn run(self, channel: Arc<EthernetIpChannel>) -> DriverResult<()> {
+    pub async fn run(&self, channel: Arc<EthernetIpChannel>) -> DriverResult<()> {
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+
         let shared = Arc::clone(&self.shared);
         let cancel = self.cancel_token.clone();
         let state_tx = self.state_tx.clone();
-        let mut reconnect_rx = self.reconnect_rx;
+        let mut reconnect_rx =
+            self.reconnect_rx
+                .lock()
+                .await
+                .take()
+                .ok_or(DriverError::ConfigurationError(
+                    "reconnect receiver already consumed".into(),
+                ))?;
+        let transport_meter = Arc::clone(&self.transport_meter);
 
         tokio::spawn(async move {
             // reset flags
@@ -131,10 +153,7 @@ impl SessionSupervisor {
 
             loop {
                 let _ = state_tx.send(SouthwardConnectionState::Connecting);
-                // Connect with exponential backoff
-                let mut bo: ExponentialBackoff =
-                    build_exponential_backoff(&channel.connection_policy.backoff);
-                let mut attempt: u32 = 0;
+                let mut retry = RetryController::new(&channel.connection_policy.backoff);
                 let client: EipClient = loop {
                     if cancel.is_cancelled() {
                         shared.shutdown.store(true, Ordering::Release);
@@ -143,34 +162,34 @@ impl SessionSupervisor {
                             .send(SouthwardConnectionState::Failed("cancelled".to_string()));
                         return;
                     }
-                    match Self::connect_once(&channel.config).await {
+                    match Self::connect_once(
+                        &channel.config,
+                        channel.connection_policy.connect_timeout_ms,
+                        &transport_meter,
+                    )
+                    .await
+                    {
                         Ok(c) => break c,
                         Err(e) => {
                             shared.healthy.store(false, Ordering::Relaxed);
-                            let _ = state_tx.send(SouthwardConnectionState::Failed(e.to_string()));
-                            attempt = attempt.saturating_add(1);
-                            let delay = bo.next_backoff().unwrap_or_else(|| {
-                                StdDuration::from_millis(
-                                    channel.connection_policy.backoff.max_interval_ms,
-                                )
-                            });
-                            warn!(
-                                attempt = attempt,
-                                delay_ms = delay.as_millis() as u64,
-                                error = %e,
-                                "Ethernet/IP connect retry"
-                            );
-                            let _ = shared
-                                .last_error
-                                .lock()
-                                .map(|mut g| *g = Some(e.to_string()));
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    shared.shutdown.store(true, Ordering::Release);
-                                    let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
-                                    return;
+                            let msg = e.to_string();
+                            let _ = shared.last_error.lock().map(|mut g| *g = Some(msg.clone()));
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(msg));
+                            match retry.on_failure() {
+                                RetryDecision::RetryAfter(delay) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                    tokio::select! {
+                                        _ = cancel.cancelled() => {
+                                            shared.shutdown.store(true, Ordering::Release);
+                                            shared.healthy.store(false, Ordering::Release);
+                                            let _ = state_tx.send(SouthwardConnectionState::Disconnected);
+                                            return;
+                                        }
+                                        _ = sleep(delay) => {}
+                                    }
+                                    continue;
                                 }
-                                _ = sleep(delay) => {}
+                                RetryDecision::Exhausted => return,
                             }
                         }
                     }

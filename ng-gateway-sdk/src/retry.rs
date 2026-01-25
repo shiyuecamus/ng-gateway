@@ -1,4 +1,4 @@
-use backoff::ExponentialBackoff;
+use backoff::{backoff::Backoff, ExponentialBackoff};
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -15,7 +15,12 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryPolicy {
-    /// Maximum number of retry attempts (0 = no retries, None = unlimited attempts)
+    /// Maximum number of retry attempts.
+    ///
+    /// Semantics (MUST be consistent across southward/northward):
+    /// - `Some(0)`: no retries (fail immediately after the first failure)
+    /// - `Some(n)`: retry at most `n` times
+    /// - `None`: unlimited retries (use with caution)
     #[serde(default = "RetryPolicy::default_max_attempts")]
     pub max_attempts: Option<u32>,
 
@@ -57,7 +62,7 @@ impl Default for RetryPolicy {
 
 impl RetryPolicy {
     fn default_max_attempts() -> Option<u32> {
-        Some(3) // Reasonable default: 3 attempts
+        None // Default to unlimited retries (explicit budgets are opt-in)
     }
 
     fn default_initial_interval_ms() -> u64 {
@@ -126,5 +131,65 @@ pub fn build_exponential_backoff(policy: &RetryPolicy) -> ExponentialBackoff {
         multiplier: policy.multiplier.max(1.0),
         max_elapsed_time: policy.max_elapsed_time_ms.map(Duration::from_millis),
         ..ExponentialBackoff::default()
+    }
+}
+
+/// A unified retry budget controller that enforces BOTH:
+/// - `max_attempts` (count-based budget)
+/// - `max_elapsed_time` (time-based budget via backoff's `next_backoff == None`)
+///
+/// This avoids subtle off-by-one mismatches across drivers.
+#[derive(Debug, Clone)]
+pub struct RetryController {
+    backoff: ExponentialBackoff,
+    max_attempts: Option<u32>,
+    retries_used: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryDecision {
+    RetryAfter(Duration),
+    Exhausted,
+}
+
+impl RetryController {
+    #[inline]
+    pub fn new(policy: &RetryPolicy) -> Self {
+        Self {
+            backoff: build_exponential_backoff(policy),
+            max_attempts: policy.max_attempts,
+            retries_used: 0,
+        }
+    }
+
+    #[inline]
+    pub fn reset(&mut self) {
+        self.backoff.reset();
+        self.retries_used = 0;
+    }
+
+    /// Call this once per failure to decide whether to retry.
+    ///
+    /// - If `max_attempts = Some(0)`, this returns `Exhausted` immediately.
+    /// - Otherwise, if the time budget is exhausted (`next_backoff == None`), returns `Exhausted`.
+    #[inline]
+    pub fn on_failure(&mut self) -> RetryDecision {
+        if let Some(max) = self.max_attempts {
+            if self.retries_used >= max {
+                return RetryDecision::Exhausted;
+            }
+        }
+        match self.backoff.next_backoff() {
+            Some(dur) => {
+                self.retries_used = self.retries_used.saturating_add(1);
+                RetryDecision::RetryAfter(dur)
+            }
+            None => RetryDecision::Exhausted,
+        }
+    }
+
+    #[inline]
+    pub fn retries_used(&self) -> u32 {
+        self.retries_used
     }
 }

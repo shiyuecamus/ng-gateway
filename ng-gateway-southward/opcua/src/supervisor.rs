@@ -4,10 +4,9 @@ use super::types::{
 };
 use crate::types::OpcUaChannel;
 use arc_swap::ArcSwapOption;
-use backoff::{self, backoff::Backoff, ExponentialBackoff};
 use futures::{pin_mut, StreamExt};
 use ng_gateway_sdk::{
-    build_exponential_backoff, DriverError, DriverResult, SouthwardConnectionState,
+    DriverError, DriverResult, RetryController, RetryDecision, SouthwardConnectionState,
 };
 use opcua::{
     client::{
@@ -241,9 +240,7 @@ impl SessionSupervisor {
 
         tokio::spawn(async move {
             // Supervisor outer loop with reconnect/backoff, aligned with IEC104 design
-            let mut bo: ExponentialBackoff =
-                build_exponential_backoff(&channel.connection_policy.backoff);
-            let mut attempt: u32 = 0;
+            let mut retry = RetryController::new(&channel.connection_policy.backoff);
             let mut on_connected_opt = on_connected;
 
             loop {
@@ -253,27 +250,28 @@ impl SessionSupervisor {
                 let (session, ev) = loop {
                     if cancel.is_cancelled() {
                         shared.shutdown.store(true, Ordering::Release);
-                        let _ = state_tx
-                            .send(SouthwardConnectionState::Failed("cancelled".to_string()));
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                         return;
                     }
                     match Self::connect_once(&channel.config).await {
                         Ok(pair) => break pair,
                         Err(e) => {
-                            attempt = attempt.saturating_add(1);
-                            let delay = bo.next_backoff().unwrap_or_else(|| {
-                                Duration::from_millis(
-                                    channel.connection_policy.backoff.max_interval_ms,
-                                )
-                            });
-                            tracing::warn!(attempt = attempt, delay_ms = delay.as_millis() as u64, error = %e, "OPC UA connect retry");
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    shared.shutdown.store(true, Ordering::Release);
-                                    let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
-                                    return;
+                            let msg = e.to_string();
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(msg));
+                            match retry.on_failure() {
+                                RetryDecision::RetryAfter(delay) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                    tokio::select! {
+                                        _ = cancel.cancelled() => {
+                                            shared.shutdown.store(true, Ordering::Release);
+                                            let _ = state_tx.send(SouthwardConnectionState::Disconnected);
+                                            return;
+                                        }
+                                        _ = tokio::time::sleep(delay) => {}
+                                    }
+                                    continue;
                                 }
-                                _ = tokio::time::sleep(delay) => {}
+                                RetryDecision::Exhausted => return,
                             }
                         }
                     }
@@ -297,7 +295,7 @@ impl SessionSupervisor {
                         shared.session.store(None);
                         shared.healthy.store(false, Ordering::Release);
                         shared.shutdown.store(true, Ordering::Release);
-                        let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                         Self::set_last_error(&shared, "supervisor cancelled");
                         break;
                     }
@@ -307,14 +305,11 @@ impl SessionSupervisor {
                         shared.healthy.store(false, Ordering::Release);
                         let seen_active = res.unwrap_or(false);
                         if seen_active {
-                            bo.reset();
-                            attempt = 0;
+                            retry.reset();
                         }
 
-                        match bo.next_backoff() {
-                            Some(dur) => {
-                                attempt = attempt.saturating_add(1);
-                                tracing::warn!(attempt = attempt, delay_ms = dur.as_millis() as u64, "OPC UA connect retry");
+                        match retry.on_failure() {
+                            RetryDecision::RetryAfter(dur) => {
                                 tokio::select! {
                                     _ = cancel.cancelled() => { break; }
                                     _ = tokio::time::sleep(dur) => {
@@ -322,8 +317,8 @@ impl SessionSupervisor {
                                     }
                                 }
                             }
-                            None => {
-                                let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
+                            RetryDecision::Exhausted => {
+                                let _ = state_tx.send(SouthwardConnectionState::Failed("retry budget exhausted".to_string()));
                                 break;
                             }
                         }
@@ -355,7 +350,7 @@ impl SessionSupervisor {
                     let _ = tokio::time::timeout(Duration::from_secs(2), disconnect_session.disconnect())
                     .await;
                     shared.healthy.store(false, Ordering::Release);
-                    let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
+                    let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                     return seen_active;
                 }
                 maybe_item = stream.next() => {

@@ -6,8 +6,8 @@ use ng_driver_opcua::{
 };
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
-    NGTransportFactory, NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice,
-    RuntimePoint, SouthwardInitContext, Status, Transform,
+    NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -138,9 +138,7 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
         runtime_channel: runtime_channel as Arc<dyn RuntimeChannel>,
         publisher,
         channel_id,
-        driver: Arc::from("opcua"),
         transport_meter: Arc::new(NoopSouthwardTransportMeter),
-        transport_factory: Arc::new(NGTransportFactory),
     };
 
     let driver = OpcUaDriver::with_context(ctx)?;

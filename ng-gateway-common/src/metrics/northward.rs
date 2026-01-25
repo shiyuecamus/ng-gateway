@@ -178,7 +178,8 @@ impl NorthwardAppMetricHandles {
             messages_sent: sent,
             messages_dropped: dropped,
             errors,
-            retries: 0,
+            // Map snapshot retries to the authoritative reconnect counter.
+            retries: self.reconnect_total.get(),
             last_sent,
             last_error,
             avg_latency_ms,
@@ -696,6 +697,80 @@ impl NorthwardMetricsHub {
 
                 v.insert(Arc::clone(&handles));
                 Ok(handles)
+            }
+        }
+    }
+
+    /// Unregister an app and best-effort remove its labeled time series.
+    ///
+    /// # Notes
+    /// - This prevents "zombie" Prometheus series when apps are removed at runtime.
+    /// - Removal is best-effort: failures are logged and ignored.
+    pub(crate) fn unregister_app(&self, app_id: i32, plugin_id: i32) {
+        // Drop handle state first (releases snapshot state).
+        self.apps.remove(&(app_id, plugin_id));
+
+        let app_id_s = app_id.to_string();
+        let plugin_id_s = plugin_id.to_string();
+        let base = [app_id_s.as_str(), plugin_id_s.as_str()];
+
+        if let Err(e) = self.connected.remove_label_values(&base) {
+            warn!(
+                metric_name = "northward_app_connected",
+                app_id,
+                plugin_id,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+        if let Err(e) = self.state.remove_label_values(&base) {
+            warn!(
+                metric_name = "northward_app_state",
+                app_id,
+                plugin_id,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+        if let Err(e) = self.reconnect_total.remove_label_values(&base) {
+            warn!(
+                metric_name = "northward_app_reconnect_total",
+                app_id,
+                plugin_id,
+                error = %e,
+                "Failed to remove labeled series"
+            );
+        }
+
+        for dir in [NorthwardDirection::Uplink, NorthwardDirection::Downlink] {
+            for res in [
+                NorthwardResult::Success,
+                NorthwardResult::Fail,
+                NorthwardResult::Dropped,
+            ] {
+                let labels = [base[0], base[1], dir.as_label(), res.as_label()];
+                if let Err(e) = self.messages_total.remove_label_values(&labels) {
+                    warn!(
+                        metric_name = "northward_messages_total",
+                        app_id,
+                        plugin_id,
+                        direction = dir.as_label(),
+                        result = res.as_label(),
+                        error = %e,
+                        "Failed to remove labeled series"
+                    );
+                }
+                if let Err(e) = self.message_latency_seconds.remove_label_values(&labels) {
+                    warn!(
+                        metric_name = "northward_message_latency_seconds",
+                        app_id,
+                        plugin_id,
+                        direction = dir.as_label(),
+                        result = res.as_label(),
+                        error = %e,
+                        "Failed to remove labeled series"
+                    );
+                }
             }
         }
     }

@@ -3,9 +3,8 @@ use super::{
     topics::Topics,
 };
 use arc_swap::ArcSwapOption;
-use backoff::backoff::Backoff;
 use ng_gateway_sdk::{
-    build_exponential_backoff, NorthwardConnectionState, NorthwardError, NorthwardResult,
+    NorthwardConnectionState, NorthwardError, NorthwardResult, RetryController, RetryDecision,
     RetryPolicy,
 };
 use rumqttc::{AsyncClient, Event, EventLoop, Packet};
@@ -135,9 +134,9 @@ impl ThingsBoardSupervisor {
     /// 4. Retry based on policy (max_attempts semantics)
     ///
     /// # Max Attempts Semantics
-    /// - `None` or `Some(0)`: Unlimited retries (use with caution!)
-    /// - `Some(1)`: Only one attempt, fail immediately after first failure (no backoff)
-    /// - `Some(n > 1)`: Retry up to n times total (including initial attempt)
+    /// - `Some(0)`: No retries (fail immediately after the first failure)
+    /// - `Some(n)`: Retry at most `n` times
+    /// - `None`: Unlimited retries (use with caution!)
     pub async fn run(self) {
         let config = Arc::clone(&self.config);
         let credentials = Arc::clone(&self.credentials);
@@ -148,41 +147,20 @@ impl ThingsBoardSupervisor {
         let shared_client = Arc::clone(&self.shared_client);
 
         tokio::spawn(async move {
-            let mut bo = build_exponential_backoff(&retry_policy);
-            let mut attempt: u32 = 0;
-
-            // Calculate max attempts: None or Some(0) = unlimited, Some(n) = n attempts total
-            let should_retry = |current_attempt: u32| -> bool {
-                match retry_policy.max_attempts {
-                    None | Some(0) => true,             // Unlimited retries
-                    Some(max) => current_attempt < max, // Retry up to max attempts
-                }
-            };
+            let mut retry = RetryController::new(&retry_policy);
 
             loop {
                 // Check if we should continue
                 if cancel.is_cancelled() {
-                    let _ = state_tx.send(NorthwardConnectionState::Failed(
-                        "Supervisor cancelled".to_string(),
-                    ));
+                    let _ = state_tx.send(NorthwardConnectionState::Disconnected);
                     info!("ThingsBoard supervisor cancelled");
                     break;
                 }
 
-                if !should_retry(attempt) {
-                    let _ = state_tx.send(NorthwardConnectionState::Failed(format!(
-                        "Max retry attempts ({:?}) exhausted",
-                        retry_policy.max_attempts
-                    )));
-                    warn!(
-                        max_attempts = ?retry_policy.max_attempts,
-                        "ThingsBoard supervisor exhausted retry attempts"
-                    );
-                    break;
-                }
-
-                attempt += 1;
-                info!(attempt, "ThingsBoard supervisor attempting connection");
+                info!(
+                    retries_used = retry.retries_used(),
+                    "ThingsBoard supervisor attempting connection"
+                );
 
                 // Update state to Connecting
                 let _ = state_tx.send(NorthwardConnectionState::Connecting);
@@ -192,42 +170,18 @@ impl ThingsBoardSupervisor {
                     Ok(pair) => pair,
                     Err(e) => {
                         let error_msg = e.to_string();
-                        warn!(error = %e, attempt, "Failed to create MQTT client");
+                        warn!(error = %e, "Failed to create MQTT client");
                         shared_client.update_error(error_msg.clone());
                         let _ = state_tx.send(NorthwardConnectionState::Failed(error_msg.clone()));
-
-                        // Check if we should retry before applying backoff
-                        // If max_attempts = Some(1), we've already attempted once, so don't retry
-                        if !should_retry(attempt) {
-                            // No more retries allowed, return immediately without backoff
-                            warn!(
-                                max_attempts = ?retry_policy.max_attempts,
-                                attempt,
-                                "Max attempts reached, not retrying"
-                            );
-                            break;
-                        }
-
-                        // Apply backoff before retry
-                        if let Some(delay) = bo.next_backoff() {
-                            info!(
-                                delay_ms = delay.as_millis() as u64,
-                                "Backing off before retry"
-                            );
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    info!("Backoff cancelled");
-                                    break;
+                        match retry.on_failure() {
+                            RetryDecision::RetryAfter(delay) => {
+                                let _ = state_tx.send(NorthwardConnectionState::Reconnecting);
+                                tokio::select! {
+                                    _ = cancel.cancelled() => break,
+                                    _ = tokio::time::sleep(delay) => {}
                                 }
-                                _ = tokio::time::sleep(delay) => {}
                             }
-                        } else {
-                            // Backoff exhausted (max_elapsed_time reached)
-                            warn!("Exponential backoff exhausted");
-                            let _ = state_tx.send(NorthwardConnectionState::Failed(
-                                "Backoff time exhausted".to_string(),
-                            ));
-                            break;
+                            RetryDecision::Exhausted => break,
                         }
                         continue;
                     }
@@ -248,8 +202,7 @@ impl ThingsBoardSupervisor {
 
                 // If we successfully connected (seen_active), reset backoff
                 if seen_active {
-                    bo.reset();
-                    attempt = 0; // Reset attempt counter on successful connection
+                    retry.reset();
                     info!("ThingsBoard connection was active, resetting backoff");
                 }
 
@@ -259,28 +212,17 @@ impl ThingsBoardSupervisor {
                     break;
                 }
 
-                // Apply backoff before retry
-                match bo.next_backoff() {
-                    Some(delay) => {
+                match retry.on_failure() {
+                    RetryDecision::RetryAfter(delay) => {
                         let _ = state_tx.send(NorthwardConnectionState::Reconnecting);
-                        info!(
-                            attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            "ThingsBoard reconnect backoff"
-                        );
                         tokio::select! {
-                            _ = cancel.cancelled() => {
-                                info!("Reconnect backoff cancelled");
-                                break;
-                            }
+                            _ = cancel.cancelled() => break,
                             _ = tokio::time::sleep(delay) => {}
                         }
                     }
-                    None => {
-                        // Backoff exhausted
-                        warn!("Exponential backoff exhausted during reconnect");
+                    RetryDecision::Exhausted => {
                         let _ = state_tx.send(NorthwardConnectionState::Failed(
-                            "Backoff time exhausted".to_string(),
+                            "retry budget exhausted".to_string(),
                         ));
                         break;
                     }

@@ -1,5 +1,4 @@
 use crate::NGSouthwardManager;
-
 use chrono::Utc;
 use futures::{future::join_all, StreamExt};
 use ng_gateway_common::metrics::{
@@ -36,6 +35,9 @@ struct DeviceEntry {
     runtime_device: Arc<dyn RuntimeDevice>,
     points: Arc<[Arc<dyn RuntimePoint>]>,
 }
+
+/// A tuple containing the driver handle and a list of device entries.
+type DeviceEntries = (Option<Arc<dyn Driver>>, Vec<DeviceEntry>);
 
 /// A single driver group call containing a batch of collect items.
 ///
@@ -243,7 +245,7 @@ impl Collector {
     fn build_device_entries(
         southward_manager: &Arc<NGSouthwardManager>,
         device_ids: Vec<i32>,
-    ) -> NGResult<(Arc<dyn Driver>, Vec<DeviceEntry>)> {
+    ) -> NGResult<DeviceEntries> {
         let mut driver_handle = None;
         let mut entries = Vec::with_capacity(device_ids.len());
 
@@ -276,9 +278,7 @@ impl Collector {
             });
         }
 
-        let driver =
-            driver_handle.ok_or_else(|| NGError::Error("No driver for channel tick".into()))?;
-        Ok((driver, entries))
+        Ok((driver_handle, entries))
     }
 
     /// Build driver group calls from device entries.
@@ -461,8 +461,16 @@ impl Collector {
         // Build device entries and group calls (batching plan) up-front.
         let (driver, entries) = Self::build_device_entries(southward_manager, device_ids)?;
         if entries.is_empty() {
+            debug!("📭 Channel [{channel_name}] no collectable points; skipping tick");
             return Ok(());
         }
+        let driver = driver.ok_or(
+            NGError::Error(format!(
+                "Invariant violation: channel [{channel_name}] has {} collectable device entries but no driver handle",
+                entries.len()
+            ))
+        )?;
+
         let groups = Self::build_group_calls(&driver, entries);
         if groups.is_empty() {
             return Ok(());

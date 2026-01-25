@@ -9,8 +9,8 @@ use ng_driver_modbus::{
 };
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
-    NGTransportFactory, NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice,
-    RuntimePoint, SouthwardInitContext, Status, Transform,
+    NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -157,9 +157,7 @@ pub fn build_modbus_channel_runtime(
         runtime_channel: runtime_channel as Arc<dyn RuntimeChannel>,
         publisher,
         channel_id,
-        driver: Arc::from("modbus"),
         transport_meter: Arc::new(NoopSouthwardTransportMeter),
-        transport_factory: Arc::new(NGTransportFactory),
     };
 
     let driver = ModbusDriver::with_context(ctx)?;

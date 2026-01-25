@@ -3,14 +3,13 @@ use super::config::{
     PulsarProducerConfig,
 };
 use arc_swap::ArcSwapOption;
-use backoff::backoff::Backoff;
 use futures_util::StreamExt;
 use ng_gateway_sdk::northward::downlink::{
     decode_event, DownlinkMessageMeta, DownlinkRouteTable, KeyValue,
 };
 use ng_gateway_sdk::{
-    build_exponential_backoff, northward::codec::DecodeError, NorthwardConnectionState,
-    NorthwardEvent, RetryPolicy,
+    northward::codec::DecodeError, NorthwardConnectionState, NorthwardEvent, RetryController,
+    RetryDecision, RetryPolicy,
 };
 use pulsar::{
     compression::Compression,
@@ -134,15 +133,7 @@ impl PulsarSupervisor {
         } = self;
 
         tokio::spawn(async move {
-            let mut bo = build_exponential_backoff(&retry_policy);
-            let mut attempt: u32 = 0;
-
-            let should_retry = |current_attempt: u32| -> bool {
-                match retry_policy.max_attempts {
-                    None | Some(0) => true,
-                    Some(max) => current_attempt < max,
-                }
-            };
+            let mut retry = RetryController::new(&retry_policy);
 
             loop {
                 if cancel.is_cancelled() {
@@ -151,17 +142,8 @@ impl PulsarSupervisor {
                     break;
                 }
 
-                if !should_retry(attempt) {
-                    let _ = state_tx.send(NorthwardConnectionState::Failed(format!(
-                        "Max retry attempts ({:?}) exhausted",
-                        retry_policy.max_attempts
-                    )));
-                    break;
-                }
-
-                attempt += 1;
                 let _ = state_tx.send(NorthwardConnectionState::Connecting);
-                info!(attempt, "Pulsar supervisor attempting connection");
+                info!("Pulsar supervisor attempting connection");
 
                 match connect_pulsar_client(&conn).await {
                     Ok(pulsar_client) => {
@@ -181,8 +163,7 @@ impl PulsarSupervisor {
                         shared_client.healthy.store(true, Ordering::Release);
                         shared_client.clear_error();
                         let _ = state_tx.send(NorthwardConnectionState::Connected);
-                        bo.reset();
-                        attempt = 0;
+                        retry.reset();
 
                         // Start downlink consumer task (streaming) for this session.
                         //
@@ -237,29 +218,20 @@ impl PulsarSupervisor {
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
-                        warn!(attempt, error=%error_msg, "Failed to create Pulsar client");
+                        warn!(error=%error_msg, "Failed to create Pulsar client");
                         shared_client.update_error(&error_msg);
                         shared_client.producer.store(None);
                         shared_client.healthy.store(false, Ordering::Release);
                         let _ = state_tx.send(NorthwardConnectionState::Failed(error_msg));
-
-                        if !should_retry(attempt) {
-                            break;
-                        }
-
-                        match bo.next_backoff() {
-                            Some(delay) => {
+                        match retry.on_failure() {
+                            RetryDecision::RetryAfter(delay) => {
+                                let _ = state_tx.send(NorthwardConnectionState::Reconnecting);
                                 tokio::select! {
                                     _ = cancel.cancelled() => break,
                                     _ = tokio::time::sleep(delay) => {}
                                 }
                             }
-                            None => {
-                                let _ = state_tx.send(NorthwardConnectionState::Failed(
-                                    "Backoff time exhausted".to_string(),
-                                ));
-                                break;
-                            }
+                            RetryDecision::Exhausted => break,
                         }
                     }
                 }

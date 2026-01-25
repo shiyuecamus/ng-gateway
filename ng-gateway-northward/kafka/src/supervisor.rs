@@ -11,14 +11,13 @@ use super::config::{
     KafkaSecurityProtocol,
 };
 use arc_swap::ArcSwapOption;
-use backoff::backoff::Backoff;
 use futures_util::StreamExt;
 use ng_gateway_sdk::northward::downlink::{
     decode_event, DownlinkMessageMeta, DownlinkRouteTable, KeyValue,
 };
 use ng_gateway_sdk::{
-    build_exponential_backoff, northward::codec::DecodeError, NorthwardConnectionState,
-    NorthwardEvent, RetryPolicy,
+    northward::codec::DecodeError, NorthwardConnectionState, NorthwardEvent, RetryController,
+    RetryDecision, RetryPolicy,
 };
 use rdkafka::{
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -205,15 +204,7 @@ fn spawn_producer_supervisor_task(params: ProducerSupervisorParams) {
         mut reconnect_rx,
     } = params;
     tokio::spawn(async move {
-        let mut bo = build_exponential_backoff(&retry_policy);
-        let mut attempt: u32 = 0;
-
-        let should_retry = |current_attempt: u32| -> bool {
-            match retry_policy.max_attempts {
-                None | Some(0) => true,
-                Some(max) => current_attempt < max,
-            }
-        };
+        let mut retry = RetryController::new(&retry_policy);
 
         loop {
             if cancel.is_cancelled() {
@@ -223,17 +214,8 @@ fn spawn_producer_supervisor_task(params: ProducerSupervisorParams) {
                 break;
             }
 
-            if !should_retry(attempt) {
-                let _ = state_tx.send(NorthwardConnectionState::Failed(format!(
-                    "Max retry attempts ({:?}) exhausted",
-                    retry_policy.max_attempts
-                )));
-                break;
-            }
-
-            attempt += 1;
             let _ = state_tx.send(NorthwardConnectionState::Connecting);
-            info!(attempt, "Kafka producer supervisor attempting connection");
+            info!("Kafka producer supervisor attempting connection");
 
             match connect_kafka_producer(app_id, &conn, &producer_cfg).await {
                 Ok(producer) => {
@@ -241,8 +223,7 @@ fn spawn_producer_supervisor_task(params: ProducerSupervisorParams) {
                     shared_client.healthy.store(true, Ordering::Release);
                     shared_client.clear_error();
                     let _ = state_tx.send(NorthwardConnectionState::Connected);
-                    bo.reset();
-                    attempt = 0;
+                    retry.reset();
 
                     // Connected loop: wait for reconnect request or shutdown.
                     loop {
@@ -268,26 +249,23 @@ fn spawn_producer_supervisor_task(params: ProducerSupervisorParams) {
                 }
                 Err(e) => {
                     let error_msg = e.to_string();
-                    warn!(attempt, error=%error_msg, "Failed to create Kafka producer");
+                    warn!(error=%error_msg, "Failed to create Kafka producer");
                     shared_client.update_error(&error_msg);
                     shared_client.producer.store(None);
                     shared_client.healthy.store(false, Ordering::Release);
                     let _ = state_tx.send(NorthwardConnectionState::Failed(error_msg));
 
-                    if !should_retry(attempt) {
-                        break;
-                    }
-
-                    match bo.next_backoff() {
-                        Some(delay) => {
+                    match retry.on_failure() {
+                        RetryDecision::RetryAfter(delay) => {
+                            let _ = state_tx.send(NorthwardConnectionState::Reconnecting);
                             tokio::select! {
                                 _ = cancel.cancelled() => break,
                                 _ = tokio::time::sleep(delay) => {}
                             }
                         }
-                        None => {
+                        RetryDecision::Exhausted => {
                             let _ = state_tx.send(NorthwardConnectionState::Failed(
-                                "Backoff time exhausted".to_string(),
+                                "retry budget exhausted".to_string(),
                             ));
                             break;
                         }
@@ -309,56 +287,31 @@ fn spawn_consumer_supervisor_task(
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut bo = build_exponential_backoff(&retry_policy);
-        let mut attempt: u32 = 0;
-
-        let should_retry = |current_attempt: u32| -> bool {
-            match retry_policy.max_attempts {
-                None | Some(0) => true,
-                Some(max) => current_attempt < max,
-            }
-        };
+        let mut retry = RetryController::new(&retry_policy);
 
         loop {
             if cancel.is_cancelled() {
                 break;
             }
 
-            if !should_retry(attempt) {
-                warn!(
-                    attempt,
-                    "Kafka consumer supervisor exhausted max retry attempts ({:?}); stopping downlink",
-                    retry_policy.max_attempts
-                );
-                break;
-            }
-
-            attempt += 1;
-            info!(
-                attempt,
-                "Kafka consumer supervisor starting downlink session"
-            );
+            info!("Kafka consumer supervisor starting downlink session");
 
             match run_downlink_consumer_session(app_id, &conn, &routes, &events_tx, &cancel).await {
                 Ok(()) => {
                     // Normal exit (usually cancellation). Stop the supervisor.
-                    bo.reset();
+                    retry.reset();
                     break;
                 }
                 Err(e) => {
-                    warn!(attempt, error=%e, "Kafka downlink session failed");
-
-                    match bo.next_backoff() {
-                        Some(delay) => {
+                    warn!(error=%e, "Kafka downlink session failed");
+                    match retry.on_failure() {
+                        RetryDecision::RetryAfter(delay) => {
                             tokio::select! {
                                 _ = cancel.cancelled() => break,
                                 _ = tokio::time::sleep(delay) => {}
                             }
                         }
-                        None => {
-                            warn!("Kafka consumer supervisor backoff exhausted; stopping downlink");
-                            break;
-                        }
+                        RetryDecision::Exhausted => break,
                     }
                 }
             }

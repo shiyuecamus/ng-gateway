@@ -42,6 +42,7 @@ pub struct McDriver {
     inner: Arc<McChannel>,
     /// Shared session entry with underlying IO handle and health flags.
     pub(super) shared: SharedSession,
+    supervisor: McSupervisor,
     /// Started flag to guard duplicate `start()` calls.
     started: AtomicBool,
     /// Cancel token used to stop supervisor and internal tasks.
@@ -52,7 +53,6 @@ pub struct McDriver {
     failed_requests: AtomicU64,
     last_avg_response_time_ms: AtomicU64,
     /// Connection state broadcast channel.
-    conn_tx: watch::Sender<SouthwardConnectionState>,
     conn_rx: watch::Receiver<SouthwardConnectionState>,
 }
 
@@ -67,19 +67,28 @@ impl McDriver {
     /// This performs type downcast checks and initializes shared session state
     /// but does not perform any I/O. All network activity is started in `start()`.
     pub fn with_context(ctx: SouthwardInitContext) -> DriverResult<Self> {
-        let (tx, rx) = watch::channel(SouthwardConnectionState::Disconnected);
-
         let inner = ctx
             .runtime_channel
             .downcast_arc::<McChannel>()
             .map_err(|_| DriverError::ConfigurationError("Invalid McChannel".to_string()))?;
 
+        let (tx, rx) = watch::channel(SouthwardConnectionState::Disconnected);
+
+        let shared = Arc::new(SessionEntry::new_empty());
+        let cancel_token = CancellationToken::new();
+        let supervisor = McSupervisor::new(
+            Arc::clone(&shared),
+            cancel_token.child_token(),
+            tx,
+            Arc::clone(&ctx.transport_meter),
+        );
+
         Ok(Self {
             inner,
-            shared: Arc::new(SessionEntry::new_empty()),
+            shared,
+            supervisor,
             started: AtomicBool::new(false),
-            cancel_token: CancellationToken::new(),
-            conn_tx: tx,
+            cancel_token,
             conn_rx: rx,
             total_requests: AtomicU64::new(0),
             successful_requests: AtomicU64::new(0),
@@ -218,10 +227,7 @@ impl Driver for McDriver {
             return Ok(());
         }
 
-        let cancel = self.cancel_token.child_token();
-        let shared = Arc::clone(&self.shared);
-        let supervisor = McSupervisor::new(shared, cancel, self.conn_tx.clone());
-        supervisor.run(Arc::clone(&self.inner)).await?;
+        self.supervisor.run(Arc::clone(&self.inner)).await?;
         Ok(())
     }
 

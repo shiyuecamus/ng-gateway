@@ -33,7 +33,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 /// Production-ready DL/T 645 driver implementation skeleton.
@@ -47,12 +47,8 @@ pub struct Dl645Driver {
     inner: Arc<Dl645Channel>,
     /// Shared session state managed by the supervisor.
     session: SharedSession,
-    /// Deferred reconnect receiver, created during init and consumed once in `start`.
-    reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
     /// Driver-level cancellation token.
     cancel: CancellationToken,
-    /// Connection state channel sender.
-    conn_tx: watch::Sender<SouthwardConnectionState>,
     /// Connection state channel receiver.
     conn_rx: watch::Receiver<SouthwardConnectionState>,
     /// Started flag to prevent duplicate `start` calls.
@@ -65,6 +61,7 @@ pub struct Dl645Driver {
     failed_requests: AtomicU64,
     /// Metrics: exponential moving average of response time in milliseconds.
     last_avg_response_time_ms: AtomicU64,
+    supervisor: Dl645Supervisor,
 }
 
 impl Dl645Driver {
@@ -73,6 +70,7 @@ impl Dl645Driver {
     /// This method validates the runtime channel type, builds planner and
     /// session structures, and indexes points per device for fast lookup.
     pub fn with_context(ctx: SouthwardInitContext) -> DriverResult<Self> {
+        let transport_meter = Arc::clone(&ctx.transport_meter);
         let inner = ctx
             .runtime_channel
             .downcast_arc::<Dl645Channel>()
@@ -88,13 +86,19 @@ impl Dl645Driver {
             inner.config.max_timeouts,
         ));
         let cancel = CancellationToken::new();
+        let supervisor = Dl645Supervisor::new(
+            Arc::clone(&shared),
+            cancel.child_token(),
+            conn_tx,
+            reconnect_rx,
+            transport_meter,
+        );
 
         Ok(Self {
             inner,
             session: shared,
-            reconnect_rx: Mutex::new(Some(reconnect_rx)),
+            supervisor,
             cancel,
-            conn_tx,
             conn_rx,
             started: AtomicBool::new(false),
             total_requests: AtomicU64::new(0),
@@ -573,16 +577,7 @@ impl Driver for Dl645Driver {
             return Ok(());
         }
 
-        // Spawn connection supervisor.
-        let channel = Arc::clone(&self.inner);
-        let shared = Arc::clone(&self.session);
-        let cancel = self.cancel.child_token();
-        let mut rx_guard = self.reconnect_rx.lock().await;
-        let reconnect_rx = rx_guard.take().ok_or(DriverError::ExecutionError(
-            "reconnect receiver already consumed".to_string(),
-        ))?;
-        let supervisor = Dl645Supervisor::new(shared, cancel, self.conn_tx.clone(), reconnect_rx);
-        supervisor.run(channel).await?;
+        self.supervisor.run(Arc::clone(&self.inner)).await?;
 
         Ok(())
     }

@@ -28,11 +28,16 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures::{SinkExt, Stream, StreamExt};
 use std::{io, sync::Arc, time::Duration};
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore},
     time,
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
+
+pub trait McStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> McStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+type Transport = Box<dyn McStream>;
 
 /// Request message for MC session.
 #[allow(unused)]
@@ -121,12 +126,11 @@ pub struct MultiAddressWriteSpec {
 }
 
 /// Session event loop facade providing a stream of `SessionEvent`
-#[derive(Debug)]
 pub struct SessionEventLoop {
     session: Arc<Session>,
     inner_cancel: CancellationToken,
     config: Arc<SessionConfig>,
-    pre_connected: Option<TcpStream>,
+    pre_connected: Option<Transport>,
 }
 
 #[allow(unused)]
@@ -1185,6 +1189,7 @@ impl Session {
 }
 
 /// Create a new MC session and event loop (S7-aligned signature)
+#[allow(unused)]
 pub fn create(config: Arc<SessionConfig>) -> (Arc<Session>, SessionEventLoop) {
     let cancel = CancellationToken::new();
     let config = Arc::new(config);
@@ -1202,7 +1207,7 @@ pub fn create(config: Arc<SessionConfig>) -> (Arc<Session>, SessionEventLoop) {
 #[allow(unused)]
 pub fn create_with_stream(
     config: Arc<SessionConfig>,
-    stream: TcpStream,
+    stream: impl McStream + 'static,
 ) -> (Arc<Session>, SessionEventLoop) {
     let cancel = CancellationToken::new();
     let config = Arc::new(config);
@@ -1211,7 +1216,7 @@ pub fn create_with_stream(
         session: Arc::clone(&session),
         inner_cancel: CancellationToken::new(),
         config: Arc::clone(&config),
-        pre_connected: Some(stream),
+        pre_connected: Some(Box::new(stream)),
     };
     (session, ev)
 }
@@ -1291,13 +1296,13 @@ async fn run_connection(
         }
     };
     let _ = stream.set_nodelay(config.tcp_nodelay);
-    run_connection_with_stream(session, stream, config, cancel).await;
+    run_connection_with_stream(session, Box::new(stream), config, cancel).await;
 }
 
 /// Main connection driver using a pre-connected TcpStream (S7-aligned)
 async fn run_connection_with_stream(
     session: Arc<Session>,
-    stream: TcpStream,
+    stream: Transport,
     config: Arc<SessionConfig>,
     cancel: CancellationToken,
 ) {

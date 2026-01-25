@@ -22,19 +22,15 @@ use ng_gateway_common::metrics::{
 };
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
-    core::metrics::{
-        ChannelStatsSnapshot, DeviceMetricsSnapshot, DeviceStatsSnapshot,
-        SouthwardManagerMetricsSnapshot,
-    },
+    core::metrics::{ChannelStatsSnapshot, DeviceStatsSnapshot, SouthwardManagerMetricsSnapshot},
     entities::prelude::{ActionModel, ChannelModel, DeviceModel, PointModel},
     SouthwardManager,
 };
 use ng_gateway_sdk::{
     AccessMode, AttributeData, CollectionType, DeviceState, Driver, DriverFactory, DriverHealth,
-    DriverRegistry, InstrumentedTransportFactory, NGInstrumentedTransportFactory, NGValue,
-    NorthwardData, PointMeta, ReportType, RuntimeAction, RuntimeChannel, RuntimeDelta,
-    RuntimeDevice, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, Status,
-    TelemetryData,
+    DriverRegistry, NGValue, NorthwardData, PointMeta, ReportType, RuntimeAction, RuntimeChannel,
+    RuntimeDelta, RuntimeDevice, RuntimePoint, SouthwardConnectionState, SouthwardInitContext,
+    Status, TelemetryData,
 };
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
@@ -219,9 +215,6 @@ pub struct NGSouthwardManager {
     /// Metrics hub (single source of truth).
     metrics_hub: Arc<NGMetricsHub>,
 
-    /// Transport factory used by drivers to create instrumented I/O.
-    transport_factory: Arc<dyn InstrumentedTransportFactory>,
-
     /// Device data snapshots: device_id -> DeviceDataSnapshot
     ///
     /// Maintains the latest telemetry and attribute values for each device.
@@ -244,7 +237,6 @@ impl NGSouthwardManager {
             driver_registry,
             monitor,
             metrics_hub,
-            transport_factory: Arc::new(NGInstrumentedTransportFactory::default()),
             device_snapshots: Arc::new(DashMap::new()),
         }
     }
@@ -845,18 +837,16 @@ impl NGSouthwardManager {
             }
         }
 
-        // Assemble init context directly from converted topology
-        let meter = Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom)));
-        let driver_key: Arc<str> = Arc::from(runtime_channel.driver_id().to_string());
         let ctx = SouthwardInitContext {
             devices,
             points_by_device,
             runtime_channel: Arc::clone(&runtime_channel),
-            publisher: Arc::new(MpscNorthwardPublisher::new(data_tx.clone())),
+            publisher: Arc::new(MpscNorthwardPublisher::new(
+                data_tx.clone(),
+                Arc::clone(&prom),
+            )),
             channel_id: runtime_channel.id(),
-            driver: driver_key,
-            transport_meter: meter,
-            transport_factory: Arc::clone(&self.transport_factory),
+            transport_meter: Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom))),
         };
 
         // Create driver and wrap
@@ -998,17 +988,16 @@ impl NGSouthwardManager {
             }
         }
 
-        let meter = Arc::new(ChannelBoundTransportMeter::new(prom));
-        let driver_key: Arc<str> = Arc::from(runtime_channel.driver_id().to_string());
         SouthwardInitContext {
             devices,
             points_by_device,
             runtime_channel,
-            publisher: Arc::new(MpscNorthwardPublisher::new(data_tx.clone())),
+            publisher: Arc::new(MpscNorthwardPublisher::new(
+                data_tx.clone(),
+                Arc::clone(&prom),
+            )),
             channel_id,
-            driver: driver_key,
-            transport_meter: meter,
-            transport_factory: Arc::clone(&self.transport_factory),
+            transport_meter: Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom))),
         }
     }
 
@@ -1080,6 +1069,14 @@ impl NGSouthwardManager {
         // Cancel per-channel monitor
         self.monitor.cancel(channel_id);
 
+        // Snapshot driver label early (used for metrics unregister when removing).
+        // IMPORTANT: do not hold DashMap guards across await.
+        let driver_label = self
+            .index
+            .channels
+            .get(&channel_id)
+            .map(|instance| instance.config.driver_id().to_string());
+
         // Stop driver if channel exists.
         //
         // IMPORTANT: never hold a DashMap guard across `.await`, otherwise we can deadlock if the
@@ -1095,6 +1092,14 @@ impl NGSouthwardManager {
         }
 
         if remove {
+            if let Some(driver_label) = driver_label.as_ref() {
+                // Remove per-channel labeled metrics to avoid "zombie" series.
+                self.metrics_hub
+                    .unregister_southward_channel_metrics(channel_id, driver_label);
+                self.metrics_hub
+                    .unregister_control_channel_metrics(channel_id, driver_label);
+            }
+
             if let Some((_, device_ids)) = self.index.channel_devices.remove(&channel_id) {
                 for device_id in device_ids.iter().copied() {
                     if let Some((_, dev)) = self.index.devices.remove(&device_id) {
@@ -1860,10 +1865,7 @@ impl NGSouthwardManager {
             let metrics_opt = prom
                 .as_ref()
                 .and_then(|h| h.snapshot_device_metrics(device_id));
-            let (metrics, metrics_attributed) = match metrics_opt {
-                Some(m) => (m, true),
-                None => (DeviceMetricsSnapshot::default(), false),
-            };
+            let metrics = metrics_opt.unwrap_or_default();
 
             out.push(DeviceStatsSnapshot {
                 device_id,
@@ -1872,7 +1874,6 @@ impl NGSouthwardManager {
                 device_type: dev.device_type,
                 status: dev.status as i32,
                 runtime_state: Some(dev.state),
-                bytes_attributed: metrics_attributed,
                 metrics,
             });
         }

@@ -6,9 +6,10 @@ use crate::{
     types::{Dl645Channel, Dl645ChannelConfig, Dl645Connection},
 };
 use arc_swap::ArcSwapOption;
-use backoff::backoff::Backoff;
 use ng_gateway_sdk::{
-    build_exponential_backoff, DriverError, DriverResult, SouthwardConnectionState,
+    connect_serial_metered, connect_tcp_metered_with_timeout, DriverError, DriverResult,
+    RetryController, RetryDecision, SerialConnectConfig, SouthwardConnectionState,
+    SouthwardTransportMeter,
 };
 use std::{
     net::SocketAddr,
@@ -16,10 +17,8 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
 };
 use tokio::sync::{mpsc, watch, Mutex};
-use tokio_serial::SerialPortBuilderExt;
 use tokio_util::sync::CancellationToken;
 
 impl From<ProtocolError> for DriverError {
@@ -112,7 +111,9 @@ pub struct Dl645Supervisor {
     /// Connection state watch sender maintained by supervisor.
     state_tx: watch::Sender<SouthwardConnectionState>,
     /// Receiver for reconnect requests emitted by the data-plane.
-    reconnect_rx: mpsc::Receiver<()>,
+    reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    started: AtomicBool,
+    transport_meter: Arc<dyn SouthwardTransportMeter>,
 }
 
 impl Dl645Supervisor {
@@ -122,12 +123,15 @@ impl Dl645Supervisor {
         cancel_token: CancellationToken,
         state_tx: watch::Sender<SouthwardConnectionState>,
         reconnect_rx: mpsc::Receiver<()>,
+        transport_meter: Arc<dyn SouthwardTransportMeter>,
     ) -> Self {
         Self {
             shared,
             cancel_token,
             state_tx,
-            reconnect_rx,
+            reconnect_rx: Mutex::new(Some(reconnect_rx)),
+            started: AtomicBool::new(false),
+            transport_meter,
         }
     }
 
@@ -136,7 +140,11 @@ impl Dl645Supervisor {
     /// This helper mirrors the `connect_once` pattern used by the Modbus driver
     /// and keeps transport-specific logic encapsulated while the supervisor
     /// focuses on lifecycle and backoff.
-    async fn connect_once(cfg: &Dl645ChannelConfig) -> DriverResult<Arc<dyn Dl645Session>> {
+    async fn connect_once(
+        cfg: &Dl645ChannelConfig,
+        connect_timeout_ms: u64,
+        transport_meter: &Arc<dyn SouthwardTransportMeter>,
+    ) -> DriverResult<Arc<dyn Dl645Session>> {
         match &cfg.connection {
             Dl645Connection::Serial {
                 port,
@@ -146,14 +154,18 @@ impl Dl645Supervisor {
                 parity,
             } => {
                 let session_cfg = SessionConfig::new(cfg.wakeup_preamble.clone(), cfg.version);
-                let serial = tokio_serial::new(port, *baud_rate)
-                    .data_bits((*data_bits).into())
-                    .stop_bits((*stop_bits).into())
-                    .parity((*parity).into())
-                    .open_native_async()
-                    .map_err(|e| DriverError::SessionError(e.to_string()))?;
-
-                Ok(Arc::new(Dl645SessionImpl::new(serial, session_cfg)))
+                let io = connect_serial_metered(
+                    SerialConnectConfig {
+                        port: port.to_string(),
+                        baud_rate: *baud_rate,
+                        data_bits: (*data_bits).into(),
+                        stop_bits: (*stop_bits).into(),
+                        parity: (*parity).into(),
+                    },
+                    Arc::clone(transport_meter),
+                )
+                .map_err(|e| DriverError::SessionError(e.to_string()))?;
+                Ok(Arc::new(Dl645SessionImpl::new(io, session_cfg)))
             }
             Dl645Connection::Tcp { host, port } => {
                 let addr = format!("{}:{}", host, port)
@@ -164,12 +176,14 @@ impl Dl645Supervisor {
                         ))
                     })?;
                 let session_cfg = SessionConfig::new(cfg.wakeup_preamble.clone(), cfg.version);
-                let stream = tokio::net::TcpStream::connect(addr)
-                    .await
-                    .map_err(|e| DriverError::SessionError(format!("TCP connect failed: {}", e)))?;
-                stream.set_nodelay(true).ok();
-
-                Ok(Arc::new(Dl645SessionImpl::new(stream, session_cfg)))
+                let io = connect_tcp_metered_with_timeout(
+                    addr,
+                    Arc::clone(transport_meter),
+                    connect_timeout_ms,
+                )
+                .await
+                .map_err(|e| DriverError::SessionError(format!("TCP connect failed: {e}")))?;
+                Ok(Arc::new(Dl645SessionImpl::new(io, session_cfg)))
             }
         }
     }
@@ -178,11 +192,25 @@ impl Dl645Supervisor {
     ///
     /// This mirrors the Modbus `SessionSupervisor` design: a single outer loop with
     /// exponential backoff which owns the underlying `Dl645Session` lifecycle.
-    pub async fn run(self, channel: Arc<Dl645Channel>) -> DriverResult<()> {
+    pub async fn run(&self, channel: Arc<Dl645Channel>) -> DriverResult<()> {
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+
         let shared = Arc::clone(&self.shared);
         let cancel = self.cancel_token.clone();
         let state_tx = self.state_tx.clone();
-        let mut reconnect_rx = self.reconnect_rx;
+        let mut reconnect_rx = self
+            .reconnect_rx
+            .lock()
+            .await
+            .take()
+            .ok_or(DriverError::ExecutionError("reconnect rx consumed".into()))?;
+        let transport_meter = Arc::clone(&self.transport_meter);
 
         tokio::spawn(async move {
             // reset flags
@@ -191,9 +219,8 @@ impl Dl645Supervisor {
             loop {
                 let _ = state_tx.send(SouthwardConnectionState::Connecting);
 
-                // Connect with exponential backoff.
-                let mut backoff = build_exponential_backoff(&channel.connection_policy.backoff);
-                let mut attempt: u64 = 0;
+                // Connect with unified retry controller.
+                let mut retry = RetryController::new(&channel.connection_policy.backoff);
 
                 let session: Arc<dyn Dl645Session> = loop {
                     if cancel.is_cancelled() {
@@ -204,7 +231,13 @@ impl Dl645Supervisor {
                         return;
                     }
 
-                    match Self::connect_once(&channel.config).await {
+                    match Self::connect_once(
+                        &channel.config,
+                        channel.connection_policy.connect_timeout_ms,
+                        &transport_meter,
+                    )
+                    .await
+                    {
                         Ok(sess) => break sess,
                         Err(e) => {
                             {
@@ -212,27 +245,23 @@ impl Dl645Supervisor {
                                 *last = Some(e.to_string());
                             }
                             shared.healthy.store(false, Ordering::Relaxed);
-                            let _ = state_tx.send(SouthwardConnectionState::Failed(e.to_string()));
-                            attempt = attempt.saturating_add(1);
-                            let delay = backoff.next_backoff().unwrap_or_else(|| {
-                                Duration::from_millis(
-                                    channel.connection_policy.backoff.max_interval_ms,
-                                )
-                            });
-                            tracing::warn!(
-                                attempt = attempt,
-                                delay_ms = delay.as_millis() as u64,
-                                error = %e,
-                                "DL/T 645 connect retry"
-                            );
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    shared.shutdown.store(true, Ordering::Release);
-                                    shared.healthy.store(false, Ordering::Release);
-                                    let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
-                                    return;
+                            let msg = e.to_string();
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(msg));
+                            match retry.on_failure() {
+                                RetryDecision::RetryAfter(delay) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                    tokio::select! {
+                                        _ = cancel.cancelled() => {
+                                            shared.shutdown.store(true, Ordering::Release);
+                                            shared.healthy.store(false, Ordering::Release);
+                                            let _ = state_tx.send(SouthwardConnectionState::Disconnected);
+                                            return;
+                                        }
+                                        _ = tokio::time::sleep(delay) => {}
+                                    }
+                                    continue;
                                 }
-                                _ = tokio::time::sleep(delay) => {}
+                                RetryDecision::Exhausted => return,
                             }
                         }
                     }
@@ -245,6 +274,7 @@ impl Dl645Supervisor {
                 shared.healthy.store(true, Ordering::Release);
                 shared.consecutive_timeouts.store(0, Ordering::Release);
                 let _ = state_tx.send(SouthwardConnectionState::Connected);
+                retry.reset();
 
                 // Drain any stale notifications to avoid immediate redundant reconnect.
                 while reconnect_rx.try_recv().is_ok() {}
@@ -255,7 +285,7 @@ impl Dl645Supervisor {
                         shared.shutdown.store(true, Ordering::Release);
                         shared.session.store(None);
                         shared.healthy.store(false, Ordering::Release);
-                        let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                         return;
                     }
                     Some(()) = reconnect_rx.recv() => {

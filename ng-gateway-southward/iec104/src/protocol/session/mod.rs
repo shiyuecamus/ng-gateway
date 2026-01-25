@@ -30,6 +30,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     select,
     sync::{broadcast, mpsc, watch, Mutex},
@@ -37,11 +38,13 @@ use tokio::{
     time::{interval, timeout},
 };
 use tokio_util::{
-    codec::Decoder,
-    codec::Encoder,
-    sync::{CancellationToken as _CancellationTokenAlias, CancellationToken as _},
+    codec::{Decoder, Encoder, Framed},
+    sync::CancellationToken,
 };
-use tokio_util::{codec::Framed, sync::CancellationToken};
+
+pub trait Iec104Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> Iec104Stream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+type Transport = Box<dyn Iec104Stream>;
 
 #[derive(Debug, Clone)]
 pub enum Priority {
@@ -292,7 +295,7 @@ pub struct SessionEventLoop {
     inner_cancel: CancellationToken,
     socket_addr: SocketAddr,
     config: SessionConfig,
-    pre_connected: Option<TcpStream>,
+    pre_connected: Option<Transport>,
 }
 
 impl SessionEventLoop {
@@ -364,15 +367,15 @@ pub fn create(socket_addr: SocketAddr, config: SessionConfig) -> (Arc<Session>, 
 pub fn create_with_stream(
     socket_addr: SocketAddr,
     config: SessionConfig,
-    stream: TcpStream,
+    stream: impl Iec104Stream + 'static,
 ) -> (Arc<Session>, SessionEventLoop) {
-    let (session, _ev_unused) = create(socket_addr, config);
+    let (session, _ev_unused) = create(socket_addr, config.clone());
     let event_loop = SessionEventLoop {
         session: Arc::clone(&session),
         inner_cancel: CancellationToken::new(),
         socket_addr,
         config,
-        pre_connected: Some(stream),
+        pre_connected: Some(Box::new(stream)),
     };
     (session, event_loop)
 }
@@ -416,18 +419,16 @@ async fn run_connection(
             return;
         }
     };
-    run_connection_with_stream(session, transport, config, cancel).await;
+    let _ = transport.set_nodelay(config.tcp_nodelay);
+    run_connection_with_stream(session, Box::new(transport), config, cancel).await;
 }
 
 async fn run_connection_with_stream(
     session: Arc<Session>,
-    transport: TcpStream,
+    transport: Transport,
     config: SessionConfig,
     cancel: CancellationToken,
 ) {
-    if let Err(e) = transport.set_nodelay(config.tcp_nodelay) {
-        tracing::warn!(error=%e, tcp_nodelay=config.tcp_nodelay, "set TCP_NODELAY failed");
-    }
     let mut framed = Framed::new(transport, Codec);
     let (tx, mut rx) = mpsc::channel::<Request>(config.send_queue_capacity);
     session.sender.store(Some(Arc::new(tx.clone())));

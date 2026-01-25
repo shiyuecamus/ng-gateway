@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration as StdDuration, Instant},
 };
@@ -31,16 +31,13 @@ pub struct EthernetIpDriver {
     inner: Arc<EthernetIpChannel>,
     /// Shared session (Single Supervisor Pattern)
     shared: SharedSession,
+    supervisor: SessionSupervisor,
     /// Started flag
     started: AtomicBool,
     /// Cancel token for supervisor
     cancel_token: CancellationToken,
 
-    conn_tx: watch::Sender<SouthwardConnectionState>,
     conn_rx: watch::Receiver<SouthwardConnectionState>,
-
-    /// Temporary storage for the reconnect receiver during initialization
-    reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
 
     total_requests: AtomicU64,
     successful_requests: AtomicU64,
@@ -64,15 +61,23 @@ impl EthernetIpDriver {
 
         let (conn_tx, conn_rx) = watch::channel(SouthwardConnectionState::Disconnected);
         let (reconnect_tx, reconnect_rx) = mpsc::channel(1);
+        let shared = Arc::new(SessionEntry::new_empty(reconnect_tx));
+        let cancel_token = CancellationToken::new();
+        let supervisor = SessionSupervisor::new(
+            Arc::clone(&shared),
+            cancel_token.child_token(),
+            conn_tx,
+            reconnect_rx,
+            Arc::clone(&ctx.transport_meter),
+        );
 
         Ok(Self {
             inner,
-            shared: Arc::new(SessionEntry::new_empty(reconnect_tx)),
+            shared,
+            supervisor,
             started: AtomicBool::new(false),
-            cancel_token: CancellationToken::new(),
-            conn_tx,
+            cancel_token,
             conn_rx,
-            reconnect_rx: Mutex::new(Some(reconnect_rx)),
             total_requests: AtomicU64::new(0),
             successful_requests: AtomicU64::new(0),
             failed_requests: AtomicU64::new(0),
@@ -111,22 +116,8 @@ impl Driver for EthernetIpDriver {
             return Ok(());
         }
 
-        let rx =
-            self.reconnect_rx
-                .lock()
-                .unwrap()
-                .take()
-                .ok_or(DriverError::ConfigurationError(
-                    "Driver already started or invalid state".into(),
-                ))?;
-
-        let cancel = self.cancel_token.child_token();
-        let shared = Arc::clone(&self.shared);
-
-        let supervisor = SessionSupervisor::new(shared, cancel, self.conn_tx.clone(), rx);
-
         let channel = Arc::clone(&self.inner);
-        supervisor.run(channel).await?;
+        self.supervisor.run(channel).await?;
 
         info!("Ethernet/IP driver started");
         Ok(())

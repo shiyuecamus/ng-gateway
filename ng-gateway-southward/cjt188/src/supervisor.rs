@@ -3,20 +3,19 @@ use crate::{
     types::{Cjt188Channel, Cjt188Connection},
 };
 use arc_swap::ArcSwapOption;
-use backoff::backoff::Backoff;
 use ng_gateway_sdk::{
-    build_exponential_backoff, DriverError, DriverResult, SouthwardConnectionState,
+    connect_serial_metered, connect_tcp_metered_with_timeout, DriverError, DriverResult,
+    RetryController, RetryDecision, SerialConnectConfig, SouthwardConnectionState,
+    SouthwardTransportMeter,
 };
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
 };
-use tokio::sync::{mpsc, watch, Mutex};
-use tokio::time::sleep;
-use tokio_serial::SerialPortBuilderExt;
+use tokio::{
+    sync::{mpsc, watch, Mutex},
+    time::sleep,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Lightweight wrapper around a session trait object.
@@ -54,7 +53,9 @@ pub struct Cjt188Supervisor {
     pub shared: SharedSession,
     cancel_token: CancellationToken,
     state_tx: watch::Sender<SouthwardConnectionState>,
-    reconnect_rx: mpsc::Receiver<()>,
+    reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    started: AtomicBool,
+    transport_meter: Arc<dyn SouthwardTransportMeter>,
 }
 
 impl Cjt188Supervisor {
@@ -63,16 +64,23 @@ impl Cjt188Supervisor {
         cancel_token: CancellationToken,
         state_tx: watch::Sender<SouthwardConnectionState>,
         reconnect_rx: mpsc::Receiver<()>,
+        transport_meter: Arc<dyn SouthwardTransportMeter>,
     ) -> Self {
         Self {
             shared,
             cancel_token,
             state_tx,
-            reconnect_rx,
+            reconnect_rx: Mutex::new(Some(reconnect_rx)),
+            started: AtomicBool::new(false),
+            transport_meter,
         }
     }
 
-    async fn connect_once(cfg: &Cjt188Channel) -> DriverResult<Arc<dyn Cjt188Session>> {
+    async fn connect_once(
+        cfg: &Cjt188Channel,
+        connect_timeout_ms: u64,
+        transport_meter: Arc<dyn SouthwardTransportMeter>,
+    ) -> DriverResult<Arc<dyn Cjt188Session>> {
         let session_cfg = SessionConfig::new(cfg.config.wakeup_preamble.clone());
         let version = cfg.config.version;
 
@@ -84,38 +92,58 @@ impl Cjt188Supervisor {
                 stop_bits,
                 parity,
             } => {
-                let serial = tokio_serial::new(port, *baud_rate)
-                    .data_bits((*data_bits).into())
-                    .stop_bits((*stop_bits).into())
-                    .parity((*parity).into())
-                    .open_native_async()
-                    .map_err(|e| DriverError::SessionError(e.to_string()))?;
-
-                Ok(Arc::new(Cjt188SessionImpl::new(
-                    serial,
-                    session_cfg,
-                    version,
-                )))
+                let io = connect_serial_metered(
+                    SerialConnectConfig {
+                        port: port.to_string(),
+                        baud_rate: *baud_rate,
+                        data_bits: (*data_bits).into(),
+                        stop_bits: (*stop_bits).into(),
+                        parity: (*parity).into(),
+                    },
+                    Arc::clone(&transport_meter),
+                )
+                .map_err(|e| DriverError::SessionError(e.to_string()))?;
+                Ok(Arc::new(Cjt188SessionImpl::new(io, session_cfg, version)))
             }
             Cjt188Connection::Tcp { host, port } => {
-                let addr = format!("{}:{}", host, port);
-                let stream = tokio::net::TcpStream::connect(&addr)
-                    .await
-                    .map_err(|e| DriverError::SessionError(format!("TCP connect failed: {}", e)))?;
-                Ok(Arc::new(Cjt188SessionImpl::new(
-                    stream,
-                    session_cfg,
-                    version,
-                )))
+                let addr = format!("{}:{}", host, port)
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|e| {
+                        DriverError::ConfigurationError(format!(
+                            "Invalid CJ/T 188 TCP address {host}:{port}: {e}"
+                        ))
+                    })?;
+                let io = connect_tcp_metered_with_timeout(
+                    addr,
+                    Arc::clone(&transport_meter),
+                    connect_timeout_ms,
+                )
+                .await
+                .map_err(|e| DriverError::SessionError(format!("TCP connect failed: {e}")))?;
+                Ok(Arc::new(Cjt188SessionImpl::new(io, session_cfg, version)))
             }
         }
     }
 
-    pub async fn run(self, channel: Arc<Cjt188Channel>) -> DriverResult<()> {
+    pub async fn run(&self, channel: Arc<Cjt188Channel>) -> DriverResult<()> {
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+
         let shared = Arc::clone(&self.shared);
         let cancel = self.cancel_token.clone();
         let state_tx = self.state_tx.clone();
-        let mut reconnect_rx = self.reconnect_rx;
+        let mut reconnect_rx = self
+            .reconnect_rx
+            .lock()
+            .await
+            .take()
+            .ok_or(DriverError::ExecutionError("reconnect rx consumed".into()))?;
+        let transport_meter = Arc::clone(&self.transport_meter);
 
         tokio::spawn(async move {
             shared.shutdown.store(false, Ordering::Release);
@@ -123,18 +151,23 @@ impl Cjt188Supervisor {
             loop {
                 let _ = state_tx.send(SouthwardConnectionState::Connecting);
 
-                let mut backoff = build_exponential_backoff(&channel.connection_policy.backoff);
-                let mut attempt: u64 = 0;
+                let mut retry = RetryController::new(&channel.connection_policy.backoff);
 
                 let session: Arc<dyn Cjt188Session> = loop {
                     if cancel.is_cancelled() {
                         shared.shutdown.store(true, Ordering::Release);
                         shared.healthy.store(false, Ordering::Release);
-                        let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".into()));
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                         return;
                     }
 
-                    match Self::connect_once(&channel).await {
+                    match Self::connect_once(
+                        &channel,
+                        channel.connection_policy.connect_timeout_ms,
+                        Arc::clone(&transport_meter),
+                    )
+                    .await
+                    {
                         Ok(sess) => break sess,
                         Err(e) => {
                             {
@@ -142,20 +175,22 @@ impl Cjt188Supervisor {
                                 *last = Some(e.to_string());
                             }
                             shared.healthy.store(false, Ordering::Relaxed);
-                            let _ = state_tx.send(SouthwardConnectionState::Failed(e.to_string()));
-                            attempt = attempt.saturating_add(1);
-                            let delay = backoff.next_backoff().unwrap_or_else(|| {
-                                Duration::from_millis(
-                                    channel.connection_policy.backoff.max_interval_ms,
-                                )
-                            });
-
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    shared.shutdown.store(true, Ordering::Release);
-                                    return;
+                            let msg = e.to_string();
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(msg));
+                            match retry.on_failure() {
+                                RetryDecision::RetryAfter(delay) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                    tokio::select! {
+                                        _ = cancel.cancelled() => {
+                                            shared.shutdown.store(true, Ordering::Release);
+                                            let _ = state_tx.send(SouthwardConnectionState::Disconnected);
+                                            return;
+                                        }
+                                        _ = sleep(delay) => {}
+                                    }
+                                    continue;
                                 }
-                                _ = sleep(delay) => {}
+                                RetryDecision::Exhausted => return,
                             }
                         }
                     }
@@ -172,7 +207,7 @@ impl Cjt188Supervisor {
                     _ = cancel.cancelled() => {
                         shared.shutdown.store(true, Ordering::Release);
                         shared.session.store(None);
-                        let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".into()));
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                         return;
                     }
                     Some(()) = reconnect_rx.recv() => {

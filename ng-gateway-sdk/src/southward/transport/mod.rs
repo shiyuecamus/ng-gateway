@@ -9,70 +9,137 @@
 //! - instrumentation is done at the I/O boundary (AsyncRead/AsyncWrite wrappers)
 //! - metering callbacks are expected to be cheap (atomics / lock-free ring buffer)
 
-mod metered_stream;
-mod metered_udp;
 mod noop;
+mod stream;
+mod udp;
 
-pub use metered_stream::MeteredStream;
-pub use metered_udp::MeteredUdpSocket;
 pub use noop::NoopSouthwardTransportMeter;
-
-use std::{
-    fmt::Debug, future::Future, io::Result as IoResult, net::SocketAddr, pin::Pin, sync::Arc,
-};
-use tokio::net::TcpStream;
+use std::{fmt::Debug, io::Result as IoResult, net::SocketAddr, sync::Arc};
+pub use stream::MeteredStream;
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::time::{timeout, Duration as TokioDuration};
+use tokio_serial::{DataBits, Parity, SerialPortBuilderExt, SerialStream, StopBits};
+pub use udp::MeteredUdpSocket;
 
 /// Host-injected: aggregates measured transport bytes into an authoritative hub.
 ///
 /// # Contract
 /// - Implementations must be **fast** and must not allocate on hot paths.
-/// - Label cardinality must remain bounded (device_id is NOT a Prometheus label).
+/// - Label cardinality must remain bounded (do NOT add per-device labels).
 pub trait SouthwardTransportMeter: Send + Sync + Debug {
-    fn add_bytes_in(&self, channel_id: i32, driver: &str, device_id: Option<i32>, bytes: u64);
-    fn add_bytes_out(&self, channel_id: i32, driver: &str, device_id: Option<i32>, bytes: u64);
+    /// Add measured inbound bytes (field -> gateway).
+    ///
+    /// # Contract
+    /// - Must be fast and allocation-free.
+    /// - Called on I/O hot paths.
+    fn add_bytes_in(&self, bytes: u64);
+
+    /// Add measured outbound bytes (gateway -> field).
+    ///
+    /// # Contract
+    /// - Must be fast and allocation-free.
+    /// - Called on I/O hot paths.
+    fn add_bytes_out(&self, bytes: u64);
 }
 
-/// Unified instrumentation-aware transport factory.
+/// Connect a TCP stream and wrap it with metering.
 ///
-/// # Notes
-/// This is primarily used at connection creation sites to ensure **all** transports
-/// are wrapped consistently. It is intentionally async to support DNS and OS I/O.
-pub trait InstrumentedTransportFactory: Send + Sync + Debug {
-    fn connect_tcp(
-        &self,
-        channel_id: i32,
-        driver: Arc<str>,
-        device_id: Option<i32>,
-        addr: SocketAddr,
-        meter: Arc<dyn SouthwardTransportMeter>,
-    ) -> Pin<Box<dyn Future<Output = IoResult<MeteredStream<TcpStream>>> + Send>>;
+/// # Best practice (dynamic drivers)
+/// When running southward drivers as `cdylib` plugins, **do not** call a host-provided async
+/// transport factory from inside the plugin runtime. That would create a Future implemented by
+/// the host binary and poll it on the plugin Tokio runtime, which can panic with
+/// \"there is no reactor running\" due to Tokio runtime context isolation across dylibs.
+///
+/// Prefer calling this helper directly inside the plugin so the returned Future is implemented
+/// by the plugin-linked `tokio` and is polled by the plugin's own Tokio runtime.
+#[inline]
+#[allow(unused)]
+pub async fn connect_tcp_metered(
+    addr: SocketAddr,
+    meter: Arc<dyn SouthwardTransportMeter>,
+) -> IoResult<MeteredStream<TcpStream>> {
+    let stream = TcpStream::connect(addr).await?;
+    Ok(MeteredStream::new(stream, meter))
 }
 
-/// Default transport factory implementation for gateway-hosted drivers.
-///
-/// This implementation creates a `tokio::net::TcpStream` and wraps it into `MeteredStream`
-/// with the provided meter and identity.
-#[derive(Debug, Default)]
-pub struct NGTransportFactory;
-
-impl InstrumentedTransportFactory for NGTransportFactory {
-    #[inline]
-    fn connect_tcp(
-        &self,
-        channel_id: i32,
-        driver: Arc<str>,
-        device_id: Option<i32>,
-        addr: SocketAddr,
-        meter: Arc<dyn SouthwardTransportMeter>,
-    ) -> Pin<Box<dyn Future<Output = IoResult<MeteredStream<TcpStream>>> + Send>> {
-        Box::pin(async move {
-            let stream = TcpStream::connect(addr).await?;
-            Ok(MeteredStream::new(
-                stream, meter, channel_id, driver, device_id,
-            ))
-        })
+/// Same as [`connect_tcp_metered`] but enforces a connect timeout.
+#[inline]
+#[allow(unused)]
+pub async fn connect_tcp_metered_with_timeout(
+    addr: SocketAddr,
+    meter: Arc<dyn SouthwardTransportMeter>,
+    connect_timeout_ms: u64,
+) -> IoResult<MeteredStream<TcpStream>> {
+    let d = TokioDuration::from_millis(connect_timeout_ms.max(1));
+    match timeout(d, connect_tcp_metered(addr, meter)).await {
+        Ok(r) => r,
+        Err(_elapsed) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "tcp connect timeout",
+        )),
     }
 }
 
-/// Backward-compatible alias.
-pub type NGInstrumentedTransportFactory = NGTransportFactory;
+/// Bind a UDP socket and wrap it with metering.
+///
+/// This should be called from inside the plugin runtime, for the same reason as TCP:
+/// keep the Future implementation and the Tokio runtime in the same dylib \"world\".
+#[inline]
+#[allow(unused)]
+pub async fn bind_udp_metered(
+    bind_addr: SocketAddr,
+    meter: Arc<dyn SouthwardTransportMeter>,
+) -> IoResult<MeteredUdpSocket> {
+    let sock = UdpSocket::bind(bind_addr).await?;
+    Ok(MeteredUdpSocket::new(sock, meter))
+}
+
+/// Bind a UDP socket with timeout and wrap it with metering.
+#[inline]
+#[allow(unused)]
+pub async fn bind_udp_metered_with_timeout(
+    bind_addr: SocketAddr,
+    meter: Arc<dyn SouthwardTransportMeter>,
+    bind_timeout_ms: u64,
+) -> IoResult<MeteredUdpSocket> {
+    let d = TokioDuration::from_millis(bind_timeout_ms.max(1));
+    match timeout(d, bind_udp_metered(bind_addr, meter)).await {
+        Ok(r) => r,
+        Err(_elapsed) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "udp bind timeout",
+        )),
+    }
+}
+
+/// Serial open configuration for `connect_serial_metered`.
+///
+/// This intentionally uses `tokio_serial` types so drivers can pass through their
+/// already-resolved serial parameters without re-mapping enums in the SDK.
+#[derive(Clone, Debug)]
+pub struct SerialConnectConfig {
+    pub port: String,
+    pub baud_rate: u32,
+    pub data_bits: DataBits,
+    pub stop_bits: StopBits,
+    pub parity: Parity,
+}
+
+/// Open a serial port and wrap it with metering.
+///
+/// Notes:
+/// - `open_native_async()` is a synchronous OS call and cannot be meaningfully timed out.
+/// - This helper keeps serial metering setup consistent across drivers.
+#[inline]
+#[allow(unused)]
+pub fn connect_serial_metered(
+    cfg: SerialConnectConfig,
+    meter: Arc<dyn SouthwardTransportMeter>,
+) -> IoResult<MeteredStream<SerialStream>> {
+    let stream = tokio_serial::new(cfg.port, cfg.baud_rate)
+        .data_bits(cfg.data_bits)
+        .stop_bits(cfg.stop_bits)
+        .parity(cfg.parity)
+        .open_native_async()?;
+    Ok(MeteredStream::new(stream, meter))
+}

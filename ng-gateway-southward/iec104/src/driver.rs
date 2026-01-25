@@ -57,8 +57,8 @@ pub struct Iec104Driver {
     failed_requests: Arc<AtomicU64>,
     last_avg_response_time_ms: Arc<AtomicU64>,
     /// Connection state watch channel
-    conn_tx: watch::Sender<SouthwardConnectionState>,
     conn_rx: watch::Receiver<SouthwardConnectionState>,
+    supervisor: Iec104Supervisor,
 }
 
 // Point metadata with device information
@@ -119,24 +119,34 @@ impl Iec104Driver {
     pub fn with_context(ctx: SouthwardInitContext) -> DriverResult<Self> {
         let (state_tx, state_rx) = watch::channel(SouthwardConnectionState::Disconnected);
         let ca_to_device = Self::build_mappings(&ctx);
-        let inner = ctx
-            .runtime_channel
+
+        // Downcast after any borrows of `ctx` to avoid moving `ctx.runtime_channel` early.
+        let inner = Arc::clone(&ctx.runtime_channel)
             .downcast_arc::<Iec104Channel>()
             .map_err(|_| DriverError::ConfigurationError("Invalid Iec104Channel".to_string()))?;
 
+        let shared = Arc::new(SessionEntry::new_empty());
+        let cancel_token = CancellationToken::new();
+        let supervisor = Iec104Supervisor::new(
+            Arc::clone(&shared),
+            cancel_token.child_token(),
+            state_tx,
+            Arc::clone(&ctx.transport_meter),
+        );
+
         Ok(Self {
             inner,
-            shared: Arc::new(SessionEntry::new_empty()),
+            shared,
             publisher: ctx.publisher,
             started: AtomicBool::new(false),
-            cancel_token: CancellationToken::new(),
+            cancel_token,
             ca_to_snapshot: ca_to_device,
             last_avg_response_time_ms: Arc::new(AtomicU64::new(0)),
             total_requests: Arc::new(AtomicU64::new(0)),
             successful_requests: Arc::new(AtomicU64::new(0)),
             failed_requests: Arc::new(AtomicU64::new(0)),
-            conn_tx: state_tx,
             conn_rx: state_rx,
+            supervisor,
         })
     }
 
@@ -691,12 +701,7 @@ impl Driver for Iec104Driver {
         let shared = Arc::clone(&self.shared);
         // Rebuild startup actions based on current runtime (safe, CPU only)
         // Note: We don't have ChannelRuntimeContext here; rely on channel config to decide startup default actions
-        // Start supervisor
-        let cancel = self.cancel_token.child_token();
-        let supervisor = Iec104Supervisor::new(shared.clone(), cancel, self.conn_tx.clone());
-
-        // Supervisor runs and spawns its internal tasks
-        supervisor
+        self.supervisor
             .run(Arc::clone(&self.inner), self.build_startup_actions())
             .await?;
 

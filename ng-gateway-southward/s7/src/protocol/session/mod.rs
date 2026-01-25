@@ -1,6 +1,6 @@
 mod handshake;
 mod state;
-use ng_gateway_sdk::{WireDecode, WireEncode};
+
 pub use state::{SessionConfig, SessionEvent, SessionLifecycleState};
 
 use super::{
@@ -17,6 +17,7 @@ use arc_swap::ArcSwapOption;
 use bytes::{Bytes, BytesMut};
 use futures::{pin_mut, Stream};
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
+use ng_gateway_sdk::{WireDecode, WireEncode};
 use std::{
     cmp::{max, min},
     collections::{BTreeMap, HashMap},
@@ -29,12 +30,17 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     select,
     sync::{broadcast, mpsc, oneshot, watch, Mutex, OwnedSemaphorePermit, Semaphore},
     time::sleep,
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
+
+pub trait S7Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> S7Stream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+type Transport = Box<dyn S7Stream>;
 
 /// Request message for the session
 #[derive(Debug)]
@@ -94,12 +100,11 @@ pub struct Session {
 }
 
 /// Session event loop facade providing a stream of `SessionPollResult` and helpers
-#[derive(Debug)]
 pub struct SessionEventLoop {
     session: Arc<Session>,
     inner_cancel: CancellationToken,
     config: Arc<SessionConfig>,
-    pre_connected: Option<TcpStream>,
+    pre_connected: Option<Transport>,
 }
 
 impl SessionEventLoop {
@@ -600,7 +605,7 @@ pub fn create(config: Arc<SessionConfig>) -> (Arc<Session>, SessionEventLoop) {
 /// Create a new S7 session and event loop with a pre-connected TcpStream (IEC104-aligned)
 pub fn create_with_stream(
     config: Arc<SessionConfig>,
-    stream: TcpStream,
+    stream: impl S7Stream + 'static,
 ) -> (Arc<Session>, SessionEventLoop) {
     let cancel = CancellationToken::new();
     let config = Arc::new(config);
@@ -609,7 +614,7 @@ pub fn create_with_stream(
         session: Arc::clone(&session),
         inner_cancel: CancellationToken::new(),
         config: Arc::clone(&config),
-        pre_connected: Some(stream),
+        pre_connected: Some(Box::new(stream)),
     };
     (session, ev)
 }
@@ -643,13 +648,13 @@ async fn run_connection(
         }
     };
     let _ = stream.set_nodelay(config.tcp_nodelay);
-    run_connection_with_stream(session, stream, config, cancel).await;
+    run_connection_with_stream(session, Box::new(stream), config, cancel).await;
 }
 
 /// Main connection driver using a pre-connected TcpStream (IEC104-aligned)
 async fn run_connection_with_stream(
     session: Arc<Session>,
-    stream: TcpStream,
+    stream: Transport,
     config: Arc<SessionConfig>,
     cancel: CancellationToken,
 ) {
@@ -945,7 +950,7 @@ fn publish_lifecycle(
 
 #[inline]
 async fn poll_next_msg(
-    stream: &mut Option<SplitStream<Framed<TcpStream, Codec>>>,
+    stream: &mut Option<SplitStream<Framed<Transport, Codec>>>,
 ) -> Option<StdResult<S7Message, Error>> {
     if let Some(st) = stream.as_mut() {
         match st.next().await {

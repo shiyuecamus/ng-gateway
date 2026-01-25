@@ -20,32 +20,29 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 pub struct MeteredStream<T> {
     inner: T,
     meter: Arc<dyn SouthwardTransportMeter>,
-    channel_id: i32,
-    driver: Arc<str>,
-    device_id: Option<i32>,
 }
 
 impl<T> MeteredStream<T> {
     #[inline]
-    pub fn new(
-        inner: T,
-        meter: Arc<dyn SouthwardTransportMeter>,
-        channel_id: i32,
-        driver: Arc<str>,
-        device_id: Option<i32>,
-    ) -> Self {
-        Self {
-            inner,
-            meter,
-            channel_id,
-            driver,
-            device_id,
-        }
+    pub fn new(inner: T, meter: Arc<dyn SouthwardTransportMeter>) -> Self {
+        Self { inner, meter }
     }
 
     #[inline]
     pub fn into_inner(self) -> T {
         self.inner
+    }
+
+    /// Borrow the inner transport by shared reference.
+    #[inline]
+    pub fn inner_ref(&self) -> &T {
+        &self.inner
+    }
+
+    /// Borrow the inner transport by mutable reference.
+    #[inline]
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
     }
 }
 
@@ -62,8 +59,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for MeteredStream<T> {
             let after = buf.filled().len();
             let n = after.saturating_sub(before) as u64;
             if n > 0 {
-                self.meter
-                    .add_bytes_in(self.channel_id, self.driver.as_ref(), self.device_id, n);
+                self.meter.add_bytes_in(n);
             }
         }
         poll
@@ -81,8 +77,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for MeteredStream<T> {
         if let Poll::Ready(Ok(n)) = &poll {
             let n = *n as u64;
             if n > 0 {
-                self.meter
-                    .add_bytes_out(self.channel_id, self.driver.as_ref(), self.device_id, n);
+                self.meter.add_bytes_out(n);
             }
         }
         poll
@@ -108,8 +103,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for MeteredStream<T> {
         if let Poll::Ready(Ok(n)) = &poll {
             let n = *n as u64;
             if n > 0 {
-                self.meter
-                    .add_bytes_out(self.channel_id, self.driver.as_ref(), self.device_id, n);
+                self.meter.add_bytes_out(n);
             }
         }
         poll
@@ -134,23 +128,11 @@ mod tests {
     }
 
     impl SouthwardTransportMeter for TestMeter {
-        fn add_bytes_in(
-            &self,
-            _channel_id: i32,
-            _driver: &str,
-            _device_id: Option<i32>,
-            bytes: u64,
-        ) {
+        fn add_bytes_in(&self, bytes: u64) {
             self.bytes_in.fetch_add(bytes, Ordering::Relaxed);
         }
 
-        fn add_bytes_out(
-            &self,
-            _channel_id: i32,
-            _driver: &str,
-            _device_id: Option<i32>,
-            bytes: u64,
-        ) {
+        fn add_bytes_out(&self, bytes: u64) {
             self.bytes_out.fetch_add(bytes, Ordering::Relaxed);
         }
     }
@@ -161,7 +143,7 @@ mod tests {
         let meter: Arc<dyn SouthwardTransportMeter> = meter_impl.clone();
         let (a, mut b) = tokio::io::duplex(64 * 1024);
 
-        let mut metered = MeteredStream::new(a, Arc::clone(&meter), 1, Arc::from("test"), None);
+        let mut metered = MeteredStream::new(a, Arc::clone(&meter));
 
         // write path (out)
         let payload = vec![0xABu8; 4096];

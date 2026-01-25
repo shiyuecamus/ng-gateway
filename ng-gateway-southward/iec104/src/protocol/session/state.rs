@@ -39,7 +39,7 @@ pub enum SessionEvent {
 /// - auto_reconnect: Whether to auto reconnect when connection lost
 /// - reconnect_min_delay_ms: Minimum backoff delay in milliseconds
 /// - reconnect_max_delay_ms: Maximum backoff delay in milliseconds
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SessionConfig {
     /// Connection establishment timeout (ms)
     pub connection_timeout_ms: u64,

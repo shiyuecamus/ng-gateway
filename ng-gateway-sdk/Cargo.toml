@@ -26,6 +26,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Tokio
 tokio = { version = "1.47", features = ["full"] }
+tokio-serial = { version = "5.4" }
 
 # Bytes
 bytes = { version = "1.9" }

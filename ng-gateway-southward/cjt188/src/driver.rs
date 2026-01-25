@@ -23,16 +23,15 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 /// Production-ready CJ/T 188 driver.
 pub struct Cjt188Driver {
     inner: Arc<Cjt188Channel>,
     session: SharedSession,
-    reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    supervisor: Cjt188Supervisor,
     cancel: CancellationToken,
-    conn_tx: watch::Sender<SouthwardConnectionState>,
     conn_rx: watch::Receiver<SouthwardConnectionState>,
     started: AtomicBool,
     total_requests: AtomicU64,
@@ -43,8 +42,6 @@ pub struct Cjt188Driver {
 
 impl Cjt188Driver {
     pub fn with_context(ctx: SouthwardInitContext) -> DriverResult<Self> {
-        // Try to downcast to Cjt188Channel.
-        // Note: This requires Cjt188Channel to be registered in the loader/models.
         let inner = ctx
             .runtime_channel
             .downcast_arc::<Cjt188Channel>()
@@ -63,13 +60,19 @@ impl Cjt188Driver {
         let threshold = inner.config.max_timeouts;
         let shared = Arc::new(SessionEntry::new_empty(reconnect_tx, threshold));
         let cancel = CancellationToken::new();
+        let supervisor = Cjt188Supervisor::new(
+            Arc::clone(&shared),
+            cancel.child_token(),
+            conn_tx,
+            reconnect_rx,
+            ctx.transport_meter,
+        );
 
         Ok(Self {
             inner,
             session: shared,
-            reconnect_rx: Mutex::new(Some(reconnect_rx)),
+            supervisor,
             cancel,
-            conn_tx,
             conn_rx,
             started: AtomicBool::new(false),
             total_requests: AtomicU64::new(0),
@@ -198,17 +201,7 @@ impl Driver for Cjt188Driver {
         {
             return Ok(());
         }
-
-        let channel = Arc::clone(&self.inner);
-        let shared = Arc::clone(&self.session);
-        let cancel = self.cancel.child_token();
-        let mut rx_guard = self.reconnect_rx.lock().await;
-        let reconnect_rx = rx_guard
-            .take()
-            .ok_or(DriverError::ExecutionError("reconnect rx consumed".into()))?;
-        let supervisor = Cjt188Supervisor::new(shared, cancel, self.conn_tx.clone(), reconnect_rx);
-
-        supervisor.run(channel).await?;
+        self.supervisor.run(Arc::clone(&self.inner)).await?;
 
         Ok(())
     }

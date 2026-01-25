@@ -73,7 +73,7 @@ impl SystemMetrics {
             process_memory_rss_bytes: register_gauge(
                 registry,
                 "process_memory_rss_bytes",
-                "Gateway process memory RSS in bytes (best-effort; sysinfo units).",
+                "Gateway process memory RSS in bytes (best-effort).",
             )?,
             network_bytes_sent_total: register_int_counter(
                 registry,
@@ -118,14 +118,13 @@ impl SystemMetrics {
         if let Ok(pid) = get_current_pid() {
             state
                 .sys
-                .refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+                .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
             if let Some(proc_) = state.sys.process(pid) {
                 // sysinfo returns percentage in [0,100] for process cpu_usage.
                 self.process_cpu_usage_ratio
                     .set((proc_.cpu_usage() as f64) / 100.0);
-                // sysinfo process memory is reported in KiB; convert to bytes.
-                self.process_memory_rss_bytes
-                    .set((proc_.memory() as f64) * 1024.0);
+                // sysinfo process memory is reported in bytes.
+                self.process_memory_rss_bytes.set(proc_.memory() as f64);
             }
         }
 
@@ -182,9 +181,9 @@ impl SystemMetrics {
         let cpu_usage_percent = state.sys.global_cpu_usage() as f64;
 
         // Memory information
-        // sysinfo memory is reported in KiB; convert to bytes to match API semantics.
-        let total_memory = state.sys.total_memory().saturating_mul(1024);
-        let used_memory = state.sys.used_memory().saturating_mul(1024);
+        // sysinfo memory is reported in bytes.
+        let total_memory = state.sys.total_memory();
+        let used_memory = state.sys.used_memory();
         let memory_usage_percent = if total_memory > 0 {
             (used_memory as f64 / total_memory as f64) * 100.0
         } else {
@@ -217,7 +216,7 @@ impl SystemMetrics {
     /// Snapshot gateway process RSS memory in bytes (best-effort).
     ///
     /// # Notes
-    /// - `sysinfo` reports process memory in KiB; this value is converted to bytes.
+    /// - `sysinfo` reports process memory in bytes.
     /// - This refreshes the process entry before reading it.
     pub(crate) fn snapshot_process_rss_bytes(&self) -> u64 {
         let mut state = match self.state.lock() {
@@ -231,12 +230,12 @@ impl SystemMetrics {
         if let Ok(pid) = get_current_pid() {
             state
                 .sys
-                .refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+                .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
             if let Some(proc_) = state.sys.process(pid) {
                 // Keep Prometheus gauge in sync with snapshot reads.
                 self.process_cpu_usage_ratio
                     .set((proc_.cpu_usage() as f64) / 100.0);
-                let bytes = proc_.memory().saturating_mul(1024);
+                let bytes = proc_.memory();
                 self.process_memory_rss_bytes.set(bytes as f64);
                 return bytes;
             }

@@ -8,9 +8,8 @@ pub struct NoopSouthwardTransportMeter;
 
 impl SouthwardTransportMeter for NoopSouthwardTransportMeter {
     #[inline]
-    fn add_bytes_in(&self, _channel_id: i32, _driver: &str, _device_id: Option<i32>, _bytes: u64) {}
+    fn add_bytes_in(&self, _bytes: u64) {}
 
     #[inline]
-    fn add_bytes_out(&self, _channel_id: i32, _driver: &str, _device_id: Option<i32>, _bytes: u64) {
-    }
+    fn add_bytes_out(&self, _bytes: u64) {}
 }

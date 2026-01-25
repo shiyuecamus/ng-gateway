@@ -3,7 +3,7 @@ use ng_driver_dnp3::types::{
     Dnp3Parameter, Dnp3Point, Dnp3PointGroup,
 };
 use ng_gateway_sdk::{
-    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NGTransportFactory,
+    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType,
     NoopSouthwardTransportMeter, NorthwardData, NorthwardPublisher, ReportType, RuntimeChannel,
     RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform,
 };
@@ -261,9 +261,7 @@ pub fn build_init_context(
         runtime_channel,
         publisher,
         channel_id,
-        driver: Arc::from("dnp3"),
         transport_meter: Arc::new(NoopSouthwardTransportMeter),
-        transport_factory: Arc::new(NGTransportFactory),
     };
 
     (ctx, device_arc, runtime_points)

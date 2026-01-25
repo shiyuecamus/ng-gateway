@@ -20,12 +20,12 @@ impl ChannelBoundTransportMeter {
 
 impl SouthwardTransportMeter for ChannelBoundTransportMeter {
     #[inline]
-    fn add_bytes_in(&self, _channel_id: i32, _driver: &str, _device_id: Option<i32>, bytes: u64) {
-        self.prom.add_bytes_received(_device_id, bytes);
+    fn add_bytes_in(&self, bytes: u64) {
+        self.prom.add_bytes_received(bytes);
     }
 
     #[inline]
-    fn add_bytes_out(&self, _channel_id: i32, _driver: &str, _device_id: Option<i32>, bytes: u64) {
-        self.prom.add_bytes_sent(_device_id, bytes);
+    fn add_bytes_out(&self, bytes: u64) {
+        self.prom.add_bytes_sent(bytes);
     }
 }

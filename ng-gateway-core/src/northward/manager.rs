@@ -740,7 +740,12 @@ impl NGNorthwardManager {
         self.remove_subscription(app_id);
 
         if let Some((_, actor)) = self.app_actors.remove(&app_id) {
+            let plugin_id = actor.plugin_id();
             let _ = actor.stop().await;
+
+            // Remove per-app labeled metrics to avoid "zombie" series.
+            self.metrics_hub
+                .unregister_northward_app_metrics(app_id, plugin_id);
 
             // Update metrics based on current registry
             self.refresh_metrics_from_registry();

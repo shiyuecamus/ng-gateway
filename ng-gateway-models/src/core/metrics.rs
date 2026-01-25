@@ -100,9 +100,10 @@ pub struct SystemInfoSnapshot {
 }
 
 /// Channel performance metrics snapshot.
-#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMetricsSnapshot {
+    /// Total southward I/O operations (collect + control-plane), best-effort.
     pub total_operations: u64,
     pub successful_operations: u64,
     pub failed_operations: u64,
@@ -111,6 +112,53 @@ pub struct ChannelMetricsSnapshot {
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub reconnection_count: u32,
+
+    // --- collection (point-based) ---
+    /// Total points read successfully by collection (cumulative).
+    pub point_read_success_total: u64,
+    /// Total points read failed by collection (cumulative).
+    pub point_read_fail_total: u64,
+    /// Total points read timed out by collection (cumulative).
+    pub point_read_timeout_total: u64,
+
+    // --- connection reliability ---
+    /// Total times the channel entered `Failed(_)` (cumulative).
+    pub connect_failed_count: u64,
+    /// Total disconnect transitions from `Connected` (cumulative).
+    pub disconnect_count: u64,
+    /// Last connection state change time (best-effort).
+    pub last_state_change_at: Option<DateTime<Utc>>,
+
+    // --- report/push (publisher.try_publish) ---
+    /// Total successful publish attempts from driver (cumulative).
+    pub report_publish_success_total: u64,
+    /// Total dropped publish attempts due to backpressure (QueueFull) (cumulative).
+    pub report_publish_dropped_total: u64,
+    /// Total failed publish attempts (Closed/other) (cumulative).
+    pub report_publish_fail_total: u64,
+    /// Last successfully published report time (best-effort).
+    pub last_report_at: Option<DateTime<Utc>>,
+}
+
+/// Control-plane metrics snapshot for one southward channel.
+#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlMetricsSnapshot {
+    // write-point
+    pub write_success_total: u64,
+    pub write_fail_total: u64,
+    pub write_timeout_total: u64,
+    /// Average queue wait time (ms), derived from histogram sum/count (best-effort).
+    pub write_queue_wait_avg_ms: f64,
+    /// Average driver execution time (ms), derived from histogram sum/count (best-effort).
+    pub write_execute_avg_ms: f64,
+
+    // execute-action
+    pub execute_success_total: u64,
+    pub execute_fail_total: u64,
+    pub execute_timeout_total: u64,
+    /// Average driver execution time (ms), derived from histogram sum/count (best-effort).
+    pub execute_avg_ms: f64,
 }
 
 /// Southward per-device metrics snapshot (in-memory / WS / REST use-cases).
@@ -121,9 +169,6 @@ pub struct ChannelMetricsSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceMetricsSnapshot {
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-
     pub collect_success_total: u64,
     pub collect_fail_total: u64,
     pub collect_timeout_total: u64,
@@ -132,6 +177,13 @@ pub struct DeviceMetricsSnapshot {
     pub avg_collect_latency_ms: u64,
     /// Last collection latency (best-effort), milliseconds.
     pub last_collect_latency_ms: u64,
+
+    // --- report/push (publisher.try_publish) ---
+    pub report_success_total: u64,
+    pub report_dropped_total: u64,
+    pub report_fail_total: u64,
+    /// Unix timestamp in milliseconds (best-effort).
+    pub last_report_ms: u64,
 
     /// Unix timestamp in milliseconds (best-effort).
     pub last_activity_ms: u64,
@@ -149,9 +201,6 @@ pub struct DeviceStatsSnapshot {
     pub status: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_state: Option<DeviceState>,
-
-    /// Whether bytes and metrics are attributed to this device (best-effort).
-    pub bytes_attributed: bool,
 
     #[serde(flatten)]
     pub metrics: DeviceMetricsSnapshot,
@@ -246,6 +295,9 @@ pub struct ChannelStatsSnapshot {
     pub device_count: usize,
     /// Performance metrics snapshot.
     pub metrics: ChannelMetricsSnapshot,
+    /// Optional control-plane metrics snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_metrics: Option<ControlMetricsSnapshot>,
     /// Timestamps.
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,

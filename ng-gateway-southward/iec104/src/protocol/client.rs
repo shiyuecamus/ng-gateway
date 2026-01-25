@@ -195,9 +195,7 @@ impl Client {
             Err(_) => return Err(Error::ErrConnectTimeout),
         };
 
-        if let Err(e) = stream.set_nodelay(self.op.tcp_nodelay) {
-            tracing::warn!(error=%e, tcp_nodelay=self.op.tcp_nodelay, "set TCP_NODELAY failed");
-        }
+        let _ = stream.set_nodelay(self.op.tcp_nodelay);
 
         // Build Session/Loop bound to this pre-established stream
         let (session, event_loop) = create_with_stream(addr, self.op.clone().into(), stream);

@@ -1,14 +1,15 @@
 use super::{
     protocol::session::{
-        create, Session, SessionConfig, SessionEvent, SessionEventLoop, SessionLifecycleState,
+        create_with_stream, Session, SessionConfig, SessionEvent, SessionEventLoop,
+        SessionLifecycleState,
     },
     types::McChannel,
 };
 use arc_swap::ArcSwapOption;
-use backoff::backoff::Backoff;
 use futures::{pin_mut, StreamExt};
 use ng_gateway_sdk::{
-    build_exponential_backoff, DriverError, DriverResult, SouthwardConnectionState,
+    connect_tcp_metered_with_timeout, DriverError, DriverResult, RetryController, RetryDecision,
+    SouthwardConnectionState, SouthwardTransportMeter,
 };
 use std::{
     net::SocketAddr,
@@ -87,6 +88,7 @@ pub(super) struct McSupervisor {
     pub(super) shared: SharedSession,
     /// Connection state watch sender maintained by supervisor.
     state_tx: watch::Sender<SouthwardConnectionState>,
+    transport_meter: Arc<dyn SouthwardTransportMeter>,
 }
 
 impl McSupervisor {
@@ -95,12 +97,14 @@ impl McSupervisor {
         shared: SharedSession,
         cancel: CancellationToken,
         state_tx: watch::Sender<SouthwardConnectionState>,
+        transport_meter: Arc<dyn SouthwardTransportMeter>,
     ) -> Self {
         Self {
             cancel,
             shared,
             started: AtomicBool::new(false),
             state_tx,
+            transport_meter,
         }
     }
 
@@ -141,83 +145,96 @@ impl McSupervisor {
 
         let cancel_outer = self.cancel.child_token();
         let state_tx = self.state_tx.clone();
+        let transport_meter = Arc::clone(&self.transport_meter);
 
         tokio::spawn(async move {
-            // Initial connect
-            let (mut session, mut ev) = create(Arc::clone(&options));
-            // Reconnect backoff state; reset on a successful active session
-            let mut bo = build_exponential_backoff(&channel.connection_policy.backoff);
-            let mut attempt: u32 = 0;
+            let mut retry = RetryController::new(&channel.connection_policy.backoff);
 
             loop {
+                if cancel_outer.is_cancelled() {
+                    shared.shutdown.store(true, Ordering::Release);
+                    let _ = state_tx.send(SouthwardConnectionState::Disconnected);
+                    let mut last = shared.last_error.lock().await;
+                    *last = Some("supervisor cancelled".to_string());
+                    return;
+                }
+
+                let _ = state_tx.send(SouthwardConnectionState::Connecting);
+
+                let stream = match connect_tcp_metered_with_timeout(
+                    options.socket_addr,
+                    Arc::clone(&transport_meter),
+                    channel.connection_policy.connect_timeout_ms,
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let msg = format!("mc tcp connect failed: {e}");
+                        {
+                            let mut last = shared.last_error.lock().await;
+                            *last = Some(msg.clone());
+                        }
+                        shared.healthy.store(false, Ordering::Relaxed);
+                        // failure immediately visible + reconnect process visible
+                        let _ = state_tx.send(SouthwardConnectionState::Failed(msg.clone()));
+                        match retry.on_failure() {
+                            RetryDecision::RetryAfter(delay) => {
+                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                tokio::select! {
+                                    _ = cancel_outer.cancelled() => return,
+                                    _ = tokio::time::sleep(delay) => {}
+                                }
+                                continue;
+                            }
+                            RetryDecision::Exhausted => return,
+                        }
+                    }
+                };
+                let _ = stream.inner_ref().set_nodelay(options.tcp_nodelay);
+
+                let (session, ev) = create_with_stream(Arc::clone(&options), stream);
+                shared.session.store(Some(session.clone()));
+                let _ = shared.session_watch_tx.send(Some(session.clone()));
+
                 let child = cancel_outer.child_token();
-                // Run one attempt's event loop (spawns IO internally)
-                let mut task = tokio::spawn(Self::run_event_loop(
+                let seen_active = Self::run_event_loop(
                     Arc::clone(&shared),
                     Arc::clone(&session),
                     ev,
-                    child.clone(),
+                    child,
                     state_tx.clone(),
-                ));
-                tokio::select! {
-                    _ = cancel_outer.cancelled() => {
-                        child.cancel();
-                        let _ = task.await;
-                        shared.session.store(None);
-                        shared.healthy.store(false, Ordering::Release);
-                        shared.shutdown.store(true, Ordering::Release);
-                        let _ = shared.session_watch_tx.send(None);
-                        let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
-                        {
-                            let mut last = shared.last_error.lock().await;
-                            *last = Some("supervisor cancelled".to_string());
+                )
+                .await;
+
+                shared.session.store(None);
+                shared.healthy.store(false, Ordering::Release);
+                let _ = shared.session_watch_tx.send(None);
+
+                if seen_active {
+                    retry.reset();
+                }
+
+                match retry.on_failure() {
+                    RetryDecision::RetryAfter(delay) => {
+                        tracing::warn!(
+                            delay_ms = delay.as_millis() as u64,
+                            "MC session reconnect retry"
+                        );
+                        tokio::select! {
+                            _ = cancel_outer.cancelled() => return,
+                            _ = tokio::time::sleep(delay) => {
+                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                            }
                         }
-                        break;
                     }
-                    res = &mut task => {
-                        // Attempt finished, clear state then backoff and retry.
-                        shared.session.store(None);
-                        shared.healthy.store(false, Ordering::Release);
-                        let _ = shared.session_watch_tx.send(None);
-
-                        if res.unwrap_or(false) {
-                            bo.reset();
-                            attempt = 0;
-                        }
-
-                        match bo.next_backoff() {
-                            Some(delay) => {
-                                attempt = attempt.saturating_add(1);
-                                tracing::warn!(
-                                    attempt = attempt,
-                                    delay_ms = delay.as_millis() as u64,
-                                    "MC session reconnect retry"
-                                );
-                                tokio::select! {
-                                    _ = cancel_outer.cancelled() => {
-                                        break;
-                                    }
-                                    _ = tokio::time::sleep(delay) => {
-                                        let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
-                                    }
-                                }
-                            }
-                            None => {
-                                {
-                                    let mut last = shared.last_error.lock().await;
-                                    *last = Some("backoff exhausted".to_string());
-                                }
-                                let _ = state_tx.send(SouthwardConnectionState::Failed(
-                                    "backoff exhausted".to_string(),
-                                ));
-                                break;
-                            }
-                        }
-
-                        // Prepare next attempt
-                        let (s, e) = create(Arc::clone(&options));
-                        session = s;
-                        ev = e;
+                    RetryDecision::Exhausted => {
+                        let mut last = shared.last_error.lock().await;
+                        *last = Some("retry budget exhausted".to_string());
+                        let _ = state_tx.send(SouthwardConnectionState::Failed(
+                            "retry budget exhausted".to_string(),
+                        ));
+                        return;
                     }
                 }
             }
@@ -244,7 +261,7 @@ impl McSupervisor {
                 _ = cancel.cancelled() => {
                     shared.healthy.store(false, Ordering::Release);
                     let _ = shared.session_watch_tx.send(None);
-                    let _ = state_tx.send(SouthwardConnectionState::Failed("cancelled".to_string()));
+                    let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                     return seen_active;
                 }
                 maybe_ev = stream.next() => {
@@ -285,7 +302,7 @@ impl McSupervisor {
                                     }
                                     shared.session.store(None);
                                     let _ = shared.session_watch_tx.send(None);
-                                    let _ = state_tx.send(SouthwardConnectionState::Failed("session failed".to_string()));
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
                                     return seen_active;
                                 }
                                 SessionLifecycleState::Idle => {}
@@ -297,7 +314,9 @@ impl McSupervisor {
                                 let mut last = shared.last_error.lock().await;
                                 *last = Some("transport error".to_string());
                             }
-                            let _ = state_tx.send(SouthwardConnectionState::Failed("transport error".to_string()));
+                            // Treat transport error as immediate reconnect trigger.
+                            let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                            return seen_active;
                         }
                         None => {
                             // Event stream ended.

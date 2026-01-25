@@ -989,10 +989,24 @@ impl ActionRuntimeCmd for NGGateway {
         // Execute with timeout via direct executor
         let ms = timeout_ms.unwrap_or(5000);
         let start = Instant::now();
+        let channel_id = self
+            .southward_manager
+            .get_device(device_id)
+            .map(|d| d.config.channel_id())
+            .unwrap_or_default();
+        let control_driver = self
+            .southward_manager
+            .snapshot_channel_driver_id(channel_id)
+            .unwrap_or_else(|| "unknown".to_string());
+        let control = self
+            .metrics_hub
+            .register_control_channel_metrics(channel_id, control_driver)
+            .ok();
         let result = match timeout(
             Duration::from_millis(ms),
             execute_action_direct(
                 &self.southward_manager,
+                &self.metrics_hub,
                 device_id,
                 action.command.as_str(),
                 Some(params),
@@ -1001,7 +1015,16 @@ impl ActionRuntimeCmd for NGGateway {
         .await
         {
             Ok(inner) => inner?,
-            Err(_) => return Err(NGError::Timeout(Duration::from_millis(ms))),
+            Err(_) => {
+                if let Some(h) = &control {
+                    h.inc_execute_request(ControlResult::Timeout);
+                    h.observe_execute_seconds(
+                        ControlResult::Timeout,
+                        start.elapsed().as_secs_f64(),
+                    );
+                }
+                return Err(NGError::Timeout(Duration::from_millis(ms)));
+            }
         };
         let elapsed = start.elapsed().as_millis();
         info!(action_id=%action_id, device_id=%device_id, elapsed_ms=%elapsed, "action-debug");
@@ -1467,7 +1490,7 @@ impl NGGateway {
                 let response = match cmd.target_type {
                     TargetType::Gateway => Self::handle_gateway_commands(cmd).await,
                     TargetType::SubDevice => {
-                        Self::handle_subdevice_commands(cmd, southward_manager).await
+                        Self::handle_subdevice_commands(cmd, southward_manager, metrics_hub).await
                     }
                 };
 
@@ -1852,6 +1875,7 @@ impl NGGateway {
     async fn handle_subdevice_commands(
         cmd: Command,
         southward_manager: &Arc<NGSouthwardManager>,
+        metrics_hub: &Arc<NGMetricsHub>,
     ) -> ClientRpcResponse {
         let device_id = cmd.device_id.or_else(|| {
             cmd.device_name
@@ -1859,7 +1883,15 @@ impl NGGateway {
                 .and_then(|name| southward_manager.find_device_id_by_name(name.as_str()))
         });
         if let Some(id) = device_id {
-            match execute_action_direct(southward_manager, id, cmd.key.as_str(), cmd.params).await {
+            match execute_action_direct(
+                southward_manager,
+                metrics_hub,
+                id,
+                cmd.key.as_str(),
+                cmd.params,
+            )
+            .await
+            {
                 Ok(result) => ClientRpcResponse::success(
                     cmd.command_id,
                     cmd.target_type,
@@ -1986,6 +2018,7 @@ impl NGGateway {
 // Shared by northward command handling and web debug API.
 async fn execute_action_direct(
     southward_manager: &Arc<NGSouthwardManager>,
+    metrics_hub: &Arc<NGMetricsHub>,
     device_id: i32,
     action_key: &str,
     params: Option<serde_json::Value>,
@@ -2035,6 +2068,12 @@ async fn execute_action_direct(
 
     // Execute
     let prom = southward_manager.get_channel_metric_handles(device.config.channel_id());
+    let control_driver = southward_manager
+        .snapshot_channel_driver_id(device.config.channel_id())
+        .unwrap_or_else(|| "unknown".to_string());
+    let control = metrics_hub
+        .register_control_channel_metrics(device.config.channel_id(), control_driver)
+        .ok();
     let io_start = Instant::now();
     let res = device
         .driver
@@ -2049,6 +2088,16 @@ async fn execute_action_direct(
             h.record_io_success(elapsed_ns, elapsed_seconds);
         } else {
             h.record_io_failed(elapsed_ns, elapsed_seconds);
+        }
+    }
+    if let Some(h) = &control {
+        let elapsed_seconds = io_start.elapsed().as_secs_f64();
+        if res.is_ok() {
+            h.inc_execute_request(ControlResult::Success);
+            h.observe_execute_seconds(ControlResult::Success, elapsed_seconds);
+        } else {
+            h.inc_execute_request(ControlResult::Fail);
+            h.observe_execute_seconds(ControlResult::Fail, elapsed_seconds);
         }
     }
     res.map(|r| r.payload.unwrap_or(serde_json::Value::Null))

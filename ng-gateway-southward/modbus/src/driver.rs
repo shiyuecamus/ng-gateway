@@ -1,7 +1,7 @@
 use super::{
     codec::ModbusCodec,
     planner::{ModbusPlanner, ModbusPlannerConfig},
-    supervisor::{ModbusObservability, SessionEntry, SessionSupervisor, SharedSession},
+    supervisor::{SessionEntry, SessionSupervisor, SharedSession},
     types::{
         ModbusChannel, ModbusConnection, ModbusDevice, ModbusFunctionCode, ModbusParameter,
         ModbusPoint,
@@ -27,7 +27,7 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 use tokio::{
-    sync::{mpsc, watch, Mutex},
+    sync::{mpsc, watch},
     time::{timeout, Duration as TokioDuration},
 };
 use tokio_modbus::{
@@ -53,17 +53,13 @@ pub struct ModbusDriver {
     inner: Arc<ModbusChannel>,
     /// Shared session pool state (TCP: N contexts, RTU: 1 context).
     session: SharedSession,
-    /// Deferred reconnect receiver, created during init and consumed once in start
-    reconnect_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    supervisor: SessionSupervisor,
     /// Started flag to prevent duplicate start
     started: std::sync::atomic::AtomicBool,
     /// Driver-level cancel token
     cancel_token: CancellationToken,
     /// Connection state channel
-    conn_tx: watch::Sender<SouthwardConnectionState>,
     conn_rx: watch::Receiver<SouthwardConnectionState>,
-    /// Host-injected observability config, taken once in `start()` (avoid clone).
-    observability: Mutex<Option<ModbusObservability>>,
     /// Metrics
     total_requests: AtomicU64,
     successful_requests: AtomicU64,
@@ -208,23 +204,22 @@ impl ModbusDriver {
         let (conn_tx, conn_rx) = watch::channel(SouthwardConnectionState::Disconnected);
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(1);
         let shared = Arc::new(SessionEntry::new_empty(reconnect_tx));
-
-        let obs = ModbusObservability {
-            channel_id: ctx.channel_id,
-            driver: ctx.driver,
-            meter: ctx.transport_meter,
-            transport: ctx.transport_factory,
-        };
+        let cancel_token = CancellationToken::new();
+        let supervisor = SessionSupervisor::new(
+            Arc::clone(&shared),
+            cancel_token.child_token(),
+            conn_tx,
+            reconnect_rx,
+            Arc::clone(&ctx.transport_meter),
+        );
 
         Ok(Self {
             inner,
             session: shared,
-            reconnect_rx: Mutex::new(Some(reconnect_rx)),
+            supervisor,
             started: AtomicBool::new(false),
-            cancel_token: CancellationToken::new(),
-            conn_tx,
+            cancel_token,
             conn_rx,
-            observability: Mutex::new(Some(obs)),
             total_requests: AtomicU64::new(0),
             successful_requests: AtomicU64::new(0),
             failed_requests: AtomicU64::new(0),
@@ -512,22 +507,7 @@ impl Driver for ModbusDriver {
             // already started; make idempotent
             return Ok(());
         }
-        let cancel = self.cancel_token.child_token();
-        let shared = Arc::clone(&self.session);
-        // Take ownership of reconnect receiver once
-        let mut rx_guard = self.reconnect_rx.lock().await;
-        let reconnect_rx = rx_guard.take().ok_or(DriverError::ExecutionError(
-            "reconnect receiver already consumed".into(),
-        ))?;
-        let supervisor = SessionSupervisor::new(shared, cancel, self.conn_tx.clone(), reconnect_rx);
-        let inner = Arc::clone(&self.inner);
-        let obs = {
-            let mut g = self.observability.lock().await;
-            g.take().ok_or(DriverError::ExecutionError(
-                "observability context already consumed".into(),
-            ))?
-        };
-        supervisor.run(inner, obs).await;
+        self.supervisor.run(Arc::clone(&self.inner)).await?;
         Ok(())
     }
 

@@ -1,23 +1,28 @@
-use std::sync::Arc;
-
-use super::super::{
-    codec::Codec,
-    error::{Error, Result},
-    frame::{
-        build_cotp_cr_message, build_cotp_data_message, build_setup_comm, parse_param_ref, Cotp,
-        CotpCrParams, S7AppBody, S7Message, S7ParamAckDataRef, S7ParamRef, S7PduType, SetupParam,
+use super::{
+    super::{
+        codec::Codec,
+        error::{Error, Result},
+        frame::{
+            build_cotp_cr_message, build_cotp_data_message, build_setup_comm, parse_param_ref,
+            Cotp, CotpCrParams, S7AppBody, S7Message, S7ParamAckDataRef, S7ParamRef, S7PduType,
+            SetupParam,
+        },
     },
+    state::SessionConfig,
 };
-use super::state::SessionConfig;
 use futures_util::{SinkExt, StreamExt};
-use tokio::{net::TcpStream, time::timeout};
+use std::sync::Arc;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    time::timeout,
+};
 use tokio_util::codec::Framed;
 
 /// Perform COTP CR/CC handshake on an already connected framed transport.
 ///
 /// Returns the TPDU size negotiated in CC.
 pub(super) async fn iso_connect(
-    framed: &mut Framed<TcpStream, Codec>,
+    framed: &mut Framed<impl AsyncRead + AsyncWrite + Unpin, Codec>,
     config: Arc<SessionConfig>,
 ) -> Result<u8> {
     // Build COTP CR (fixed default TPDU size 0x0A = 1024 bytes)
@@ -46,7 +51,7 @@ pub(super) async fn iso_connect(
 
 /// Send S7 SetupCommunication and return negotiated values.
 pub(super) async fn negotiation(
-    framed: &mut Framed<TcpStream, Codec>,
+    framed: &mut Framed<impl AsyncRead + AsyncWrite + Unpin, Codec>,
     config: Arc<SessionConfig>,
     pdu_ref: u16,
 ) -> Result<SetupParam> {
