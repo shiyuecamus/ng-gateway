@@ -22,6 +22,10 @@ pub use crate::domain::{
         PreparedDeviceCommit, PreparedDevicePointsCommit, PreparedPointCommit,
     },
     menu::{ChangeMenuStatus, MenuInfo, MenuMeta, MenuTree, NewMenu, NewMenuWithId, UpdateMenu},
+    net_debug::{
+        HttpMethod, HttpRequest, HttpResponse, PingMode, PingRequest, PingResponse, PingSample,
+        TcpConnectRequest, TcpConnectResponse,
+    },
     plugin::{NewPlugin, PluginInfo, PluginPageParams, UpdatePlugin},
     point::{NewPoint, PointInfo, PointPageParams, UpdatePoint},
     relation::{NewRelation, RelationDelete, RelationInfo, RelationQuery, UpdateRelation},

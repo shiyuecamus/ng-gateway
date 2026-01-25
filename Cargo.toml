@@ -304,7 +304,7 @@ version = "0.5"
 
 # hashing
 [workspace.dependencies.bcrypt]
-version = "0.17"
+version = "0.18"
 [workspace.dependencies.md-5]
 version = "0.10"
 [workspace.dependencies.hex]
@@ -359,6 +359,13 @@ version = "1.0"
 # Tempfile
 [workspace.dependencies.tempfile]
 version = "3.11"
+
+# Network
+[workspace.dependencies.reqwest]
+version = "0.13"
+features = ["json", "rustls-native-certs", "stream"]
+[workspace.dependencies.surge-ping]
+version = "0.8"
 
 [profile.release]
 # 含义：设置代码生成单元的数量。
