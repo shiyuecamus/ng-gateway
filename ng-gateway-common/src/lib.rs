@@ -10,14 +10,14 @@
 //! - **Metrics & Logging**: Comprehensive observability with structured logging
 pub mod casbin;
 pub mod event;
-mod logger;
+pub mod log;
 pub mod metrics;
 
 // Re-export error types
 pub use ng_gateway_error::{NGError, NGResult};
 
 // Legacy app context (keeping for backward compatibility)
-use logger::Logger;
+use log::Logger;
 use ng_gateway_models::constants::{
     BUILTIN_DIR, CERT_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR, PKI_DIR, PLUGIN_DIR,
 };
@@ -121,8 +121,8 @@ impl NGAppContext {
 
         apply_runtime_dir(&settings.general.runtime_dir)?;
 
-        // Initiates logger (after runtime_dir applied).
-        logger.initialize()?;
+        // Initialize realtime logs and install logger subscriber.
+        log::init_runtime(&mut logger, &settings.general.realtime_logs)?;
 
         let span = span!(Level::INFO, "init-app");
         let _guard = span.enter();

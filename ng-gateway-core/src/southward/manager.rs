@@ -1,3 +1,4 @@
+use crate::driver::DriverRegistry;
 use crate::{
     lifecycle::{start_with_policy, StartPolicy},
     southward::{
@@ -28,9 +29,9 @@ use ng_gateway_models::{
 };
 use ng_gateway_sdk::{
     AccessMode, AttributeData, CollectionType, DeviceState, Driver, DriverFactory, DriverHealth,
-    DriverRegistry, NGValue, NorthwardData, PointMeta, ReportType, RuntimeAction, RuntimeChannel,
-    RuntimeDelta, RuntimeDevice, RuntimePoint, SouthwardConnectionState, SouthwardInitContext,
-    Status, TelemetryData,
+    NGValue, NorthwardData, PointMeta, ReportType, RuntimeAction, RuntimeChannel, RuntimeDelta,
+    RuntimeDevice, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, Status,
+    TelemetryData,
 };
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
@@ -42,7 +43,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 /// Build a reverse-lookup key for `(channel_name, device_name, point_key)`.
 ///
@@ -577,11 +578,21 @@ impl NGSouthwardManager {
             Some(d) => d,
             None => return Ok(()),
         };
-        tokio::spawn(async move {
-            if let Err(e) = driver.apply_runtime_delta(delta).await {
-                error!(error=%e, "Failed to apply runtime delta");
+        // Bind a per-channel span so apply-delta errors can be attributed to `channel_id`.
+        let device_id = device.id;
+        let span = tracing::info_span!(
+            "southward-apply-delta",
+            channel_id = channel_id,
+            device_id = device_id
+        );
+        tokio::spawn(
+            async move {
+                if let Err(e) = driver.apply_runtime_delta(delta).await {
+                    error!(error=%e, "Failed to apply runtime delta");
+                }
             }
-        });
+            .instrument(span),
+        );
         Ok(())
     }
 

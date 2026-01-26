@@ -23,7 +23,7 @@ use tokio::{
     time::{interval, sleep, timeout, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 
 /// A flattened device entry used by the collector hot path.
 ///
@@ -193,6 +193,16 @@ impl Collector {
         let semaphore = Arc::clone(&self.semaphore);
         let data_tx = Arc::clone(&self.data_tx);
         let channel_name = channel.config.name().to_string();
+        let driver_id = channel.config.driver_id();
+
+        // Bind a per-channel span so logs can be attributed to `channel_id` without
+        // requiring every log callsite to manually include the field.
+        let span = tracing::info_span!(
+            "southward-channel",
+            channel_id = channel_id,
+            channel_name = %channel_name,
+            driver_id = driver_id
+        );
 
         let task = tokio::spawn(async move {
             let mut interval = interval(Duration::from_millis(period_ms as u64));
@@ -230,7 +240,7 @@ impl Collector {
                     }
                 }
             }
-        });
+        }.instrument(span));
 
         self.collection_tasks.write().await.insert(channel_id, task);
 

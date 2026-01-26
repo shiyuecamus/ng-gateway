@@ -1,10 +1,9 @@
+use crate::constants::{CERT_DIR, DATA_DIR};
 use config::{Config, File};
 use ng_gateway_error::NGResult;
-use serde::{self, Deserialize};
+use serde::{self, Deserialize, Serialize};
 use std::{ops::Deref, sync::Arc};
 use sysinfo::System;
-
-use crate::constants::{CERT_DIR, DATA_DIR};
 
 #[derive(Debug, Clone)]
 pub struct Settings(Arc<Inner>);
@@ -78,6 +77,13 @@ pub struct General {
     /// Southward communication configuration
     #[serde(default)]
     pub southward: Southward,
+    /// Realtime logs configuration (LogHub + WebSocket streaming).
+    ///
+    /// # Notes
+    /// This config powers the gateway's "tail + follow" realtime logs feature.
+    /// It is intentionally memory-bounded to avoid unbounded RAM usage in production.
+    #[serde(default)]
+    pub realtime_logs: RealtimeLogs,
 }
 
 impl Default for General {
@@ -89,7 +95,121 @@ impl Default for General {
             collector: CollectorConfig::default(),
             northward: Northward::default(),
             southward: Southward::default(),
+            realtime_logs: RealtimeLogs::default(),
         }
+    }
+}
+
+/// Realtime logs configuration for LogHub + WebSocket streaming.
+///
+/// # Design goals
+/// - **Bounded memory**: explicit caps for ring buffers and per-connection batching.
+/// - **Low overhead**: filtering happens before heavy formatting where possible.
+/// - **Operational safety**: TTL-based log level overrides always roll back.
+#[derive(Debug, Clone, Deserialize, Serialize, Copy, PartialEq, Eq)]
+pub struct RealtimeLogs {
+    /// Enable realtime logs feature.
+    #[serde(default = "RealtimeLogs::enabled_default")]
+    pub enabled: bool,
+    /// Global ring buffer capacity (tail window).
+    #[serde(default = "RealtimeLogs::global_capacity_default")]
+    pub global_capacity: usize,
+    /// Per-channel ring buffer capacity (tail window per channel).
+    #[serde(default = "RealtimeLogs::per_channel_capacity_default")]
+    pub per_channel_capacity: usize,
+    /// Max number of channels to keep in memory (LRU/eviction bound).
+    #[serde(default = "RealtimeLogs::max_channels_default")]
+    pub max_channels: usize,
+    /// Broadcast channel capacity for realtime follow.
+    ///
+    /// Slow consumers will lag and drop; the server should report dropped counts.
+    #[serde(default = "RealtimeLogs::broadcast_capacity_default")]
+    pub broadcast_capacity: usize,
+    /// WebSocket coalescing tick interval in milliseconds.
+    #[serde(default = "RealtimeLogs::ws_tick_ms_default")]
+    pub ws_tick_ms: u64,
+    /// Max log items per WS batch frame.
+    #[serde(default = "RealtimeLogs::ws_batch_max_default")]
+    pub ws_batch_max: usize,
+    /// Max pending log items buffered per subscription before dropping oldest.
+    #[serde(default = "RealtimeLogs::ws_pending_max_default")]
+    pub ws_pending_max: usize,
+    /// Maximum bytes allowed for a single log message/payload (truncate beyond).
+    #[serde(default = "RealtimeLogs::event_max_bytes_default")]
+    pub event_max_bytes: usize,
+    /// Default TTL for log level overrides (lease) in milliseconds.
+    #[serde(default = "RealtimeLogs::lease_default_ttl_ms_default")]
+    pub lease_default_ttl_ms: u64,
+    /// Maximum allowed TTL for overrides to protect from "permanent debug".
+    #[serde(default = "RealtimeLogs::lease_max_ttl_ms_default")]
+    pub lease_max_ttl_ms: u64,
+    /// Lease cleanup tick interval in milliseconds.
+    #[serde(default = "RealtimeLogs::lease_cleanup_interval_ms_default")]
+    pub lease_cleanup_interval_ms: u64,
+    /// Driver->host log ingest queue capacity (bounded, drop-old-keep-new).
+    #[serde(default = "RealtimeLogs::driver_ingest_queue_capacity_default")]
+    pub driver_ingest_queue_capacity: usize,
+}
+
+impl Default for RealtimeLogs {
+    fn default() -> Self {
+        Self {
+            enabled: Self::enabled_default(),
+            global_capacity: Self::global_capacity_default(),
+            per_channel_capacity: Self::per_channel_capacity_default(),
+            max_channels: Self::max_channels_default(),
+            broadcast_capacity: Self::broadcast_capacity_default(),
+            ws_tick_ms: Self::ws_tick_ms_default(),
+            ws_batch_max: Self::ws_batch_max_default(),
+            ws_pending_max: Self::ws_pending_max_default(),
+            event_max_bytes: Self::event_max_bytes_default(),
+            lease_default_ttl_ms: Self::lease_default_ttl_ms_default(),
+            lease_max_ttl_ms: Self::lease_max_ttl_ms_default(),
+            lease_cleanup_interval_ms: Self::lease_cleanup_interval_ms_default(),
+            driver_ingest_queue_capacity: Self::driver_ingest_queue_capacity_default(),
+        }
+    }
+}
+
+impl RealtimeLogs {
+    fn enabled_default() -> bool {
+        true
+    }
+    fn global_capacity_default() -> usize {
+        10_000
+    }
+    fn per_channel_capacity_default() -> usize {
+        2_000
+    }
+    fn max_channels_default() -> usize {
+        2_000
+    }
+    fn broadcast_capacity_default() -> usize {
+        4_096
+    }
+    fn ws_tick_ms_default() -> u64 {
+        100
+    }
+    fn ws_batch_max_default() -> usize {
+        200
+    }
+    fn ws_pending_max_default() -> usize {
+        2_000
+    }
+    fn event_max_bytes_default() -> usize {
+        8 * 1024
+    }
+    fn lease_default_ttl_ms_default() -> u64 {
+        5 * 60 * 1000
+    }
+    fn lease_max_ttl_ms_default() -> u64 {
+        30 * 60 * 1000
+    }
+    fn lease_cleanup_interval_ms_default() -> u64 {
+        5_000
+    }
+    fn driver_ingest_queue_capacity_default() -> usize {
+        10_000
     }
 }
 

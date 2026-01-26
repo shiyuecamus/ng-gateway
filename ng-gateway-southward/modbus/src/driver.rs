@@ -253,9 +253,10 @@ impl ModbusDriver {
                 )
             })?;
             if md.slave_id != slave_id {
-                return Err(DriverError::ConfigurationError(
-                    "collect_data items contain mixed slaveId".to_string(),
-                ));
+                return Err(DriverError::ConfigurationError(format!(
+                    "collect_data items contain mixed slaveId: expected={}, got={} (device_id={}, device_name={})",
+                    slave_id, md.slave_id, md.id, md.device_name
+                )));
             }
 
             buffers
@@ -531,15 +532,17 @@ impl Driver for ModbusDriver {
     #[inline]
     #[instrument(level = "debug", skip_all)]
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
-        let (device0, _points0) = items.first().ok_or(DriverError::ValidationError(
+        // NOTE: `items` is already grouped by the Collector using `collection_group_key`
+        // (for Modbus: slave_id). We only need one device to derive the group slave id.
+        let (device, _) = items.first().ok_or(DriverError::ValidationError(
             "collect_data called with empty items".to_string(),
         ))?;
-        let md0 = device0.downcast_ref::<ModbusDevice>().ok_or_else(|| {
+        let device = device.downcast_ref::<ModbusDevice>().ok_or_else(|| {
             DriverError::ConfigurationError(
                 "RuntimeDevice is not ModbusDevice for ModbusDriver".to_string(),
             )
         })?;
-        self.collect_group_with_slave(md0.slave_id, items).await
+        self.collect_group_with_slave(device.slave_id, items).await
     }
 
     #[inline]

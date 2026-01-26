@@ -10,8 +10,9 @@
 use crate::{
     collector::Collector,
     commands::{gateway_command_registry, GetStatusHandler},
+    driver::{DriverLoader, DriverRegistry},
     lifecycle::StartPolicy,
-    northward::NGNorthwardManager,
+    northward::{NGNorthwardManager, NorthwardLoader},
     realtime::NGRealtimeMonitorHub,
     southward::NGSouthwardManager,
 };
@@ -20,6 +21,8 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
 use ng_gateway_common::{
+    log::realtime::hub::LogLevel as RealtimeLogLevel,
+    log::realtime::lease::{self as log_lease, LogOverrideChangeSink, LogOverrideScope},
     metrics::{
         channel::{bounded, InstrumentedReceiver, InstrumentedSender},
         control::ControlResult,
@@ -54,8 +57,8 @@ use ng_gateway_repository::{
 };
 use ng_gateway_sdk::{
     validate_and_resolve_action_inputs, AccessMode, ClientRpcResponse, Command, DriverError,
-    DriverLoader, DriverRegistry, NorthwardData, NorthwardEvent, NorthwardLoader, TargetType,
-    ValueCodec, WritePoint, WritePointErrorKind, WritePointResponse,
+    NorthwardData, NorthwardEvent, TargetType, ValueCodec, WritePoint, WritePointErrorKind,
+    WritePointResponse,
 };
 use sea_orm::{DatabaseConnection, IntoActiveModel};
 use std::{
@@ -80,6 +83,34 @@ type EventsReceiver = InstrumentedReceiver<(i32, NorthwardEvent)>;
 type Shared<T> = Arc<RwLock<T>>;
 type SharedReceiver = Shared<Option<DataReceiver>>;
 type SharedEventsReceiver = Shared<Option<EventsReceiver>>;
+
+/// Host-side bridge: propagate effective override levels to `cdylib` drivers.
+///
+/// # Notes
+/// - This is best-effort and MUST be non-blocking.
+/// - It closes the semantics loop for "lease expiry" (cleanup loop) without requiring web handlers.
+struct DriverLogOverrideSink {
+    driver_loader: DriverLoader,
+    index: Arc<crate::southward::index::RuntimeIndex>,
+}
+
+impl LogOverrideChangeSink for DriverLogOverrideSink {
+    fn on_effective_level_change(&self, scope: LogOverrideScope, level: RealtimeLogLevel) {
+        let level_u8: u8 = level as u8;
+        match scope {
+            LogOverrideScope::Global => {
+                let _ = self.driver_loader.set_max_level_all(level_u8);
+            }
+            LogOverrideScope::Channel(channel_id) => {
+                let Some(chan) = self.index.channels.get(&channel_id) else {
+                    return;
+                };
+                let driver_id = chan.config.driver_id();
+                let _ = self.driver_loader.set_max_level(driver_id, level_u8);
+            }
+        }
+    }
+}
 
 /// Per-channel write serialization primitives for control-plane write paths.
 ///
@@ -225,6 +256,22 @@ impl Gateway for NGGateway {
             Arc::clone(&driver_registry),
             Arc::clone(&metrics_hub),
         ));
+
+        // Close the semantic loop for driver log level control:
+        // lease/override changes (including expiry) => `ng_driver_set_max_level`.
+        //
+        // Best-effort: install once and align all loaded drivers to current effective global level.
+        if let Some(rt) = ng_gateway_common::log::runtime::global() {
+            let installed = log_lease::set_change_sink(Arc::new(DriverLogOverrideSink {
+                driver_loader: driver_loader.clone(),
+                index: southward_manager.runtime_index(),
+            }));
+            if !installed {
+                warn!("Log override change sink already installed; skipping");
+            }
+            let desired: u8 = rt.overrides().effective_global_level() as u8;
+            let _ = driver_loader.set_max_level_all(desired);
+        }
 
         // Initialize channels and devices
         let southward_config = Self::load_southward_config(&conn).await.map_err(|e| {

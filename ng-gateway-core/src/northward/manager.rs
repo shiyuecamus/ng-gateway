@@ -17,6 +17,7 @@ use super::{
     runtime_api::CoreNorthwardRuntimeApi,
     subscription_sync::{compute_sync_plan, DeviceSyncStatus, SubscriptionSyncTracker, SyncPlan},
 };
+use crate::northward::NorthwardRegistry;
 use dashmap::DashMap;
 use ng_gateway_common::metrics::{channel::InstrumentedSender, NGMetricsHub};
 use ng_gateway_error::{NGError, NGResult};
@@ -28,8 +29,7 @@ use ng_gateway_models::{
 };
 use ng_gateway_sdk::{
     AttributeData, DeviceConnectedData, DeviceDisconnectedData, NorthwardConnectionState,
-    NorthwardData, NorthwardEvent, NorthwardInitContext, NorthwardRegistry, PointValue,
-    TelemetryData,
+    NorthwardData, NorthwardEvent, NorthwardInitContext, PointValue, TelemetryData,
 };
 use sea_orm::DatabaseConnection;
 use std::{collections::HashMap, sync::Arc};

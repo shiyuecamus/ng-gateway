@@ -46,6 +46,7 @@ tracing-subscriber = { version = "0.3", features = [
   "fmt",
   "std",
 ] }
+tracing-log = { version = "0.2" }
 
 # Dashmap
 dashmap = { version = "6.1" }

@@ -17,6 +17,15 @@ pub mod export {
     pub use tracing_subscriber;
 }
 
+/// Public log bridge API (used by both host loader and `cdylib` drivers).
+///
+/// # Notes
+/// This is intentionally re-exported at crate root so the `ng_driver_factory!` macro
+/// can reference a stable path (`$crate::log::*`) from external driver crates.
+pub mod log {
+    pub use crate::southward::log::*;
+}
+
 pub type DriverResult<T> = Result<T, DriverError>;
 pub type NorthwardResult<T> = Result<T, NorthwardError>;
 
@@ -30,10 +39,6 @@ pub use northward::buffer::DeviceBuffers;
 pub use northward::{
     envelope,
     extension::{ExtensionManager, ExtensionManagerExt},
-    loader::{
-        discover_north_libraries_in_dir, probe_north_library, NorthwardLoader, NorthwardProbeInfo,
-        NorthwardRegistry,
-    },
     mapping,
     model::{
         AlarmData, AttributeData, ClientRpcResponse, Command, DeviceConnectedData,
@@ -41,6 +46,7 @@ pub use northward::{
         TelemetryData, WritePoint, WritePointError, WritePointErrorKind, WritePointResponse,
         WritePointStatus,
     },
+    probe::{discover_north_libraries_in_dir, probe_north_library, NorthwardProbeInfo},
     runtime_api::NorthwardRuntimeApi,
     types::{AlarmSeverity, DropPolicy, NorthwardConnectionState, TargetType},
     EventReceiver, NorthwardData, NorthwardEvent, NorthwardInitContext, NorthwardPublisher, Plugin,
@@ -49,11 +55,11 @@ pub use northward::{
 pub use retry::{build_exponential_backoff, RetryController, RetryDecision, RetryPolicy};
 pub use southward::{
     codec::ValueCodec,
-    loader::{probe_driver_library, DriverLoader, DriverProbeInfo, DriverRegistry},
     model::{
         ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverHealth, DriverMetrics,
         Parameter, PointModel, SouthwardInitContext,
     },
+    probe::{probe_driver_library, DriverProbeInfo},
     transport::{
         bind_udp_metered, bind_udp_metered_with_timeout, connect_serial_metered,
         connect_tcp_metered, connect_tcp_metered_with_timeout, MeteredStream, MeteredUdpSocket,

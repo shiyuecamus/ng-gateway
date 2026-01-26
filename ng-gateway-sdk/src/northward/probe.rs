@@ -1,23 +1,27 @@
+//! Northward plugin probing utilities (host-side).
+//!
+//! This module provides lightweight "probe" functions for inspecting a `cdylib` plugin library
+//! without registering or running it in the gateway runtime.
+//!
+//! # Notes
+//! The actual host-side dynamic loader lives in `ng-gateway-core`.
+
 use crate::{
     ensure_current_platform_from_path, inspect_binary,
     sdk::{sdk_api_version, SDK_VERSION},
     BinaryArch, BinaryOsType, NorthwardError, PluginConfigSchemas,
 };
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::ffi::CStr;
-use std::os::raw::{c_char, c_uchar};
-use std::{path::Path, sync::Arc};
-
-use super::PluginFactory;
+use std::{
+    ffi::CStr,
+    os::raw::{c_char, c_uchar},
+    path::Path,
+};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use libloading::{Library, Symbol};
 
-/// Northward registry for managing all available northward plugin factories, keyed by adapter_type
-pub type NorthwardRegistry = Arc<DashMap<i32, Arc<dyn PluginFactory + Send + Sync>>>;
-
-/// Summary information about a northward library discovered via FFI symbols
+/// Summary information about a northward library discovered via FFI symbols.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NorthwardProbeInfo {
@@ -28,167 +32,14 @@ pub struct NorthwardProbeInfo {
     pub api_version: u32,
     pub sdk_version: String,
     pub metadata: PluginConfigSchemas,
-    /// File size in bytes of the probed library
+    /// File size in bytes of the probed library.
     pub size: i64,
-    /// SHA-256 checksum (hex, lowercase)
+    /// SHA-256 checksum (hex, lowercase).
     pub checksum: String,
-    /// Detected OS type from the binary header
+    /// Detected OS type from the binary header.
     pub os_type: BinaryOsType,
-    /// Detected CPU architecture from the binary header
+    /// Detected CPU architecture from the binary header.
     pub os_arch: BinaryArch,
-}
-
-/// Dynamic northward loader for loading custom northward plugins from shared libraries
-#[derive(Clone)]
-pub struct NorthwardLoader {
-    /// Registry of loaded northward factories
-    registry: NorthwardRegistry,
-    /// Hold library handles to ensure symbol and factory lifetimes are valid
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    libraries: Arc<DashMap<i32, Arc<Library>>>,
-}
-
-impl NorthwardLoader {
-    /// Create a new northward loader with the given registry
-    pub fn new(registry: NorthwardRegistry) -> Self {
-        Self {
-            registry,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            libraries: Arc::new(DashMap::new()),
-        }
-    }
-
-    /// Register a northward factory directly (for built-in plugins), keyed by adapter_type
-    pub async fn register_factory(
-        &self,
-        id: i32,
-        factory: Arc<dyn PluginFactory + Send + Sync>,
-    ) -> Result<(), NorthwardError> {
-        if self.registry.contains_key(&id) {
-            return Err(NorthwardError::LoadError(format!(
-                "Northward id '{}' already registered",
-                id
-            )));
-        }
-
-        self.registry.insert(id, factory);
-        tracing::info!("Registered northward factory: id={}", id);
-
-        Ok(())
-    }
-
-    /// Unregister a northward factory and release its library handle (if any), by adapter_type
-    pub async fn unregister(&self, id: i32) {
-        let _ = self.registry.remove(&id);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            let _ = self.libraries.remove(&id);
-        }
-        tracing::info!("Unregistered northward factory: id={}", id);
-    }
-
-    /// Load and register northward plugins from provided (id, absolute path) pairs.
-    pub async fn load_all(&self, plugins: &[(i32, String)]) {
-        let mut set = tokio::task::JoinSet::new();
-        for (id, p) in plugins {
-            let id = *id;
-            let p = p.clone();
-            let loader = self.clone();
-            set.spawn(async move {
-                let path = Path::new(&p);
-                if let Err(e) = loader.load_library(path, id).await {
-                    tracing::warn!(error=%e, "Failed to load northward library id={} path={}", id, p);
-                }
-            });
-        }
-        while set.join_next().await.is_some() {}
-    }
-
-    /// Load a single northward library and register its factory into the registry.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub async fn load_library(
-        &self,
-        path: &Path,
-        id: i32,
-    ) -> Result<NorthwardProbeInfo, NorthwardError> {
-        tracing::info!("Loading northward library: id={} {}", id, path.display());
-
-        let path_buf = path.to_path_buf();
-        let (library, probe_info, factory_box) = tokio::task::spawn_blocking(move || {
-            // Load the shared library
-            let library = unsafe { Library::new(&path_buf) }.map_err(|e| {
-                NorthwardError::LoadError(format!(
-                    "Failed to load library {}: {e}",
-                    path_buf.display()
-                ))
-            })?;
-
-            // Extract probe info first (validation + metadata)
-            let probe_info = extract_probe_info(&library, &path_buf)?;
-
-            // Look for the northward factory creation function only when registering
-            let create_factory_fn: Symbol<unsafe extern "C" fn() -> *mut dyn PluginFactory> =
-                unsafe { library.get(b"create_plugin_factory") }.map_err(|e| {
-                    NorthwardError::LoadError(format!(
-                        "Failed to find 'create_plugin_factory' symbol in {}: {e}",
-                        path_buf.display()
-                    ))
-                })?;
-
-            // Reconstruct Box from raw pointer
-            let factory_ptr = unsafe { create_factory_fn() };
-            if factory_ptr.is_null() {
-                return Err(NorthwardError::LoadError(format!(
-                    "Factory pointer was null from {}",
-                    path_buf.display()
-                )));
-            }
-            let factory_box: Box<dyn PluginFactory> = unsafe { Box::from_raw(factory_ptr) };
-
-            // Try to configure plugin-specific tracing
-            let init_tracing_fn: Symbol<unsafe extern "C" fn(bool)> =
-                unsafe { library.get(b"ng_plugin_init_tracing") }.map_err(|e| {
-                    NorthwardError::LoadError(format!(
-                        "Failed to find 'ng_plugin_init_tracing' symbol in {}: {e}",
-                        path_buf.display()
-                    ))
-                })?;
-
-            unsafe { init_tracing_fn(cfg!(debug_assertions)) }
-
-            Ok((library, probe_info, factory_box))
-        })
-        .await
-        .map_err(|e| NorthwardError::LoadError(format!("Join error: {}", e)))??;
-
-        let factory: Arc<dyn PluginFactory> = Arc::from(factory_box);
-
-        // Register the factory by adapter_type
-        self.register_factory(id, factory).await?;
-
-        // Hold the library handle to ensure symbol and factory lifetimes remain valid
-        self.libraries.insert(id, Arc::new(library));
-
-        tracing::info!(
-            "Successfully loaded northward plugin: id={} name={}",
-            id,
-            probe_info.name
-        );
-
-        Ok(probe_info)
-    }
-
-    /// Stub implementation for unsupported platforms
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    async fn load_library(
-        &self,
-        _path: &Path,
-        _adapter_type: &str,
-    ) -> Result<NorthwardProbeInfo, NorthwardError> {
-        Err(NorthwardError::LoadError(
-            "Dynamic northward loading not supported on this platform".to_string(),
-        ))
-    }
 }
 
 #[inline]
@@ -210,7 +61,6 @@ fn extract_probe_info(
     library: &Library,
     path: &Path,
 ) -> Result<NorthwardProbeInfo, NorthwardError> {
-    // Gate: api version, sdk version, adapter type, version, metadata json
     let api_version_fn: Symbol<unsafe fn() -> u32> =
         unsafe { library.get(b"ng_plugin_api_version") }.map_err(|e| {
             NorthwardError::LoadError(format!(
@@ -267,7 +117,6 @@ fn extract_probe_info(
             ))
         })?;
 
-    // Validate API version
     let api_version = unsafe { api_version_fn() };
     let host_api_version = sdk_api_version();
     if api_version != host_api_version {
@@ -302,15 +151,15 @@ fn extract_probe_info(
     };
     let version = read_cstr(unsafe { version_fn() }, "ng_plugin_version", path)?;
 
-    // Obtain metadata bytes pointer+len and copy immediately
     let mut ptr: *const c_uchar = std::ptr::null();
     let mut len: usize = 0;
     unsafe { metadata_ptr_fn(&mut ptr, &mut len) };
     if ptr.is_null() || len == 0 {
         return Err(NorthwardError::LoadError(format!(
             "Failed to obtain northward metadata json from {} (ptr={:?} len={}); plugin panic or metadata serialization failed",
-            path.display()
-            , ptr, len
+            path.display(),
+            ptr,
+            len
         )));
     }
     let json_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -321,18 +170,12 @@ fn extract_probe_info(
         ))
     })?;
 
-    // Obtain file size using synchronous metadata to avoid introducing async in loader
     let size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
-
-    // Read bytes once to compute checksum and inspect OS/Arch
     let bytes = std::fs::read(path).map_err(|e| {
         NorthwardError::LoadError(format!("Failed to read library {}: {e}", path.display()))
     })?;
     let info = inspect_binary(&bytes);
-    let os_type = info.os_type;
-    let os_arch = info.arch;
 
-    // Compute sha256
     let mut hasher = sha2::Sha256::new();
     use sha2::Digest;
     hasher.update(&bytes);
@@ -348,25 +191,23 @@ fn extract_probe_info(
         metadata,
         size,
         checksum,
-        os_type,
-        os_arch,
+        os_type: info.os_type,
+        os_arch: info.arch,
     })
 }
 
 /// Probe a single northward library to extract versioning and metadata info without registering it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn probe_north_library(path: &Path) -> Result<NorthwardProbeInfo, NorthwardError> {
-    // Early platform validation to avoid dlopen/symbol errors on mismatched binaries.
     ensure_current_platform_from_path(path)
         .map_err(|e| NorthwardError::LoadError(e.to_string()))?;
-
     let library = unsafe { Library::new(path) }.map_err(|e| {
         NorthwardError::LoadError(format!("Failed to load library {}: {e}", path.display()))
     })?;
     extract_probe_info(&library, path)
 }
 
-/// Stub probe for unsupported platforms
+/// Stub probe for unsupported platforms.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn probe_north_library(_path: &Path) -> Result<NorthwardProbeInfo, NorthwardError> {
     Err(NorthwardError::LoadError(
@@ -399,7 +240,7 @@ pub fn discover_north_libraries_in_dir(dir: &Path) -> Vec<(String, NorthwardProb
     out
 }
 
-/// Stubbed discovery for unsupported platforms
+/// Stubbed discovery for unsupported platforms.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn discover_north_libraries_in_dir(_dir: &Path) -> Vec<(String, NorthwardProbeInfo)> {
     Vec::new()

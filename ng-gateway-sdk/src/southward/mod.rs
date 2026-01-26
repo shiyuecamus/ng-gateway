@@ -1,6 +1,7 @@
 pub(crate) mod codec;
-pub(crate) mod loader;
+pub mod log;
 pub(crate) mod model;
+pub mod probe;
 pub mod transport;
 pub(crate) mod types;
 pub(crate) mod validation;
@@ -153,6 +154,31 @@ macro_rules! ng_driver_factory {
             *out_len = NG_DRIVER_METADATA_JSON.len();
         }
 
+        /// Register the host log sink (FFI callback) for this driver library.
+        ///
+        /// # Notes
+        /// The host MUST call this before `ng_driver_init_tracing` so the driver can start
+        /// flushing bridged logs immediately after initialization.
+        #[no_mangle]
+        pub extern "C" fn ng_driver_set_log_sink(sink: $crate::log::LogSinkV1) -> u32 {
+            $crate::log::set_log_sink(sink)
+        }
+
+        /// Set the driver's runtime max log level (dynamic).
+        ///
+        /// Level mapping:
+        /// - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
+        #[no_mangle]
+        pub extern "C" fn ng_driver_set_max_level(level: u8) -> u32 {
+            $crate::log::set_max_level(level)
+        }
+
+        /// Get the driver's current runtime max log level (dynamic).
+        #[no_mangle]
+        pub extern "C" fn ng_driver_get_max_level() -> u8 {
+            $crate::log::get_max_level()
+        }
+
         // Internal message definition: Convert function calls to messages
         enum DriverMessage {
             Collect {
@@ -183,6 +209,8 @@ macro_rules! ng_driver_factory {
             inner: std::sync::Arc<Box<dyn $crate::Driver>>,
             tx: tokio::sync::mpsc::Sender<DriverMessage>,
             cancel_token: $crate::export::tokio_util::sync::CancellationToken,
+            /// Channel id for span attribution in driver runtime.
+            channel_id: i32,
             /// Bounded in-flight `collect_data` calls (per driver instance).
             collect_sem: std::sync::Arc<tokio::sync::Semaphore>,
             // Only used during start() to take ownership of the receiver
@@ -203,6 +231,7 @@ macro_rules! ng_driver_factory {
                 let inner = self.inner.clone();
                 let cancel_token = self.cancel_token.clone();
                 let collect_sem = std::sync::Arc::clone(&self.collect_sem);
+                let channel_id = self.channel_id;
 
                 let mut rx = {
                     let mut rx_opt = self.rx.lock().unwrap();
@@ -215,7 +244,16 @@ macro_rules! ng_driver_factory {
                 let (tx_res, rx_res) = tokio::sync::oneshot::channel();
 
                 handle.spawn(async move {
-                    if let Err(e) = inner.start().await {
+                    // Attribute driver lifecycle logs to channel id.
+                    let start_span = $crate::export::tracing::info_span!(
+                        "driver-start",
+                        channel_id = channel_id
+                    );
+                    let inner_start = inner.clone();
+                    if let Err(e) = async move { inner_start.start().await }
+                        .instrument(start_span)
+                        .await
+                    {
                         let _ = tx_res.send(Err(e));
                         return;
                     }
@@ -237,8 +275,27 @@ macro_rules! ng_driver_factory {
                     // - All operations are executed concurrently (spawn per message).
                     // - Collection is additionally bounded by a per-driver semaphore.
                     // - Cancellation is propagated by selecting on `cancel_token`.
-                    use $crate::export::tracing::debug;
+                    use $crate::export::tracing::{debug, Instrument};
                     debug!("Driver actor loop started");
+
+                    #[inline]
+                    fn delta_channel_id(delta: &$crate::RuntimeDelta) -> Option<i32> {
+                        match delta {
+                            $crate::RuntimeDelta::DevicesChanged {
+                                added,
+                                updated,
+                                removed,
+                                status_changed,
+                            } => added
+                                .first()
+                                .or_else(|| updated.first())
+                                .or_else(|| removed.first())
+                                .map(|d| d.channel_id())
+                                .or_else(|| status_changed.first().map(|(d, _)| d.channel_id())),
+                            $crate::RuntimeDelta::PointsChanged { device, .. } => Some(device.channel_id()),
+                            $crate::RuntimeDelta::ActionsChanged { device, .. } => Some(device.channel_id()),
+                        }
+                    }
 
                     loop {
                         tokio::select! {
@@ -254,7 +311,15 @@ macro_rules! ng_driver_factory {
                                                 let inner = inner.clone();
                                                 let sem = std::sync::Arc::clone(&collect_sem);
                                                 let cancel = cancel_token.clone();
+                                                let channel_id = items
+                                                    .get(0)
+                                                    .map(|(d, _)| d.channel_id())
+                                                    .unwrap_or_default();
                                                 // Spawn so that multiple collections can be in-flight concurrently.
+                                                let span = $crate::export::tracing::info_span!(
+                                                    "driver-collect",
+                                                    channel_id = channel_id,
+                                                );
                                                 tokio::spawn(async move {
                                                     let res = tokio::select! {
                                                         _ = cancel.cancelled() => {
@@ -269,11 +334,20 @@ macro_rules! ng_driver_factory {
                                                         } => r,
                                                     };
                                                     let _ = reply.send(res);
-                                                });
+                                                }.instrument(span));
                                             }
                                             DriverMessage::Execute { device, action, parameters, reply } => {
                                                 let inner = inner.clone();
                                                 let cancel = cancel_token.clone();
+                                                let channel_id = device.channel_id();
+                                                let device_id = device.id();
+                                                let action_id = action.id();
+                                                let span = $crate::export::tracing::info_span!(
+                                                    "driver-execute",
+                                                    channel_id = channel_id,
+                                                    device_id = device_id,
+                                                    action_id = action_id,
+                                                );
                                                 tokio::spawn(async move {
                                                     let res = tokio::select! {
                                                         _ = cancel.cancelled() => {
@@ -282,11 +356,20 @@ macro_rules! ng_driver_factory {
                                                         r = inner.execute_action(device, action, parameters) => r,
                                                     };
                                                     let _ = reply.send(res);
-                                                });
+                                                }.instrument(span));
                                             }
                                             DriverMessage::Write { device, point, value, timeout_ms, reply } => {
                                                 let inner = inner.clone();
                                                 let cancel = cancel_token.clone();
+                                                let channel_id = device.channel_id();
+                                                let device_id = device.id();
+                                                let point_id = point.id();
+                                                let span = $crate::export::tracing::info_span!(
+                                                    "driver-write",
+                                                    channel_id = channel_id,
+                                                    device_id = device_id,
+                                                    point_id = point_id,
+                                                );
                                                 tokio::spawn(async move {
                                                     let res = tokio::select! {
                                                         _ = cancel.cancelled() => {
@@ -295,11 +378,16 @@ macro_rules! ng_driver_factory {
                                                         r = inner.write_point(device, point, value, timeout_ms) => r,
                                                     };
                                                     let _ = reply.send(res);
-                                                });
+                                                }.instrument(span));
                                             }
                                             DriverMessage::ApplyDelta { delta, reply } => {
                                                 let inner = inner.clone();
                                                 let cancel = cancel_token.clone();
+                                                let channel_id = delta_channel_id(&delta).unwrap_or_default();
+                                                let span = $crate::export::tracing::info_span!(
+                                                    "driver-delta",
+                                                    channel_id = channel_id,
+                                                );
                                                 tokio::spawn(async move {
                                                     let res = tokio::select! {
                                                         _ = cancel.cancelled() => {
@@ -308,7 +396,7 @@ macro_rules! ng_driver_factory {
                                                         r = inner.apply_runtime_delta(delta) => r,
                                                     };
                                                     let _ = reply.send(res);
-                                                });
+                                                }.instrument(span));
                                             }
                                         }
                                     }
@@ -318,7 +406,12 @@ macro_rules! ng_driver_factory {
                         }
                     }
                     debug!("Driver actor loop stopped");
-                    let _ = inner.stop().await;
+                    let stop_span = $crate::export::tracing::info_span!(
+                        "driver-stop",
+                        channel_id = channel_id
+                    );
+                    let inner_stop = inner.clone();
+                    let _ = async move { inner_stop.stop().await }.instrument(stop_span).await;
                 });
 
                 match rx_res.await {
@@ -419,7 +512,10 @@ macro_rules! ng_driver_factory {
 
         impl $crate::DriverFactory for RuntimeAwareFactory {
             fn create_driver(&self, ctx: $crate::SouthwardInitContext) -> $crate::DriverResult<Box<dyn $crate::Driver>> {
-                let inner_driver = self.inner.create_driver(ctx)?;
+                use $crate::export::tracing::info_span;
+                let channel_id = ctx.channel_id;
+                let span = info_span!("driver-create", channel_id = channel_id);
+                let inner_driver = span.in_scope(|| self.inner.create_driver(ctx))?;
                 let (tx, rx) = tokio::sync::mpsc::channel($cap);
                 let cancel_token = $crate::export::tokio_util::sync::CancellationToken::new();
 
@@ -427,6 +523,7 @@ macro_rules! ng_driver_factory {
                     inner: std::sync::Arc::new(inner_driver),
                     tx,
                     cancel_token,
+                    channel_id,
                     // Start with 1 permit; additional permits are added in `start()`
                     // after reading `Driver::collect_max_inflight()`.
                     collect_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
@@ -438,19 +535,51 @@ macro_rules! ng_driver_factory {
                 &self,
                 channel: $crate::ChannelModel,
             ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeChannel>> {
-                self.inner.convert_runtime_channel(channel)
+                use $crate::export::tracing::info_span;
+                let channel_id = channel.id;
+                let driver_id = channel.driver_id;
+                let span = info_span!(
+                    "driver-convert-channel",
+                    channel_id = channel_id,
+                    driver_id = driver_id
+                );
+                span.in_scope(|| self.inner.convert_runtime_channel(channel))
             }
 
             fn convert_runtime_device(&self, device: $crate::DeviceModel) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeDevice>> {
-                self.inner.convert_runtime_device(device)
+                use $crate::export::tracing::info_span;
+                let channel_id = device.channel_id;
+                let device_id = device.id;
+                let span = info_span!(
+                    "driver-convert-device",
+                    channel_id = channel_id,
+                    device_id = device_id
+                );
+                span.in_scope(|| self.inner.convert_runtime_device(device))
             }
 
             fn convert_runtime_point(&self, point: $crate::PointModel) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimePoint>> {
-                self.inner.convert_runtime_point(point)
+                use $crate::export::tracing::info_span;
+                let point_id = point.id;
+                let device_id = point.device_id;
+                let span = info_span!(
+                    "driver-convert-point",
+                    device_id = device_id,
+                    point_id = point_id
+                );
+                span.in_scope(|| self.inner.convert_runtime_point(point))
             }
 
             fn convert_runtime_action(&self, action: $crate::ActionModel) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeAction>> {
-                self.inner.convert_runtime_action(action)
+                use $crate::export::tracing::info_span;
+                let action_id = action.id;
+                let device_id = action.device_id;
+                let span = info_span!(
+                    "driver-convert-action",
+                    device_id = device_id,
+                    action_id = action_id
+                );
+                span.in_scope(|| self.inner.convert_runtime_action(action))
             }
         }
 
@@ -475,35 +604,16 @@ macro_rules! ng_driver_factory {
 
         /// Initialize tracing for this driver library.
         ///
-        /// This function sets up a driver-specific tracing configuration. When
-        /// debug mode is enabled, it uses `Level::DEBUG` and a pretty formatter
-        /// with file and line numbers. Otherwise, it configures `Level::INFO`
-        /// and hides file and line number details to reduce overhead.
+        /// This installs a lightweight subscriber + bridge layer that captures `tracing`
+        /// (and optionally `log`) records and flushes them to the host via `LogSinkV1`.
         ///
         /// # Arguments
         ///
-        /// * `is_debug` - When `Some(true)`, enables debug-level and pretty output;
-        ///                otherwise defaults to non-debug INFO level.
+        /// * `debug` - When true, the initial max level is set to DEBUG; otherwise INFO.
         #[no_mangle]
         pub extern "C" fn ng_driver_init_tracing(debug: bool) {
-            use $crate::export::tracing::Level;
-            // Only depend on fmt to avoid requiring optional features like env-filter
-            use $crate::export::tracing_subscriber::fmt;
-
-            if debug {
-                let _ = fmt()
-                    .pretty()
-                    .with_line_number(true)
-                    .with_file(true)
-                    .with_max_level(Level::DEBUG)
-                    .try_init();
-            } else {
-                let _ = fmt()
-                    .with_line_number(false)
-                    .with_file(false)
-                    .with_max_level(Level::INFO)
-                    .try_init();
-            };
+            let handle = NG_RUNTIME.handle().clone();
+            $crate::log::init_driver_tracing(handle, debug);
         }
     };
 

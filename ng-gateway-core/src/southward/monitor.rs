@@ -8,7 +8,7 @@ use ng_gateway_sdk::{
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, Instrument};
 
 /// Per-channel monitor component that manages lifecycle and event emission
 #[derive(Clone)]
@@ -64,139 +64,166 @@ impl ChannelMonitor {
         self.tokens.insert(channel_id, token.clone());
         let tasks_ref = Arc::clone(&self.tasks);
         let tokens_cleanup = Arc::clone(&self.tokens);
-        let handle = tokio::spawn(async move {
-            // Shared last state across event and polling paths to avoid duplicate work
-            let mut last_state = SouthwardConnectionState::Connecting;
+        // Bind a per-channel span so all monitor logs can be attributed to `channel_id`.
+        let channel_name_for_span = monitor_channel_name.clone();
+        let driver_id_for_span = monitor_driver_id.clone();
+        let span = tracing::info_span!(
+            "southward-channel-monitor",
+            channel_id = channel_id,
+            channel_name = %channel_name_for_span,
+            driver_id = %driver_id_for_span
+        );
 
-            // Unified state transition handler: updates channel state and builds northward events
-            let mut handle_transition =
-                |state: SouthwardConnectionState| -> Option<Vec<Arc<NorthwardData>>> {
-                    if state == last_state {
-                        return None;
-                    }
+        let handle = tokio::spawn(
+            async move {
+                // Shared last state across event and polling paths to avoid duplicate work
+                let mut last_state = SouthwardConnectionState::Connecting;
 
-                    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+                // Unified state transition handler: updates channel state and builds northward events
+                let mut handle_transition =
+                    |state: SouthwardConnectionState| -> Option<Vec<Arc<NorthwardData>>> {
+                        if state == last_state {
+                            return None;
+                        }
 
-                    // Maintain manager-level connected channels count in the hub (single source of truth).
-                    let was_connected = last_state.is_connected();
-                    let is_connected = state.is_connected();
-                    if is_connected && !was_connected {
-                        monitor_metrics_hub.inc_southward_connected_channels();
-                    } else if !is_connected && was_connected {
-                        monitor_metrics_hub.dec_southward_connected_channels();
-                    }
+                        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
 
-                    // Update Prometheus gauges and reconnect counter.
-                    prom.set_connected(state.is_connected());
-                    prom.set_state_value(state.as_value());
-                    prom.record_state_change_ms(now_ms);
-                    if state.is_reconnecting() && !last_state.is_reconnecting() {
-                        prom.inc_reconnect();
-                    }
-                    if state.is_failed() && !last_state.is_failed() {
-                        prom.inc_connect_failed();
-                    }
-                    if was_connected && (state.is_disconnected() || state.is_failed()) {
-                        prom.inc_disconnect();
-                    }
+                        // Maintain manager-level connected channels count in the hub (single source of truth).
+                        let was_connected = last_state.is_connected();
+                        let is_connected = state.is_connected();
+                        if is_connected && !was_connected {
+                            monitor_metrics_hub.inc_southward_connected_channels();
+                        } else if !is_connected && was_connected {
+                            monitor_metrics_hub.dec_southward_connected_channels();
+                        }
 
-                    last_state = state.clone();
+                        // Update Prometheus gauges and reconnect counter.
+                        prom.set_connected(state.is_connected());
+                        prom.set_state_value(state.as_value());
+                        prom.record_state_change_ms(now_ms);
+                        if state.is_reconnecting() && !last_state.is_reconnecting() {
+                            prom.inc_reconnect();
+                        }
+                        if state.is_failed() && !last_state.is_failed() {
+                            prom.inc_connect_failed();
+                        }
+                        if was_connected && (state.is_disconnected() || state.is_failed()) {
+                            prom.inc_disconnect();
+                        }
 
-                    match state {
-                        SouthwardConnectionState::Connected => {
-                            if let Some(mut entry) = monitor_channels.get_mut(&channel_id) {
-                                entry.state = SouthwardConnectionState::Connected;
-                                entry.last_activity = Utc::now();
-                            }
-                            info!("Channel [{monitor_channel_name}] connected");
+                        last_state = state.clone();
 
-                            if let Some(set_ref) = device_map.get(&channel_id) {
-                                let mut events: Vec<Arc<NorthwardData>> =
-                                    Vec::with_capacity(set_ref.len());
-                                for device_id in set_ref.iter().copied() {
-                                    if let Some(dev) = devices_table.get(&device_id) {
-                                        events.push(Arc::new(NorthwardData::DeviceConnected(
-                                            DeviceConnectedData {
-                                                device_id,
-                                                device_name: dev.config.device_name().to_string(),
-                                                device_type: dev.config.device_type().to_string(),
-                                            },
-                                        )));
+                        match state {
+                            SouthwardConnectionState::Connected => {
+                                if let Some(mut entry) = monitor_channels.get_mut(&channel_id) {
+                                    entry.state = SouthwardConnectionState::Connected;
+                                    entry.last_activity = Utc::now();
+                                }
+                                info!("Channel [{monitor_channel_name}] connected");
+
+                                if let Some(set_ref) = device_map.get(&channel_id) {
+                                    let mut events: Vec<Arc<NorthwardData>> =
+                                        Vec::with_capacity(set_ref.len());
+                                    for device_id in set_ref.iter().copied() {
+                                        if let Some(dev) = devices_table.get(&device_id) {
+                                            events.push(Arc::new(NorthwardData::DeviceConnected(
+                                                DeviceConnectedData {
+                                                    device_id,
+                                                    device_name: dev
+                                                        .config
+                                                        .device_name()
+                                                        .to_string(),
+                                                    device_type: dev
+                                                        .config
+                                                        .device_type()
+                                                        .to_string(),
+                                                },
+                                            )));
+                                        }
+                                    }
+                                    if !events.is_empty() {
+                                        return Some(events);
                                     }
                                 }
-                                if !events.is_empty() {
-                                    return Some(events);
+                                None
+                            }
+                            SouthwardConnectionState::Disconnected
+                            | SouthwardConnectionState::Failed(_) => {
+                                if let Some(mut entry) = monitor_channels.get_mut(&channel_id) {
+                                    entry.state = SouthwardConnectionState::Disconnected;
+                                    entry.last_activity = Utc::now();
                                 }
-                            }
-                            None
-                        }
-                        SouthwardConnectionState::Disconnected
-                        | SouthwardConnectionState::Failed(_) => {
-                            if let Some(mut entry) = monitor_channels.get_mut(&channel_id) {
-                                entry.state = SouthwardConnectionState::Disconnected;
-                                entry.last_activity = Utc::now();
-                            }
-                            info!("Channel [{monitor_channel_name}] disconnected");
+                                info!("Channel [{monitor_channel_name}] disconnected");
 
-                            if let Some(set_ref) = device_map.get(&channel_id) {
-                                let mut events: Vec<Arc<NorthwardData>> =
-                                    Vec::with_capacity(set_ref.len());
-                                for device_id in set_ref.iter().copied() {
-                                    if let Some(dev) = devices_table.get(&device_id) {
-                                        events.push(Arc::new(NorthwardData::DeviceDisconnected(
-                                            DeviceDisconnectedData {
-                                                device_id,
-                                                device_name: dev.config.device_name().to_string(),
-                                                device_type: dev.config.device_type().to_string(),
-                                            },
-                                        )));
+                                if let Some(set_ref) = device_map.get(&channel_id) {
+                                    let mut events: Vec<Arc<NorthwardData>> =
+                                        Vec::with_capacity(set_ref.len());
+                                    for device_id in set_ref.iter().copied() {
+                                        if let Some(dev) = devices_table.get(&device_id) {
+                                            events.push(Arc::new(
+                                                NorthwardData::DeviceDisconnected(
+                                                    DeviceDisconnectedData {
+                                                        device_id,
+                                                        device_name: dev
+                                                            .config
+                                                            .device_name()
+                                                            .to_string(),
+                                                        device_type: dev
+                                                            .config
+                                                            .device_type()
+                                                            .to_string(),
+                                                    },
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                    if !events.is_empty() {
+                                        return Some(events);
                                     }
                                 }
-                                if !events.is_empty() {
-                                    return Some(events);
+                                None
+                            }
+                            _ => {
+                                info!("Channel [{monitor_channel_name}] in state {state}");
+                                if let Some(mut entry) = monitor_channels.get_mut(&channel_id) {
+                                    entry.state = state;
+                                    entry.last_activity = Utc::now();
+                                }
+                                None
+                            }
+                        }
+                    };
+
+                // Subscribe and drive connection state updates exclusively
+                let mut rx = monitor_driver.subscribe_connection_state();
+
+                // Emit initial transition based on current state to avoid missing first events
+                let init_state = rx.borrow().clone();
+                if let Some(events) = handle_transition(init_state) {
+                    for event in events.into_iter() {
+                        let _ = monitor_data_tx.send(event).await;
+                    }
+                }
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        r = rx.changed() => {
+                            if r.is_err() { break; }
+                            let state = rx.borrow().clone();
+                            if let Some(events) = handle_transition(state) {
+                                for event in events.into_iter() {
+                                    let _ = monitor_data_tx.send(event).await;
                                 }
                             }
-                            None
-                        }
-                        _ => {
-                            info!("Channel [{monitor_channel_name}] in state {state}");
-                            if let Some(mut entry) = monitor_channels.get_mut(&channel_id) {
-                                entry.state = state;
-                                entry.last_activity = Utc::now();
-                            }
-                            None
-                        }
-                    }
-                };
-
-            // Subscribe and drive connection state updates exclusively
-            let mut rx = monitor_driver.subscribe_connection_state();
-
-            // Emit initial transition based on current state to avoid missing first events
-            let init_state = rx.borrow().clone();
-            if let Some(events) = handle_transition(init_state) {
-                for event in events.into_iter() {
-                    let _ = monitor_data_tx.send(event).await;
-                }
-            }
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => break,
-                    r = rx.changed() => {
-                        if r.is_err() { break; }
-                        let state = rx.borrow().clone();
-                        if let Some(events) = handle_transition(state) {
-                            for event in events.into_iter() {
-                                let _ = monitor_data_tx.send(event).await;
-                            }
                         }
                     }
                 }
+                // cleanup: remove task and token entries when exit
+                tasks_ref.remove(&channel_id);
+                tokens_cleanup.remove(&channel_id);
             }
-            // cleanup: remove task and token entries when exit
-            tasks_ref.remove(&channel_id);
-            tokens_cleanup.remove(&channel_id);
-        });
+            .instrument(span),
+        );
         self.tasks.insert(channel_id, handle);
     }
 

@@ -97,6 +97,10 @@ workspace = true
 [dependencies.chrono]
 workspace = true
 
+# Fast locks (used by realtime log hub)
+[dependencies.parking_lot]
+workspace = true
+
 # Downcast
 [dependencies.downcast-rs]
 workspace = true

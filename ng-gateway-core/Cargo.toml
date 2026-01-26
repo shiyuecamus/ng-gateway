@@ -73,6 +73,10 @@ workspace = true
 workspace = true
 [dependencies.tracing-subscriber]
 workspace = true
+[dependencies.sha2]
+workspace = true
+[dependencies.hex]
+workspace = true
 
 # Backoff with async/tokio support for unified retry policies
 [dependencies.backoff]
