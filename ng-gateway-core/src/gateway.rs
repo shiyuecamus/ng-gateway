@@ -21,8 +21,7 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
 use ng_gateway_common::{
-    log::realtime::hub::LogLevel as RealtimeLogLevel,
-    log::realtime::lease::{self as log_lease, LogOverrideChangeSink, LogOverrideScope},
+    log::control::{self as log_control, LogOverrideChangeSink, LogOverrideScope},
     metrics::{
         channel::{bounded, InstrumentedReceiver, InstrumentedSender},
         control::ControlResult,
@@ -34,9 +33,9 @@ use ng_gateway_error::{init::InitContextError, storage::StorageError, NGError, N
 use ng_gateway_models::{
     core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
-        ChangeAppStatus, ChangeChannelStatus, ChangeDeviceStatus, NewAction, NewApp, NewAppSub,
-        NewChannel, NewDevice, NewPoint, UpdateAction, UpdateApp, UpdateAppSub, UpdateChannel,
-        UpdateDevice, UpdatePoint,
+        ChangeAppStatus, ChangeChannelStatus, ChangeDeviceStatus, LogLevel, NewAction, NewApp,
+        NewAppSub, NewChannel, NewDevice, NewPoint, UpdateAction, UpdateApp, UpdateAppSub,
+        UpdateChannel, UpdateDevice, UpdatePoint,
     },
     entities::prelude::{
         ActionModel, AppModel, AppSubModel, ChannelModel, DeviceModel, PointModel,
@@ -95,20 +94,64 @@ struct DriverLogOverrideSink {
 }
 
 impl LogOverrideChangeSink for DriverLogOverrideSink {
-    fn on_effective_level_change(&self, scope: LogOverrideScope, level: RealtimeLogLevel) {
-        let level_u8: u8 = level as u8;
+    fn on_effective_level_change(&self, scope: LogOverrideScope, _level: LogLevel) {
+        // Driver-side log bridge has a **per-driver-library** max level, not per channel.
+        // Therefore the correct propagation strategy is:
+        //
+        // - For each driver_id, set max_level = max(effective levels of all channels using that driver_id).
+        // - Then rely on host-side per-channel filtering (via `channel_id` spans) to decide what is shown.
+        //
+        // This avoids "last writer wins" bugs when multiple channels share the same driver library.
+        let Some(rt) = log_control::global() else {
+            return;
+        };
+        let overrides = rt.overrides();
+
         match scope {
             LogOverrideScope::Global => {
-                let _ = self.driver_loader.set_max_level_all(level_u8);
+                // Global changes can raise/lower the fallback for all channels.
+                // First align every loaded driver to the new effective global (cheap),
+                // then bump individual drivers if any channel wants higher verbosity.
+                let global_u8: u8 = overrides.effective_global_level().into();
+                let _ = self.driver_loader.set_max_level_all(global_u8);
+
+                let mut desired: HashMap<i32, u8> = HashMap::new();
+                for e in self.index.channels.iter() {
+                    let channel_id = *e.key();
+                    let driver_id = e.value().config.driver_id();
+                    let eff_u8: u8 = overrides.effective_channel_level(channel_id).into();
+                    desired
+                        .entry(driver_id)
+                        .and_modify(|m| *m = (*m).max(eff_u8))
+                        .or_insert(eff_u8);
+                }
+                for (driver_id, lvl) in desired {
+                    let _ = self.driver_loader.set_max_level(driver_id, lvl);
+                }
             }
             LogOverrideScope::Channel(channel_id) => {
+                // Recompute only the affected driver_id (cheap and avoids churn).
                 let Some(chan) = self.index.channels.get(&channel_id) else {
+                    // Channel not active (yet). Best-effort fallback: ensure global level is applied.
+                    let global_u8: u8 = overrides.effective_global_level().into();
+                    let _ = self.driver_loader.set_max_level_all(global_u8);
                     return;
                 };
                 let driver_id = chan.config.driver_id();
-                let _ = self.driver_loader.set_max_level(driver_id, level_u8);
+
+                let mut max_u8: u8 = overrides.effective_global_level().into();
+                for e in self.index.channels.iter() {
+                    if e.value().config.driver_id() != driver_id {
+                        continue;
+                    }
+                    let ch_id = *e.key();
+                    let eff_u8: u8 = overrides.effective_channel_level(ch_id).into();
+                    max_u8 = max_u8.max(eff_u8);
+                }
+
+                let _ = self.driver_loader.set_max_level(driver_id, max_u8);
             }
-        }
+        };
     }
 }
 
@@ -261,15 +304,15 @@ impl Gateway for NGGateway {
         // lease/override changes (including expiry) => `ng_driver_set_max_level`.
         //
         // Best-effort: install once and align all loaded drivers to current effective global level.
-        if let Some(rt) = ng_gateway_common::log::runtime::global() {
-            let installed = log_lease::set_change_sink(Arc::new(DriverLogOverrideSink {
+        if let Some(rt) = log_control::global() {
+            let installed = log_control::set_change_sink(Arc::new(DriverLogOverrideSink {
                 driver_loader: driver_loader.clone(),
                 index: southward_manager.runtime_index(),
             }));
             if !installed {
                 warn!("Log override change sink already installed; skipping");
             }
-            let desired: u8 = rt.overrides().effective_global_level() as u8;
+            let desired: u8 = rt.overrides().effective_global_level().into();
             let _ = driver_loader.set_max_level_all(desired);
         }
 
@@ -1047,7 +1090,7 @@ impl ActionRuntimeCmd for NGGateway {
         let control_driver = self
             .southward_manager
             .snapshot_channel_driver_id(channel_id)
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or("unknown".to_string());
         let control = self
             .metrics_hub
             .register_control_channel_metrics(channel_id, control_driver)
@@ -1739,7 +1782,7 @@ impl NGGateway {
         let start = Instant::now();
         let control_driver = southward_manager
             .snapshot_channel_driver_id(meta.channel_id)
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or("unknown".to_string());
         let control = metrics_hub
             .register_control_channel_metrics(meta.channel_id, control_driver.clone())
             .ok();
@@ -1978,7 +2021,7 @@ impl NGGateway {
         let uptime = self
             .start_time
             .map(|t| Utc::now() - t)
-            .unwrap_or_else(chrono::Duration::zero);
+            .unwrap_or(chrono::Duration::zero());
 
         self.metrics_hub.build_gateway_snapshot(
             state,
@@ -2120,7 +2163,7 @@ async fn execute_action_direct(
     let prom = southward_manager.get_channel_metric_handles(device.config.channel_id());
     let control_driver = southward_manager
         .snapshot_channel_driver_id(device.config.channel_id())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or("unknown".to_string());
     let control = metrics_hub
         .register_control_channel_metrics(device.config.channel_id(), control_driver)
         .ok();

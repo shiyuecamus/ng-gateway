@@ -176,7 +176,7 @@ impl SubscriptionRouter {
             .device_subscriptions
             .get(&device_id)
             .map(|entry| Arc::clone(entry.value()))
-            .unwrap_or_else(|| Arc::clone(&EMPTY_SUBSCRIPTIONS));
+            .unwrap_or(Arc::clone(&EMPTY_SUBSCRIPTIONS));
         let all = self.all_devices_sorted.load_full();
         MergedApps::new(device, all)
     }

@@ -99,7 +99,7 @@ fn build_weak_etag(updated_at: Option<DateTimeUtc>, len: usize) -> HeaderValue {
     let ts = updated_at.map(|t| t.timestamp_millis()).unwrap_or(0);
     // Weak ETag is sufficient for immutable binary replacement.
     let value = format!("W/\"{}-{}\"", ts, len);
-    HeaderValue::from_str(value.as_str()).unwrap_or_else(|_| HeaderValue::from_static("W/\"0-0\""))
+    HeaderValue::from_str(value.as_str()).unwrap_or(HeaderValue::from_static("W/\"0-0\""))
 }
 
 #[inline]

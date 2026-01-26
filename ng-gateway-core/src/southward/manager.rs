@@ -1969,15 +1969,17 @@ impl NGSouthwardManager {
     #[inline]
     /// Get points for a specific device
     pub fn get_device_points(&self, device_id: i32) -> Arc<[Arc<dyn RuntimePoint>]> {
-        self.device_points_slice(device_id)
-            .unwrap_or_else(|| Arc::from(Vec::<Arc<dyn RuntimePoint>>::new().into_boxed_slice()))
+        self.device_points_slice(device_id).unwrap_or(Arc::from(
+            Vec::<Arc<dyn RuntimePoint>>::new().into_boxed_slice(),
+        ))
     }
 
     #[inline]
     /// Get actions for a specific device
     pub fn get_device_actions(&self, device_id: i32) -> Arc<[Arc<dyn RuntimeAction>]> {
-        self.device_actions_slice(device_id)
-            .unwrap_or_else(|| Arc::from(Vec::<Arc<dyn RuntimeAction>>::new().into_boxed_slice()))
+        self.device_actions_slice(device_id).unwrap_or(Arc::from(
+            Vec::<Arc<dyn RuntimeAction>>::new().into_boxed_slice(),
+        ))
     }
 
     #[inline]

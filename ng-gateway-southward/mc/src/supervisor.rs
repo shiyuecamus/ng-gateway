@@ -23,6 +23,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 #[allow(unused)]
 /// Shared MC session entry with lock-free handle access and health flags.
@@ -147,6 +148,9 @@ impl McSupervisor {
         let state_tx = self.state_tx.clone();
         let transport_meter = Arc::clone(&self.transport_meter);
 
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("mc-supervisor", channel_id = channel.id);
         tokio::spawn(async move {
             let mut retry = RetryController::new(&channel.connection_policy.backoff);
 
@@ -238,7 +242,8 @@ impl McSupervisor {
                     }
                 }
             }
-        });
+        }
+        .instrument(span));
 
         Ok(())
     }

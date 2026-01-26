@@ -5,7 +5,7 @@
 //! - A driver-side `tracing_subscriber::Layer` that captures events and flushes them to the sink
 //!   asynchronously in batches (to avoid blocking hot paths).
 //! - A host-side sink implementation that ingests JSON/JSONL payloads and re-emits them as host
-//!   `tracing` events, so they naturally flow into the unified host logger and LogHub.
+//!   `tracing` events, so they naturally flow into the unified host logger.
 //!
 //! # Safety contract (FFI)
 //! - The driver MUST treat sink callbacks as "best-effort, non-blocking".
@@ -36,6 +36,26 @@ use tracing_subscriber::{
     registry::{LookupSpan, SpanRef},
     Layer,
 };
+
+/// Shared log field keys used by the driver<->host bridge.
+///
+/// Keep these as a single source of truth so both sides agree on the schema.
+pub mod fields {
+    use serde_json::{Map, Value};
+
+    /// Field key for channel attribution.
+    pub const CHANNEL_ID: &str = "channel_id";
+    /// Synthetic field key used by `tracing` for event body.
+    pub const MESSAGE: &str = "message";
+
+    /// Extract an `i32` from a JSON map field.
+    #[inline]
+    pub fn map_i32(map: &Map<String, Value>, key: &str) -> Option<i32> {
+        map.get(key)
+            .and_then(|v| v.as_i64())
+            .and_then(|v| i32::try_from(v).ok())
+    }
+}
 
 /// ABI version for `LogSinkV1`.
 pub const LOG_SINK_ABI_V1: u32 = 1;
@@ -183,10 +203,37 @@ struct DriverBridgeLayer {
     st: Arc<DriverLogState>,
 }
 
+/// Span extension: cached `channel_id` for host-side filtering.
+#[derive(Debug, Clone, Copy, Default)]
+struct ChannelIdExt(Option<i32>);
+
+#[derive(Default)]
+struct ChannelIdVisitor {
+    channel_id: Option<i32>,
+}
+
+impl Visit for ChannelIdVisitor {
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        if field.name() == fields::CHANNEL_ID {
+            self.channel_id = Some(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+        }
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == fields::CHANNEL_ID {
+            self.channel_id = Some((value.min(i32::MAX as u64)) as i32);
+        }
+    }
+
+    fn record_debug(&mut self, _field: &Field, _value: &dyn fmt::Debug) {}
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DriverWireSpan {
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fields: Option<Map<String, Value>>,
 }
@@ -195,7 +242,14 @@ struct DriverWireSpan {
 #[serde(rename_all = "camelCase")]
 struct DriverWireEvent {
     ts: i64,
-    level: String,
+    /// Backward compatible string level (older hosts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<String>,
+    /// Compact numeric level for zero-allocation encoding.
+    ///
+    /// Mapping: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level_u8: Option<u8>,
     target: String,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,20 +269,39 @@ where
 
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else { return };
-        let mut visitor = JsonVisitor::default();
-        attrs.record(&mut visitor);
-        span.extensions_mut().insert(visitor.fields);
+        let mut v = ChannelIdVisitor::default();
+        attrs.record(&mut v);
+
+        // Inherit `channel_id` from ancestors so host-side per-channel filtering stays reliable
+        // even when dependencies create nested spans that don't repeat the field.
+        if v.channel_id.is_none() {
+            let mut p = span.parent();
+            while let Some(ps) = p {
+                if let Some(ext) = ps.extensions().get::<ChannelIdExt>() {
+                    if ext.0.is_some() {
+                        v.channel_id = ext.0;
+                        break;
+                    }
+                }
+                p = ps.parent();
+            }
+        }
+
+        span.extensions_mut().insert(ChannelIdExt(v.channel_id));
     }
 
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else { return };
+        let mut v = ChannelIdVisitor::default();
+        values.record(&mut v);
+        if v.channel_id.is_none() {
+            return;
+        }
         let mut exts = span.extensions_mut();
-        if let Some(map) = exts.get_mut::<Map<String, Value>>() {
-            let mut visitor = JsonVisitor::default();
-            values.record(&mut visitor);
-            for (k, v) in visitor.fields.into_iter() {
-                map.insert(k, v);
-            }
+        if let Some(ext) = exts.get_mut::<ChannelIdExt>() {
+            ext.0 = v.channel_id;
+        } else {
+            exts.insert(ChannelIdExt(v.channel_id));
         }
     }
 
@@ -247,21 +320,18 @@ where
         // We extract it and remove it from the structured map to keep payload small and semantics clear.
         let message = visitor
             .fields
-            .remove("message")
+            .remove(fields::MESSAGE)
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
         let message = truncate_utf8(&message, self.st.cfg.event_max_bytes);
 
         let current_span: Option<SpanRef<'_, S>> = ctx.lookup_current();
         let span = current_span.as_ref().map(|s| {
-            let fields = s
-                .extensions()
-                .get::<Map<String, Value>>()
-                .cloned()
-                .and_then(|m| if m.is_empty() { None } else { Some(m) });
+            let channel_id = s.extensions().get::<ChannelIdExt>().and_then(|e| e.0);
             DriverWireSpan {
                 name: s.metadata().name().to_string(),
-                fields,
+                channel_id,
+                fields: None,
             }
         });
 
@@ -273,7 +343,8 @@ where
 
         let wire = DriverWireEvent {
             ts: chrono::Utc::now().timestamp_millis(),
-            level: meta.level().to_string(),
+            level: None,
+            level_u8: Some(level_to_u8(meta.level())),
             target: meta.target().to_string(),
             message,
             fields,
@@ -335,12 +406,10 @@ async fn driver_flush_loop(st: Arc<DriverLogState>) {
 
         if let Some(emit_batch) = sink.emit_batch_json {
             // JSON Lines batch.
-            let mut buf = String::new();
+            let mut buf: Vec<u8> = Vec::with_capacity(st.cfg.batch_max_bytes.min(1024 * 1024));
             for ev in batch.iter() {
-                if let Ok(line) = serde_json::to_string(ev) {
-                    buf.push_str(&line);
-                    buf.push('\n');
-                }
+                let _ = serde_json::to_writer(&mut buf, ev);
+                buf.push(b'\n');
             }
             if !buf.is_empty() {
                 emit_batch(sink.user_data, buf.as_ptr(), buf.len());
@@ -348,9 +417,9 @@ async fn driver_flush_loop(st: Arc<DriverLogState>) {
         } else {
             // Fallback: emit per event.
             for ev in batch.iter() {
-                if let Ok(line) = serde_json::to_string(ev) {
-                    (sink.emit_json)(sink.user_data, line.as_ptr(), line.len());
-                }
+                let mut buf: Vec<u8> = Vec::with_capacity(512);
+                let _ = serde_json::to_writer(&mut buf, ev);
+                (sink.emit_json)(sink.user_data, buf.as_ptr(), buf.len());
             }
         }
     }

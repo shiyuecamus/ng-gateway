@@ -37,6 +37,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
+use tracing::Instrument;
 
 pub trait S7Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> S7Stream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -117,13 +118,16 @@ impl SessionEventLoop {
         let cancel = self.inner_cancel.child_token();
         let config = Arc::clone(&self.config);
         let pre = self.pre_connected;
-        tokio::spawn(async move {
-            if let Some(stream) = pre {
-                run_connection_with_stream(session, stream, config, cancel).await;
-            } else {
-                run_connection(session, config, cancel).await;
+        tokio::spawn(
+            async move {
+                if let Some(stream) = pre {
+                    run_connection_with_stream(session, stream, config, cancel).await;
+                } else {
+                    run_connection(session, config, cancel).await;
+                }
             }
-        });
+            .instrument(tracing::Span::current()),
+        );
 
         // Forward events as a stream
         futures::stream::unfold(events_rx, |mut rx| async move {
@@ -143,7 +147,8 @@ impl SessionEventLoop {
 
     /// Spawn a background task to drain the event stream
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(self.run())
+        let span = tracing::Span::current();
+        tokio::spawn(async move { self.run().await }.instrument(span))
     }
 
     /// Cancel the connection

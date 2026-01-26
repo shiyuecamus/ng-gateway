@@ -17,6 +17,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Lightweight wrapper around a session trait object.
 pub struct SessionHandle(pub Arc<dyn Cjt188Session>);
@@ -145,6 +146,9 @@ impl Cjt188Supervisor {
             .ok_or(DriverError::ExecutionError("reconnect rx consumed".into()))?;
         let transport_meter = Arc::clone(&self.transport_meter);
 
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("cjt188-supervisor", channel_id = channel.id);
         tokio::spawn(async move {
             shared.shutdown.store(false, Ordering::Release);
 
@@ -217,7 +221,8 @@ impl Cjt188Supervisor {
                     }
                 }
             }
-        });
+        }
+        .instrument(span));
         Ok(())
     }
 }

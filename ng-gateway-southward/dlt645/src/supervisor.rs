@@ -20,6 +20,7 @@ use std::{
 };
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 impl From<ProtocolError> for DriverError {
     /// Map protocol-level errors into the gateway's `DriverError` domain.
@@ -212,6 +213,9 @@ impl Dl645Supervisor {
             .ok_or(DriverError::ExecutionError("reconnect rx consumed".into()))?;
         let transport_meter = Arc::clone(&self.transport_meter);
 
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("dlt645-supervisor", channel_id = channel.id);
         tokio::spawn(async move {
             // reset flags
             shared.shutdown.store(false, Ordering::Release);
@@ -297,7 +301,8 @@ impl Dl645Supervisor {
                     }
                 }
             }
-        });
+        }
+        .instrument(span));
         Ok(())
     }
 }

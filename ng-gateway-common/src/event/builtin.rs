@@ -24,7 +24,7 @@ struct Translations {
 
 impl Translations {
     fn get_current() -> Self {
-        let locale = get_locale().unwrap_or_else(|| "en-US".into());
+        let locale = get_locale().unwrap_or("en-US".into());
         let is_chinese = locale.starts_with("zh");
 
         if is_chinese {

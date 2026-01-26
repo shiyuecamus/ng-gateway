@@ -31,7 +31,7 @@ use std::{
 };
 use tokio::{sync::watch, time::Duration as TokioDuration};
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
+use tracing::{instrument, Instrument};
 
 /// Production-grade IEC 60870-5-104 driver
 ///
@@ -712,16 +712,20 @@ impl Driver for Iec104Driver {
         let successful_requests = Arc::clone(&self.successful_requests);
         let failed_requests = Arc::clone(&self.failed_requests);
         let last_avg_response_time_ms = Arc::clone(&self.last_avg_response_time_ms);
-        tokio::spawn(Self::run_receive_loop(
-            shared,
-            cancel,
-            ca_to_snapshot,
-            Arc::clone(&self.publisher),
-            total_requests,
-            successful_requests,
-            failed_requests,
-            last_avg_response_time_ms,
-        ));
+        let span = tracing::info_span!("iec104-recv-loop", channel_id = self.inner.id);
+        tokio::spawn(
+            Self::run_receive_loop(
+                shared,
+                cancel,
+                ca_to_snapshot,
+                Arc::clone(&self.publisher),
+                total_requests,
+                successful_requests,
+                failed_requests,
+                last_avg_response_time_ms,
+            )
+            .instrument(span),
+        );
         Ok(())
     }
 

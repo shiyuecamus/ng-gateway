@@ -25,10 +25,7 @@ pub fn value_to_variant(v: &NGValue) -> Variant {
         NGValue::Binary(b) => Variant::ByteString(ByteString::from(b.as_ref())),
         NGValue::Timestamp(ms) => {
             // best-effort conversion; invalid timestamps map to "now"
-            let dt = Utc
-                .timestamp_millis_opt(*ms)
-                .single()
-                .unwrap_or_else(Utc::now);
+            let dt = Utc.timestamp_millis_opt(*ms).single().unwrap_or(Utc::now());
             Variant::DateTime(Box::new(DateTime::from(dt)))
         }
     }

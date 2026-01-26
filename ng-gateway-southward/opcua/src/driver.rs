@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::{sync::watch, task::JoinHandle, time::Duration as TokioDuration};
 use tokio_util::sync::CancellationToken;
-use tracing::{instrument, warn};
+use tracing::{instrument, warn, Instrument};
 
 /// Production-grade OPC UA driver with session lifecycle, read/subscribe, and write
 pub struct OpcUaDriver {
@@ -336,9 +336,7 @@ impl Driver for OpcUaDriver {
 
         // Spawn subscription actor if present
         if let Some(actor) = self.subs_actor.lock().unwrap().take() {
-            tokio::spawn(async move {
-                actor.run().await;
-            });
+            tokio::spawn(async move { actor.run().await }.instrument(tracing::Span::current()));
         }
 
         // On each (re)connection:
@@ -380,7 +378,8 @@ impl Driver for OpcUaDriver {
                     })
                     .await;
                 }
-            })
+            }
+            .instrument(tracing::Span::current()))
         }));
         supervisor.run(inner_for_supervisor, on_connected).await;
         Ok(())
@@ -827,10 +826,7 @@ impl Driver for OpcUaDriver {
                     .filter_map(|d| d.downcast_ref::<OpcUaDevice>())
                 {
                     // Preserve status if present; otherwise take current reported status
-                    let status = devices
-                        .get(&d.id)
-                        .map(|m| m.status)
-                        .unwrap_or_else(|| d.status());
+                    let status = devices.get(&d.id).map(|m| m.status).unwrap_or(d.status());
                     devices.insert(
                         d.id,
                         DeviceMeta {

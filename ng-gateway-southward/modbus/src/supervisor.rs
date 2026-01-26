@@ -20,6 +20,7 @@ use tokio::{
 };
 use tokio_modbus::client::{rtu, tcp, Client as _, Context};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// A pool of Modbus contexts (each is single-flight via `Mutex<Context>`).
 ///
@@ -211,6 +212,10 @@ impl SessionSupervisor {
         // reset flags
         shared.shutdown.store(false, Ordering::Release);
 
+        // IMPORTANT:
+        // This task must inherit `channel_id` so dependency logs emitted inside reconnection,
+        // transport setup, or protocol library internals can be filtered per channel on host side.
+        let span = tracing::info_span!("modbus-supervisor", channel_id = channel.id);
         tokio::spawn(async move {
             let mut ever_connected = false;
             let mut retry = RetryController::new(&channel.connection_policy.backoff);
@@ -300,7 +305,8 @@ impl SessionSupervisor {
                     }
                 }
             }
-        });
+        }
+        .instrument(span));
         Ok(())
     }
 }

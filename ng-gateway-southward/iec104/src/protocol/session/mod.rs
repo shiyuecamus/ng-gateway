@@ -41,6 +41,7 @@ use tokio_util::{
     codec::{Decoder, Encoder, Framed},
     sync::CancellationToken,
 };
+use tracing::Instrument;
 
 pub trait Iec104Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> Iec104Stream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -308,13 +309,16 @@ impl SessionEventLoop {
         let socket_addr = self.socket_addr;
         let config = self.config;
         let pre = self.pre_connected;
-        tokio::spawn(async move {
-            if let Some(stream) = pre {
-                run_connection_with_stream(session, stream, config, cancel).await;
-            } else {
-                run_connection(session, socket_addr, config, cancel).await;
+        tokio::spawn(
+            async move {
+                if let Some(stream) = pre {
+                    run_connection_with_stream(session, stream, config, cancel).await;
+                } else {
+                    run_connection(session, socket_addr, config, cancel).await;
+                }
             }
-        });
+            .instrument(tracing::Span::current()),
+        );
 
         // Forward events as a stream
         futures::stream::unfold(events_rx, |mut rx| async move {
@@ -332,7 +336,8 @@ impl SessionEventLoop {
     }
 
     pub fn spawn(self) -> JoinHandle<()> {
-        tokio::spawn(self.run())
+        let span = tracing::Span::current();
+        tokio::spawn(async move { self.run().await }.instrument(span))
     }
 
     pub fn cancel(&self) {

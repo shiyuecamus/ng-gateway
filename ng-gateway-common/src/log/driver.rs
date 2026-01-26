@@ -6,10 +6,11 @@
 //!
 //! # Why this lives in `ng-gateway-common::log`
 //! Driver logs are part of the gateway's single authoritative logging system:
-//! they must go through the same console/file/realtime pipeline as host logs.
+//! they must go through the same console/file pipeline as host logs.
 
-use crate::log::{fields, runtime};
-use ng_gateway_sdk::log::{LogSinkV1, LOG_SINK_ABI_V1};
+use crate::log::control;
+use dashmap::DashMap;
+use ng_gateway_sdk::log::{fields as log_fields, LogSinkV1, LOG_SINK_ABI_V1};
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -23,6 +24,7 @@ use std::{
     },
 };
 use tokio::sync::Notify;
+use tracing::Span;
 
 /// Host-side sink handle that keeps the callback context alive.
 pub struct HostLogSinkHandle {
@@ -54,6 +56,7 @@ impl HostLogSinkHandle {
 struct HostSinkContext {
     driver_id: i32,
     driver_type: Arc<RwLock<String>>,
+    span_cache: Arc<DashMap<i32, Span>>,
 }
 
 struct HostIngestItem {
@@ -88,7 +91,7 @@ fn host_bridge(queue_capacity: usize) -> Arc<HostBridge> {
 /// # Important
 /// Must be called from within a Tokio runtime context.
 pub fn ensure_ingest_started() {
-    let queue_cap = runtime::global()
+    let queue_cap = control::global()
         .map(|rt| rt.settings().driver_ingest_queue_capacity)
         .unwrap_or(10_000);
     let bridge = host_bridge(queue_cap);
@@ -101,7 +104,7 @@ pub fn ensure_ingest_started() {
 
 /// Create a host log sink handle for a specific driver.
 pub fn create_sink(driver_id: i32, driver_type: String) -> HostLogSinkHandle {
-    let queue_cap = runtime::global()
+    let queue_cap = control::global()
         .map(|rt| rt.settings().driver_ingest_queue_capacity)
         .unwrap_or(10_000);
     let _ = host_bridge(queue_cap);
@@ -109,6 +112,7 @@ pub fn create_sink(driver_id: i32, driver_type: String) -> HostLogSinkHandle {
         ctx: Box::new(HostSinkContext {
             driver_id,
             driver_type: Arc::new(RwLock::new(driver_type)),
+            span_cache: Arc::new(DashMap::new()),
         }),
     }
 }
@@ -132,7 +136,7 @@ fn host_enqueue(user_data: *mut c_void, ptr: *const u8, len: usize) {
     let mut payload = Vec::with_capacity(len.min(1024 * 1024));
     payload.extend_from_slice(bytes);
 
-    let queue_cap = runtime::global()
+    let queue_cap = control::global()
         .map(|rt| rt.settings().driver_ingest_queue_capacity)
         .unwrap_or(10_000);
     let bridge = host_bridge(queue_cap);
@@ -154,6 +158,8 @@ struct HostWireSpan {
     #[allow(unused)]
     name: String,
     #[serde(default)]
+    channel_id: Option<i32>,
+    #[serde(default)]
     fields: Map<String, Value>,
 }
 
@@ -162,7 +168,10 @@ struct HostWireSpan {
 struct HostWireEvent {
     #[allow(unused)]
     ts: i64,
-    level: String,
+    #[serde(default)]
+    level: Option<String>,
+    #[serde(default)]
+    level_u8: Option<u8>,
     target: String,
     message: String,
     #[serde(default)]
@@ -193,15 +202,17 @@ async fn host_ingest_loop(bridge: Arc<HostBridge>) {
 }
 
 fn ingest_one_payload(ctx: &HostSinkContext, bytes: &[u8]) {
-    let Ok(s) = std::str::from_utf8(bytes) else {
-        return;
-    };
-    for line in s.lines() {
-        let line = line.trim();
+    for mut line in bytes.split(|&b| b == b'\n') {
         if line.is_empty() {
             continue;
         }
-        let Ok(ev) = serde_json::from_str::<HostWireEvent>(line) else {
+        if let Some(b'\r') = line.last() {
+            line = &line[..line.len().saturating_sub(1)];
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(ev) = serde_json::from_slice::<HostWireEvent>(line) else {
             continue;
         };
         reemit_as_tracing(ctx, ev);
@@ -209,20 +220,28 @@ fn ingest_one_payload(ctx: &HostSinkContext, bytes: &[u8]) {
 }
 
 fn reemit_as_tracing(ctx: &HostSinkContext, ev: HostWireEvent) {
-    let level = parse_level(&ev.level).unwrap_or(tracing::Level::INFO);
-    let channel_id = ev
-        .span
-        .as_ref()
-        .and_then(|s| fields::map_i32(&s.fields, fields::CHANNEL_ID));
+    let level = ev
+        .level_u8
+        .and_then(parse_level_u8)
+        .or_else(|| ev.level.as_deref().and_then(parse_level))
+        .unwrap_or(tracing::Level::INFO);
+    let channel_id = ev.span.as_ref().and_then(|s| {
+        s.channel_id
+            .or_else(|| log_fields::map_i32(&s.fields, log_fields::CHANNEL_ID))
+    });
 
     if let Some(ch) = channel_id {
-        let driver_type = ctx.driver_type.read().clone();
-        let span = tracing::info_span!(
-            "driver-log",
-            channel_id = ch,
-            driver_id = ctx.driver_id,
-            driver_type = %driver_type
-        );
+        // Avoid allocating a new span per log event (hot path).
+        let span = ctx
+            .span_cache
+            .get(&ch)
+            .map(|s| s.clone())
+            .unwrap_or_else(|| {
+                let span =
+                    tracing::info_span!("driver-log", channel_id = ch, driver_id = ctx.driver_id);
+                ctx.span_cache.insert(ch, span.clone());
+                span
+            });
         let _enter = span.enter();
         emit_driver_event(level, &ev, ctx);
     } else {
@@ -232,16 +251,16 @@ fn reemit_as_tracing(ctx: &HostSinkContext, ev: HostWireEvent) {
 
 fn emit_driver_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostSinkContext) {
     // Keep a stable callsite target and attach original driver target as a field.
-    let driver_fields = serde_json::to_string(&ev.fields).unwrap_or_else(|_| "{}".into());
-    let driver_type = ctx.driver_type.read().clone();
+    // Avoid pre-serializing JSON fields on the hot path; formatting only happens if enabled.
+    let driver_type = ctx.driver_type.read();
     match level {
         tracing::Level::ERROR => tracing::error!(
             target: "driver",
             source = "driver",
             driver_id = ctx.driver_id,
-            driver_type = %driver_type,
+            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
-            driver_fields = %driver_fields,
+            driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
@@ -249,9 +268,9 @@ fn emit_driver_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostSinkCo
             target: "driver",
             source = "driver",
             driver_id = ctx.driver_id,
-            driver_type = %driver_type,
+            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
-            driver_fields = %driver_fields,
+            driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
@@ -259,9 +278,9 @@ fn emit_driver_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostSinkCo
             target: "driver",
             source = "driver",
             driver_id = ctx.driver_id,
-            driver_type = %driver_type,
+            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
-            driver_fields = %driver_fields,
+            driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
@@ -269,9 +288,9 @@ fn emit_driver_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostSinkCo
             target: "driver",
             source = "driver",
             driver_id = ctx.driver_id,
-            driver_type = %driver_type,
+            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
-            driver_fields = %driver_fields,
+            driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
@@ -279,9 +298,9 @@ fn emit_driver_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostSinkCo
             target: "driver",
             source = "driver",
             driver_id = ctx.driver_id,
-            driver_type = %driver_type,
+            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
-            driver_fields = %driver_fields,
+            driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
@@ -296,6 +315,18 @@ fn parse_level(s: &str) -> Option<tracing::Level> {
         "INFO" => Some(tracing::Level::INFO),
         "DEBUG" => Some(tracing::Level::DEBUG),
         "TRACE" => Some(tracing::Level::TRACE),
+        _ => None,
+    }
+}
+
+#[inline]
+fn parse_level_u8(v: u8) -> Option<tracing::Level> {
+    match v {
+        0 => Some(tracing::Level::ERROR),
+        1 => Some(tracing::Level::WARN),
+        2 => Some(tracing::Level::INFO),
+        3 => Some(tracing::Level::DEBUG),
+        4 => Some(tracing::Level::TRACE),
         _ => None,
     }
 }

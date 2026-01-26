@@ -10,14 +10,16 @@ use actix_web::{
 use actix_web_validator::{Json, Path, Query};
 use bytes::BytesMut;
 use futures::StreamExt;
-use ng_gateway_common::casbin::NGPermChecker;
+use ng_gateway_common::log::control as log_control;
+use ng_gateway_common::{casbin::NGPermChecker, log::control::LogOverrideScope};
 use ng_gateway_error::{rbac::RBACError, web::WebError, NGResult, WebResult};
 use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE,
     domain::prelude::{
-        ChangeChannelStatus, ChannelInfo, ChannelPageParams, CommitResult, DeviceGroup, DeviceInfo,
-        DeviceRef, ImportPreview, NewChannel, NewDevice, NewPoint, PageResult, PathId,
-        PreparedDeviceCommit, PreparedDevicePointsCommit, UpdateChannel,
+        ChangeChannelStatus, ChannelInfo, ChannelLogLevelView, ChannelLogOverrideView,
+        ChannelPageParams, CommitResult, DeviceGroup, DeviceInfo, DeviceRef, ImportPreview,
+        NewChannel, NewDevice, NewPoint, PageResult, PathId, PreparedDeviceCommit,
+        PreparedDevicePointsCommit, SetChannelLogLevelRequest, TtlRange, UpdateChannel,
     },
     enums::common::{EntityType, Operation},
     rbac::PermRule,
@@ -62,6 +64,9 @@ pub(crate) fn configure_routes(cfg: &mut ServiceConfig) {
         .route("/change-status", web::put().to(change_status))
         .route("/{id}", web::delete().to(delete))
         .route("/{id}/sub-devices", web::get().to(get_sub_devices))
+        .route("/{id}/log-level", web::get().to(get_channel_log_level))
+        .route("/{id}/log-level", web::put().to(set_channel_log_level))
+        .route("/{id}/log-level", web::delete().to(clear_channel_log_level))
         .route(
             "{id}/import-device-preview",
             web::post().to(import_device_preview),
@@ -231,6 +236,58 @@ pub(crate) async fn init_rbac_rules(
         .register(
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/import-device-points-commit"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(
+                    EntityType::Channel,
+                    Operation::Write,
+                )?)
+                .or(has_scope("channel:write")?),
+        )
+        .await?;
+
+    // Sub-devices list.
+    perm_checker
+        .register(
+            Method::GET,
+            format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/sub-devices"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(
+                    EntityType::Channel,
+                    Operation::Read,
+                )?)
+                .or(has_scope("channel:read")?),
+        )
+        .await?;
+
+    // Channel log level control (TTL-based override).
+    perm_checker
+        .register(
+            Method::GET,
+            format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/log-level"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(
+                    EntityType::Channel,
+                    Operation::Read,
+                )?)
+                .or(has_scope("channel:read")?),
+        )
+        .await?;
+    perm_checker
+        .register(
+            Method::PUT,
+            format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/log-level"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(
+                    EntityType::Channel,
+                    Operation::Write,
+                )?)
+                .or(has_scope("channel:write")?),
+        )
+        .await?;
+    perm_checker
+        .register(
+            Method::DELETE,
+            format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/log-level"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(
                     EntityType::Channel,
@@ -461,6 +518,89 @@ pub async fn change_status(
 pub async fn get_sub_devices(params: Path<PathId>) -> WebResult<WebResponse<Vec<DeviceInfo>>> {
     let devices = DeviceRepository::find_by_channel_id(params.id).await?;
     Ok(WebResponse::ok(devices))
+}
+
+#[inline]
+async fn build_channel_log_level_view(id: i32) -> Result<ChannelLogLevelView, WebError> {
+    // Validate channel exists.
+    ChannelRepository::find_by_id(id)
+        .await?
+        .ok_or(WebError::NotFound(EntityType::Channel.to_string()))?;
+
+    let rt = log_control::global().ok_or_else(|| {
+        WebError::InternalError("Log control runtime is not initialized".to_string())
+    })?;
+    let overrides = rt.overrides();
+    let effective = overrides.effective_channel_level(id);
+    let lease = overrides.active_scope_lease(LogOverrideScope::Channel(id));
+    let s = rt.settings();
+
+    Ok(ChannelLogLevelView {
+        channel_id: id,
+        effective,
+        r#override: lease.map(|l| ChannelLogOverrideView {
+            level: l.level,
+            expires_at_ms: l.expires_at_ms,
+        }),
+        ttl: TtlRange {
+            min_ms: s.channel_override_min_ttl_ms,
+            max_ms: s.channel_override_max_ttl_ms,
+            default_ms: s.channel_override_default_ttl_ms,
+        },
+    })
+}
+
+#[instrument(name = "get-channel-log-level", skip_all)]
+pub async fn get_channel_log_level(
+    params: Path<PathId>,
+) -> WebResult<WebResponse<ChannelLogLevelView>> {
+    let id = params.id;
+    Ok(WebResponse::ok(build_channel_log_level_view(id).await?))
+}
+
+#[instrument(name = "set-channel-log-level", skip_all)]
+pub async fn set_channel_log_level(
+    params: Path<PathId>,
+    req: web::Json<SetChannelLogLevelRequest>,
+) -> WebResult<WebResponse<ChannelLogLevelView>> {
+    let id = params.id;
+    let req = req.into_inner();
+
+    // Validate channel exists (avoid leaking overrides for invalid ids).
+    ChannelRepository::find_by_id(id)
+        .await?
+        .ok_or(WebError::NotFound(EntityType::Channel.to_string()))?;
+
+    let rt = log_control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
+    let s = rt.settings();
+    let ttl = req.ttl_ms.unwrap_or(s.channel_override_default_ttl_ms);
+    s.validate_channel_ttl_ms(ttl)
+        .map_err(|e| WebError::BadRequest(e.to_string()))?;
+
+    rt.overrides()
+        .set_temporary_override(LogOverrideScope::Channel(id), req.level, ttl);
+
+    Ok(WebResponse::ok(build_channel_log_level_view(id).await?))
+}
+
+#[instrument(name = "clear-channel-log-level", skip_all)]
+pub async fn clear_channel_log_level(
+    params: Path<PathId>,
+) -> WebResult<WebResponse<ChannelLogLevelView>> {
+    let id = params.id;
+
+    ChannelRepository::find_by_id(id)
+        .await?
+        .ok_or(WebError::NotFound(EntityType::Channel.to_string()))?;
+
+    let rt = log_control::global().ok_or_else(|| {
+        WebError::InternalError("Log control runtime is not initialized".to_string())
+    })?;
+    rt.overrides().clear_scope(LogOverrideScope::Channel(id));
+
+    Ok(WebResponse::ok(build_channel_log_level_view(id).await?))
 }
 
 /// Import device template
@@ -702,7 +842,7 @@ fn group_rows_by_device(
             let ref_device_type = current_device_type.map(|s| s.to_string());
             let ref_device_config = current_device_config
                 .cloned()
-                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
             groups.insert(
                 device_name.to_string(),
                 DeviceGroup {
@@ -797,7 +937,7 @@ fn validate_device_group_consistency(rows: &[ValidatedRow]) -> Vec<FieldError> {
             let ref_device_type = current_device_type.map(|s| s.to_string());
             let ref_device_config = current_device_config
                 .cloned()
-                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
             refs.insert(
                 device_name.to_string(),
                 DeviceRef {

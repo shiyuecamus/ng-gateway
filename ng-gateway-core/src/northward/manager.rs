@@ -557,7 +557,7 @@ impl NGNorthwardManager {
                                     .point_key_by_id
                                     .get(point_id)
                                     .map(Arc::clone)
-                                    .unwrap_or_else(|| Arc::<str>::from(point_id.to_string()));
+                                    .unwrap_or(Arc::<str>::from(point_id.to_string()));
                                 PointValue {
                                     point_id: *point_id,
                                     point_key,
@@ -612,7 +612,7 @@ impl NGNorthwardManager {
                                     .point_key_by_id
                                     .get(point_id)
                                     .map(Arc::clone)
-                                    .unwrap_or_else(|| Arc::<str>::from(point_id.to_string()));
+                                    .unwrap_or(Arc::<str>::from(point_id.to_string()));
                                 PointValue {
                                     point_id: *point_id,
                                     point_key,
@@ -628,7 +628,7 @@ impl NGNorthwardManager {
                                     .point_key_by_id
                                     .get(point_id)
                                     .map(Arc::clone)
-                                    .unwrap_or_else(|| Arc::<str>::from(point_id.to_string()));
+                                    .unwrap_or(Arc::<str>::from(point_id.to_string()));
                                 PointValue {
                                     point_id: *point_id,
                                     point_key,
@@ -644,7 +644,7 @@ impl NGNorthwardManager {
                                     .point_key_by_id
                                     .get(point_id)
                                     .map(Arc::clone)
-                                    .unwrap_or_else(|| Arc::<str>::from(point_id.to_string()));
+                                    .unwrap_or(Arc::<str>::from(point_id.to_string()));
                                 PointValue {
                                     point_id: *point_id,
                                     point_key,

@@ -72,13 +72,13 @@ impl CommonImpl {
         let name = common
             .name
             .clone()
-            .unwrap_or_else(|| input.ident.to_string().to_snake_case());
+            .unwrap_or(input.ident.to_string().to_snake_case());
 
         let order = common
             .order
             .as_ref()
             .map(|p| quote!(#p))
-            .unwrap_or_else(|| quote!(0));
+            .unwrap_or(quote!(0));
 
         let has_update_col = enum_data.variants.iter().any(|v| v.ident == "UpdatedAt");
 

@@ -5,9 +5,14 @@
 
 use dashmap::DashMap;
 use libloading::{Library, Symbol};
-use ng_gateway_common::log::{self, realtime::hub::LogLevel};
+use ng_gateway_common::log::{
+    control::{self as log_control},
+    driver::{create_sink, ensure_ingest_started, HostLogSinkHandle},
+};
+use ng_gateway_models::domain::prelude::LogLevel;
 use ng_gateway_sdk::{
     ensure_current_platform_from_path, inspect_binary,
+    log::LogSinkV1,
     sdk::{sdk_api_version, SDK_VERSION},
     BinaryArch, BinaryOsType, DriverError, DriverFactory, DriverResult, DriverSchemas,
 };
@@ -55,7 +60,7 @@ pub struct DriverLoader {
     registry: DriverRegistry,
     libraries: Arc<DashMap<i32, Arc<Library>>>,
     /// Keep host sink contexts alive for FFI callbacks.
-    log_sinks: Arc<DashMap<i32, log::driver::HostLogSinkHandle>>,
+    log_sinks: Arc<DashMap<i32, HostLogSinkHandle>>,
     /// Optional exported setter for dynamic driver log level control.
     max_level_setters: Arc<DashMap<i32, DriverSetMaxLevelFn>>,
 }
@@ -154,7 +159,7 @@ impl DriverLoader {
         ensure_current_platform_from_path(path)?;
 
         // Ensure host ingest loop is running (idempotent).
-        log::driver::ensure_ingest_started();
+        ensure_ingest_started();
 
         let path_buf = path.to_path_buf();
         let (library, probe_info, factory_box, log_sink_handle, set_max_level_fn) =
@@ -168,12 +173,10 @@ impl DriverLoader {
 
                 // Register log sink + init tracing BEFORE calling any other exported symbols.
                 let log_sink_handle = match unsafe {
-                    library.get::<unsafe extern "C" fn(ng_gateway_sdk::log::LogSinkV1) -> u32>(
-                        b"ng_driver_set_log_sink",
-                    )
+                    library.get::<unsafe extern "C" fn(LogSinkV1) -> u32>(b"ng_driver_set_log_sink")
                 } {
                     Ok(set_sink_fn) => {
-                        let handle = log::driver::create_sink(driver_id, "unknown".into());
+                        let handle = create_sink(driver_id, "unknown".into());
                         let rc = unsafe { set_sink_fn(handle.sink()) };
                         if rc != 0 {
                             tracing::warn!(
@@ -250,11 +253,11 @@ impl DriverLoader {
             self.max_level_setters.insert(driver_id, f);
 
             // Best-effort: align driver max level to current effective global level.
-            if let Some(rt) = log::runtime::global() {
-                let desired: u8 = rt.overrides().effective_global_level() as u8;
+            if let Some(rt) = log_control::global() {
+                let desired: u8 = rt.overrides().effective_global_level().into();
                 let _ = self.set_max_level(driver_id, desired);
             } else {
-                let _ = self.set_max_level(driver_id, LogLevel::Info as u8);
+                let _ = self.set_max_level(driver_id, u8::from(LogLevel::Info));
             }
         }
 

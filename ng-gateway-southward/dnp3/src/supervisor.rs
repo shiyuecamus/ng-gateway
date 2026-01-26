@@ -27,7 +27,7 @@ use std::{
 use tokio::sync::watch;
 use tokio::time::{interval_at, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 pub type SharedAssociation = Arc<ArcSwap<Option<AssociationHandle>>>;
 
@@ -144,6 +144,9 @@ impl Dnp3Supervisor {
         // requests and noisy logs when the DNP3 channel is disconnected.
         let conn_rx = self.conn_tx.subscribe();
 
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("dnp3-supervisor", channel_id = self.channel.id);
         tokio::spawn(async move {
             // Connection state receiver used inside the supervisor loop.
             // It is kept local to the spawned task to avoid holding any
@@ -212,7 +215,8 @@ impl Dnp3Supervisor {
                     }
                 }
             }
-        });
+        }
+        .instrument(span));
         Ok(())
     }
 

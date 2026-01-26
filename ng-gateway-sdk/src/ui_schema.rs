@@ -1709,11 +1709,11 @@ impl DriverEntityTemplate {
             locale: meta_map
                 .get("locale")
                 .cloned()
-                .unwrap_or_else(|| "zh-CN".to_string()),
+                .unwrap_or("zh-CN".to_string()),
             schema_version: meta_map
                 .get("schema_version")
                 .cloned()
-                .unwrap_or_else(|| "1.0".to_string()),
+                .unwrap_or("1.0".to_string()),
         })
     }
 
@@ -2284,11 +2284,11 @@ impl DriverEntityTemplate {
             locale: meta_map
                 .get("locale")
                 .cloned()
-                .unwrap_or_else(|| "zh-CN".to_string()),
+                .unwrap_or("zh-CN".to_string()),
             schema_version: meta_map
                 .get("schema_version")
                 .cloned()
-                .unwrap_or_else(|| "1.0".to_string()),
+                .unwrap_or("1.0".to_string()),
         })
     }
 

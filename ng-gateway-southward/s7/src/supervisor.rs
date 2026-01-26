@@ -26,6 +26,7 @@ use tokio::{
     time::{sleep, Duration},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 #[allow(unused)]
 /// Shared session entry for S7
@@ -157,95 +158,101 @@ impl S7Supervisor {
         let state_tx = self.state_tx.clone();
         let transport_meter = Arc::clone(&self.transport_meter);
 
-        tokio::spawn(async move {
-            let mut retry = RetryController::new(&channel.connection_policy.backoff);
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("s7-supervisor", channel_id = channel.id);
+        tokio::spawn(
+            async move {
+                let mut retry = RetryController::new(&channel.connection_policy.backoff);
 
-            loop {
-                if cancel_outer.is_cancelled() {
-                    shared.shutdown.store(true, Ordering::Release);
-                    let _ = state_tx.send(SouthwardConnectionState::Disconnected);
-                    let mut e = shared.last_error.lock().await;
-                    *e = Some("supervisor cancelled".to_string());
-                    return;
-                }
-
-                let _ = state_tx.send(SouthwardConnectionState::Connecting);
-
-                // Connect (supervisor-owned) and inject stream into protocol session.
-                let stream = match connect_tcp_metered_with_timeout(
-                    options.socket_addr,
-                    Arc::clone(&transport_meter),
-                    channel.connection_policy.connect_timeout_ms,
-                )
-                .await
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let msg = format!("s7 tcp connect failed: {e}");
-                        {
-                            let mut last = shared.last_error.lock().await;
-                            *last = Some(msg.clone());
-                        }
-                        shared.healthy.store(false, Ordering::Relaxed);
-                        // failure immediately visible
-                        let _ = state_tx.send(SouthwardConnectionState::Failed(msg.clone()));
-                        match retry.on_failure() {
-                            RetryDecision::RetryAfter(delay) => {
-                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
-                                tokio::select! {
-                                    _ = cancel_outer.cancelled() => return,
-                                    _ = sleep(delay) => {}
-                                }
-                                continue;
-                            }
-                            RetryDecision::Exhausted => return,
-                        }
-                    }
-                };
-                let _ = stream.inner_ref().set_nodelay(options.tcp_nodelay);
-
-                let (session, ev) = create_with_stream(Arc::clone(&options), stream);
-                shared.session.store(Some(session.clone()));
-                let _ = shared.session_watch_tx.send(Some(session.clone()));
-
-                // Drive the session until it ends/cancels.
-                let child = cancel_outer.child_token();
-                let seen_active = Self::run_event_loop(
-                    shared.clone(),
-                    session.clone(),
-                    ev,
-                    child.clone(),
-                    state_tx.clone(),
-                )
-                .await;
-
-                // attempt finished, clear state then backoff and retry
-                shared.session.store(None);
-                shared.healthy.store(false, Ordering::Release);
-                let _ = shared.session_watch_tx.send(None);
-
-                if seen_active {
-                    retry.reset();
-                }
-                match retry.on_failure() {
-                    RetryDecision::RetryAfter(dur) => {
-                        tracing::warn!(delay_ms = dur.as_millis() as u64, "S7 connect retry");
-                        tokio::select! {
-                            _ = cancel_outer.cancelled() => return,
-                            _ = sleep(dur) => {
-                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
-                            }
-                        }
-                    }
-                    RetryDecision::Exhausted => {
-                        let _ = state_tx.send(SouthwardConnectionState::Failed(
-                            "retry budget exhausted".to_string(),
-                        ));
+                loop {
+                    if cancel_outer.is_cancelled() {
+                        shared.shutdown.store(true, Ordering::Release);
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
+                        let mut e = shared.last_error.lock().await;
+                        *e = Some("supervisor cancelled".to_string());
                         return;
+                    }
+
+                    let _ = state_tx.send(SouthwardConnectionState::Connecting);
+
+                    // Connect (supervisor-owned) and inject stream into protocol session.
+                    let stream = match connect_tcp_metered_with_timeout(
+                        options.socket_addr,
+                        Arc::clone(&transport_meter),
+                        channel.connection_policy.connect_timeout_ms,
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let msg = format!("s7 tcp connect failed: {e}");
+                            {
+                                let mut last = shared.last_error.lock().await;
+                                *last = Some(msg.clone());
+                            }
+                            shared.healthy.store(false, Ordering::Relaxed);
+                            // failure immediately visible
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(msg.clone()));
+                            match retry.on_failure() {
+                                RetryDecision::RetryAfter(delay) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                    tokio::select! {
+                                        _ = cancel_outer.cancelled() => return,
+                                        _ = sleep(delay) => {}
+                                    }
+                                    continue;
+                                }
+                                RetryDecision::Exhausted => return,
+                            }
+                        }
+                    };
+                    let _ = stream.inner_ref().set_nodelay(options.tcp_nodelay);
+
+                    let (session, ev) = create_with_stream(Arc::clone(&options), stream);
+                    shared.session.store(Some(session.clone()));
+                    let _ = shared.session_watch_tx.send(Some(session.clone()));
+
+                    // Drive the session until it ends/cancels.
+                    let child = cancel_outer.child_token();
+                    let seen_active = Self::run_event_loop(
+                        shared.clone(),
+                        session.clone(),
+                        ev,
+                        child.clone(),
+                        state_tx.clone(),
+                    )
+                    .await;
+
+                    // attempt finished, clear state then backoff and retry
+                    shared.session.store(None);
+                    shared.healthy.store(false, Ordering::Release);
+                    let _ = shared.session_watch_tx.send(None);
+
+                    if seen_active {
+                        retry.reset();
+                    }
+                    match retry.on_failure() {
+                        RetryDecision::RetryAfter(dur) => {
+                            tracing::warn!(delay_ms = dur.as_millis() as u64, "S7 connect retry");
+                            tokio::select! {
+                                _ = cancel_outer.cancelled() => return,
+                                _ = sleep(dur) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                }
+                            }
+                        }
+                        RetryDecision::Exhausted => {
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(
+                                "retry budget exhausted".to_string(),
+                            ));
+                            return;
+                        }
                     }
                 }
             }
-        });
+            .instrument(span),
+        );
         Ok(())
     }
 

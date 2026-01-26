@@ -6,6 +6,7 @@ version = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
+crossbeam-queue = "0.3.12"
 
 [dependencies.colored]
 workspace = true

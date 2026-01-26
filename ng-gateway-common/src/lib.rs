@@ -121,8 +121,8 @@ impl NGAppContext {
 
         apply_runtime_dir(&settings.general.runtime_dir)?;
 
-        // Initialize realtime logs and install logger subscriber.
-        log::init_runtime(&mut logger, &settings.general.realtime_logs)?;
+        // Initialize log control runtime and install logger subscriber.
+        log::init_runtime(&mut logger, &settings.general.logging)?;
 
         let span = span!(Level::INFO, "init-app");
         let _guard = span.enter();
@@ -289,6 +289,11 @@ impl NGAppContext {
     #[inline]
     pub fn change_log_level(&self, level: Level) {
         self.logger.set_level(level);
+    }
+
+    #[inline]
+    pub fn log_level(&self) -> Level {
+        self.logger.get_level()
     }
 
     /// Starts the gateway and listens for shutdown signals.

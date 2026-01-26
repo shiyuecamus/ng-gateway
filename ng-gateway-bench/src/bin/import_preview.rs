@@ -184,7 +184,7 @@ fn validate_device_group_consistency(rows: &[ValidatedRow]) -> Vec<FieldError> {
             let ref_device_type = current_device_type.map(|s| s.to_string());
             let ref_device_config = current_device_config
                 .cloned()
-                .unwrap_or_else(|| Json::Object(serde_json::Map::new()));
+                .unwrap_or(Json::Object(serde_json::Map::new()));
             refs.insert(
                 device_name.to_string(),
                 DeviceRef {

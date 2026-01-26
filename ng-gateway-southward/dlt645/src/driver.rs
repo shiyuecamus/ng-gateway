@@ -146,109 +146,109 @@ impl Dl645Driver {
     {
         let session_shared = self.session.clone();
 
-        let (res, elapsed_ms) = tokio::spawn(async move {
-            let start = Instant::now();
-            // Acquire current session snapshot (lock-free).
-            let session_opt = session_shared.session.load_full();
-            let handle = match session_opt {
-                Some(h) => h,
-                None => {
-                    session_shared.healthy.store(false, Ordering::Release);
-                    {
-                        let mut last = session_shared.last_error.lock().await;
-                        *last = Some("no active DL/T 645 session".to_string());
-                    }
-                    tracing::warn!(
-                        op = op_label,
-                        "DL/T 645 session not available, request reconnect"
-                    );
-                    let _ = session_shared.reconnect_tx.try_send(());
-                    return (Err(DriverError::ServiceUnavailable), 0);
+        // IMPORTANT:
+        // Do NOT spawn here.
+        //
+        // Driver calls are already executed inside a `channel_id`-attributed span by the SDK
+        // runtime wrapper. Spawning would detach the future from the current span and break
+        // per-channel log attribution for dependency logs.
+        let start = Instant::now();
+        // Acquire current session snapshot (lock-free).
+        let session_opt = session_shared.session.load_full();
+        let handle = match session_opt {
+            Some(h) => h,
+            None => {
+                session_shared.healthy.store(false, Ordering::Release);
+                {
+                    let mut last = session_shared.last_error.lock().await;
+                    *last = Some("no active DL/T 645 session".to_string());
                 }
-            };
+                tracing::warn!(
+                    op = op_label,
+                    "DL/T 645 session not available, request reconnect"
+                );
+                let _ = session_shared.reconnect_tx.try_send(());
+                return Err(DriverError::ServiceUnavailable);
+            }
+        };
 
-            let sess = Arc::clone(&handle.0);
-            // Wrap operation in timeout
-            let op_res = match tokio::time::timeout(op_timeout, op(sess)).await {
-                Ok(res) => res,
-                Err(_) => Err(ProtocolError::Timeout(op_timeout)),
-            };
+        let sess = Arc::clone(&handle.0);
+        // Wrap operation in timeout
+        let op_res = match tokio::time::timeout(op_timeout, op(sess)).await {
+            Ok(res) => res,
+            Err(_) => Err(ProtocolError::Timeout(op_timeout)),
+        };
 
-            let res = match op_res {
-                Ok(v) => {
-                    session_shared
-                        .consecutive_timeouts
-                        .store(0, Ordering::Release);
-                    Ok(v)
-                }
-                Err(proto_err) => {
-                    match &proto_err {
-                        ProtocolError::Timeout(_) => {
-                            tracing::warn!(op = op_label, "DL/T 645 operation timeout");
-                            let new_count = session_shared
+        let res = match op_res {
+            Ok(v) => {
+                session_shared
+                    .consecutive_timeouts
+                    .store(0, Ordering::Release);
+                Ok(v)
+            }
+            Err(proto_err) => {
+                match &proto_err {
+                    ProtocolError::Timeout(_) => {
+                        tracing::warn!(op = op_label, "DL/T 645 operation timeout");
+                        let new_count = session_shared
+                            .consecutive_timeouts
+                            .fetch_add(1, Ordering::Relaxed)
+                            .saturating_add(1);
+                        let threshold = session_shared.timeout_reconnect_threshold;
+                        if threshold > 0 && new_count >= threshold as u64 {
+                            session_shared.healthy.store(false, Ordering::Release);
+                            {
+                                let mut last = session_shared.last_error.lock().await;
+                                *last = Some(format!(
+                                    "DL/T 645 consecutive timeouts reached threshold: {}",
+                                    new_count
+                                ));
+                            }
+                            tracing::warn!(
+                                op = op_label,
+                                timeout_count = new_count,
+                                threshold,
+                                "DL/T 645 timeout threshold reached, requesting reconnect"
+                            );
+                            let _ = session_shared.reconnect_tx.try_send(());
+                            session_shared
                                 .consecutive_timeouts
-                                .fetch_add(1, Ordering::Relaxed)
-                                .saturating_add(1);
-                            let threshold = session_shared.timeout_reconnect_threshold;
-                            if threshold > 0 && new_count >= threshold as u64 {
-                                session_shared.healthy.store(false, Ordering::Release);
-                                {
-                                    let mut last = session_shared.last_error.lock().await;
-                                    *last = Some(format!(
-                                        "DL/T 645 consecutive timeouts reached threshold: {}",
-                                        new_count
-                                    ));
-                                }
-                                tracing::warn!(
-                                    op = op_label,
-                                    timeout_count = new_count,
-                                    threshold,
-                                    "DL/T 645 timeout threshold reached, requesting reconnect"
-                                );
-                                let _ = session_shared.reconnect_tx.try_send(());
-                                session_shared
-                                    .consecutive_timeouts
-                                    .store(0, Ordering::Release);
-                            }
+                                .store(0, Ordering::Release);
                         }
-                        ProtocolError::Transport(msg) => {
-                            session_shared.healthy.store(false, Ordering::Release);
-                            {
-                                let mut last = session_shared.last_error.lock().await;
-                                *last = Some(msg.clone());
-                            }
-                            tracing::warn!(
-                                op = op_label,
-                                error = %msg,
-                                "DL/T 645 transport error, requesting reconnect"
-                            );
-                            let _ = session_shared.reconnect_tx.try_send(());
-                        }
-                        ProtocolError::Io(e) => {
-                            session_shared.healthy.store(false, Ordering::Release);
-                            {
-                                let mut last = session_shared.last_error.lock().await;
-                                *last = Some(e.to_string());
-                            }
-                            tracing::warn!(
-                                op = op_label,
-                                error = %e,
-                                "DL/T 645 IO error, requesting reconnect"
-                            );
-                            let _ = session_shared.reconnect_tx.try_send(());
-                        }
-                        _ => {}
                     }
-
-                    Err(proto_err.into())
+                    ProtocolError::Transport(msg) => {
+                        session_shared.healthy.store(false, Ordering::Release);
+                        {
+                            let mut last = session_shared.last_error.lock().await;
+                            *last = Some(msg.clone());
+                        }
+                        tracing::warn!(
+                            op = op_label,
+                            error = %msg,
+                            "DL/T 645 transport error, requesting reconnect"
+                        );
+                        let _ = session_shared.reconnect_tx.try_send(());
+                    }
+                    ProtocolError::Io(e) => {
+                        session_shared.healthy.store(false, Ordering::Release);
+                        {
+                            let mut last = session_shared.last_error.lock().await;
+                            *last = Some(e.to_string());
+                        }
+                        tracing::warn!(
+                            op = op_label,
+                            error = %e,
+                            "DL/T 645 IO error, requesting reconnect"
+                        );
+                        let _ = session_shared.reconnect_tx.try_send(());
+                    }
+                    _ => {}
                 }
-            };
 
-            let elapsed = start.elapsed().as_millis() as u64;
-            (res, elapsed)
-        })
-        .await
-        .map_err(|e| DriverError::ExecutionError(e.to_string()))?;
+                Err(proto_err.into())
+            }
+        };
+        let elapsed_ms = start.elapsed().as_millis() as u64;
 
         self.update_response_metrics(elapsed_ms, res.is_ok());
         res

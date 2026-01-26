@@ -172,7 +172,7 @@ impl SystemMetrics {
         );
 
         // OS information
-        let os_type = System::name().unwrap_or_else(|| "Unknown".to_string());
+        let os_type = System::name().unwrap_or("Unknown".to_string());
         let os_arch = System::cpu_arch();
         let hostname = System::host_name();
 

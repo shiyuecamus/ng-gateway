@@ -138,7 +138,7 @@ impl FromValidatedRow for NewAction {
             .values
             .get("driver_config")
             .cloned()
-            .unwrap_or_else(|| Json::Object(serde_json::Map::new()));
+            .unwrap_or(Json::Object(serde_json::Map::new()));
 
         Ok(NewAction {
             device_id,

@@ -21,6 +21,10 @@ pub use crate::domain::{
         CommitResult, DeviceGroup, DeviceRef, ImportPreview, PreparedActionCommit,
         PreparedDeviceCommit, PreparedDevicePointsCommit, PreparedPointCommit,
     },
+    logging::{
+        ChannelLogLevelView, ChannelLogOverrideView, GlobalLogLevelView, LogLevel,
+        SetChannelLogLevelRequest, SetGlobalLogLevelRequest, TtlRange,
+    },
     menu::{ChangeMenuStatus, MenuInfo, MenuMeta, MenuTree, NewMenu, NewMenuWithId, UpdateMenu},
     net_debug::{
         HttpMethod, HttpRequest, HttpResponse, PingMode, PingRequest, PingResponse, PingSample,

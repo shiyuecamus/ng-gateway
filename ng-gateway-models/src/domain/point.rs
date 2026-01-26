@@ -198,7 +198,7 @@ impl FromValidatedRow for NewPoint {
             .values
             .get("driver_config")
             .cloned()
-            .unwrap_or_else(|| Json::Object(serde_json::Map::new()));
+            .unwrap_or(Json::Object(serde_json::Map::new()));
 
         Ok(NewPoint {
             device_id,

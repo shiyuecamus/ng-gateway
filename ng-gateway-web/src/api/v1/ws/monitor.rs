@@ -382,7 +382,7 @@ async fn monitor_ws_loop(
                         device_ids,
                     }) => {
                         let mut next_devices: Vec<i32> =
-                            device_ids.unwrap_or_else(|| device_id.into_iter().collect());
+                            device_ids.unwrap_or(device_id.into_iter().collect());
 
                         // Deduplicate and normalize
                         next_devices.sort_unstable();
@@ -593,7 +593,7 @@ fn point_map_to_json(
         let key = point_key_by_id
             .get(point_id)
             .map(|k| k.as_ref().to_string())
-            .unwrap_or_else(|| point_id.to_string());
+            .unwrap_or(point_id.to_string());
         out.insert(key, value.to_json_value(opts));
     }
 

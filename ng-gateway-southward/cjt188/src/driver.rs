@@ -114,77 +114,78 @@ impl Cjt188Driver {
     {
         let session_shared = self.session.clone();
 
-        let (res, elapsed_ms) = tokio::spawn(async move {
-            let start = Instant::now();
-            let session_opt = session_shared.session.load_full();
-            let handle = match session_opt {
-                Some(h) => h,
-                None => {
-                    session_shared.healthy.store(false, Ordering::Release);
-                    let _ = session_shared.reconnect_tx.try_send(());
-                    return (Err(DriverError::ServiceUnavailable), 0);
-                }
-            };
+        // IMPORTANT:
+        // Do NOT spawn here.
+        //
+        // Driver calls are already executed inside a `channel_id`-attributed span by the SDK
+        // runtime wrapper. Spawning would detach the future from the current span and break
+        // per-channel log attribution for dependency logs.
+        let start = Instant::now();
+        let session_opt = session_shared.session.load_full();
+        let handle = match session_opt {
+            Some(h) => h,
+            None => {
+                session_shared.healthy.store(false, Ordering::Release);
+                let _ = session_shared.reconnect_tx.try_send(());
+                return Err(DriverError::ServiceUnavailable);
+            }
+        };
 
-            let sess = Arc::clone(&handle.0);
+        let sess = Arc::clone(&handle.0);
 
-            // Wrap operation in timeout
-            let op_res = match tokio::time::timeout(op_timeout, op(sess)).await {
-                Ok(res) => res,
-                Err(_) => Err(ProtocolError::Timeout(format!(
-                    "Operation timed out after {:?}",
-                    op_timeout
-                ))),
-            };
+        // Wrap operation in timeout
+        let op_res = match tokio::time::timeout(op_timeout, op(sess)).await {
+            Ok(res) => res,
+            Err(_) => Err(ProtocolError::Timeout(format!(
+                "Operation timed out after {:?}",
+                op_timeout
+            ))),
+        };
 
-            let res = match op_res {
-                Ok(v) => {
-                    session_shared
-                        .consecutive_timeouts
-                        .store(0, Ordering::Release);
-                    Ok(v)
-                }
-                Err(e) => {
-                    // Simple error handling/reconnect logic
-                    match &e {
-                        ProtocolError::Timeout(_) => {
-                            tracing::warn!(op = op_label, "CJ/T 188 operation timeout");
-                            let count = session_shared
-                                .consecutive_timeouts
-                                .fetch_add(1, Ordering::Relaxed)
-                                + 1;
-                            let threshold = session_shared.timeout_reconnect_threshold as u64;
-                            if threshold != 0 && count >= threshold {
-                                session_shared.healthy.store(false, Ordering::Release);
-                                tracing::warn!(
-                                    op = op_label,
-                                    timeout_count = count,
-                                    threshold,
-                                    "CJ/T 188 timeout threshold reached, requesting reconnect"
-                                );
-                                let _ = session_shared.reconnect_tx.try_send(());
-                            }
-                        }
-                        ProtocolError::Transport(msg) => {
-                            tracing::warn!(op = op_label, error = %msg, "CJ/T 188 transport error");
+        let res = match op_res {
+            Ok(v) => {
+                session_shared
+                    .consecutive_timeouts
+                    .store(0, Ordering::Release);
+                Ok(v)
+            }
+            Err(e) => {
+                // Simple error handling/reconnect logic
+                match &e {
+                    ProtocolError::Timeout(_) => {
+                        tracing::warn!(op = op_label, "CJ/T 188 operation timeout");
+                        let count = session_shared
+                            .consecutive_timeouts
+                            .fetch_add(1, Ordering::Relaxed)
+                            + 1;
+                        let threshold = session_shared.timeout_reconnect_threshold as u64;
+                        if threshold != 0 && count >= threshold {
                             session_shared.healthy.store(false, Ordering::Release);
+                            tracing::warn!(
+                                op = op_label,
+                                timeout_count = count,
+                                threshold,
+                                "CJ/T 188 timeout threshold reached, requesting reconnect"
+                            );
                             let _ = session_shared.reconnect_tx.try_send(());
                         }
-                        ProtocolError::Io(err) => {
-                            tracing::warn!(op = op_label, error = %err, "CJ/T 188 IO error");
-                            session_shared.healthy.store(false, Ordering::Release);
-                            let _ = session_shared.reconnect_tx.try_send(());
-                        }
-                        _ => {}
                     }
-                    Err(DriverError::ExecutionError(e.to_string()))
+                    ProtocolError::Transport(msg) => {
+                        tracing::warn!(op = op_label, error = %msg, "CJ/T 188 transport error");
+                        session_shared.healthy.store(false, Ordering::Release);
+                        let _ = session_shared.reconnect_tx.try_send(());
+                    }
+                    ProtocolError::Io(err) => {
+                        tracing::warn!(op = op_label, error = %err, "CJ/T 188 IO error");
+                        session_shared.healthy.store(false, Ordering::Release);
+                        let _ = session_shared.reconnect_tx.try_send(());
+                    }
+                    _ => {}
                 }
-            };
-
-            (res, start.elapsed().as_millis() as u64)
-        })
-        .await
-        .map_err(|e| DriverError::ExecutionError(e.to_string()))?;
+                Err(DriverError::ExecutionError(e.to_string()))
+            }
+        };
+        let elapsed_ms = start.elapsed().as_millis() as u64;
 
         self.update_response_metrics(elapsed_ms, res.is_ok());
         res

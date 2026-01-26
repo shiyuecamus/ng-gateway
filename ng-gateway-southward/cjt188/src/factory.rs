@@ -47,9 +47,7 @@ impl DriverFactory for Cjt188DriverFactory {
     }
 
     fn convert_runtime_device(&self, device: DeviceModel) -> DriverResult<Arc<dyn RuntimeDevice>> {
-        let driver_config = device
-            .driver_config
-            .unwrap_or_else(|| serde_json::json!({}));
+        let driver_config = device.driver_config.unwrap_or(serde_json::json!({}));
         let address = driver_config
             .get("address")
             .and_then(|v| v.as_str())

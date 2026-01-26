@@ -24,6 +24,7 @@ use std::{
 };
 use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use url::Url;
 
 pub(super) type SharedSession = Arc<SessionEntry>;
@@ -238,6 +239,9 @@ impl SessionSupervisor {
         // Reset shutdown flag at the beginning of a supervisor lifecycle
         shared.shutdown.store(false, Ordering::Release);
 
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("opcua-supervisor", channel_id = channel.id);
         tokio::spawn(async move {
             // Supervisor outer loop with reconnect/backoff, aligned with IEC104 design
             let mut retry = RetryController::new(&channel.connection_policy.backoff);
@@ -279,14 +283,17 @@ impl SessionSupervisor {
 
                 // Run one attempt's event loop and wait for completion or cancellation
                 let child = cancel.child_token();
-                let mut task = tokio::spawn(Self::run_event_loop(
-                    Arc::clone(&shared),
-                    Arc::clone(&session),
-                    ev,
-                    child.clone(),
-                    on_connected_opt.take(),
-                    state_tx.clone(),
-                ));
+                let mut task = tokio::spawn(
+                    Self::run_event_loop(
+                        Arc::clone(&shared),
+                        Arc::clone(&session),
+                        ev,
+                        child.clone(),
+                        on_connected_opt.take(),
+                        state_tx.clone(),
+                    )
+                    .instrument(tracing::Span::current()),
+                );
 
                 tokio::select! {
                     _ = cancel.cancelled() => {
@@ -325,7 +332,8 @@ impl SessionSupervisor {
                     }
                 }
             }
-        });
+        }
+        .instrument(span));
     }
 
     /// Drive the OPC UA SessionEventLoop until cancelled or the stream ends.

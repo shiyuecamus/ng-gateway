@@ -23,6 +23,8 @@ mod driver;
 #[allow(clippy::needless_update)]
 mod import;
 #[allow(clippy::needless_update)]
+mod logging;
+#[allow(clippy::needless_update)]
 mod menu;
 #[allow(clippy::needless_update)]
 mod net_debug;

@@ -17,7 +17,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, Instrument};
 
 /// Shared session entry guarded by a single async mutex.
 /// The supervisor owns lifecycle and reconnection.
@@ -147,6 +147,9 @@ impl SessionSupervisor {
                 ))?;
         let transport_meter = Arc::clone(&self.transport_meter);
 
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("ethernetip-supervisor", channel_id = channel.id);
         tokio::spawn(async move {
             // reset flags
             shared.shutdown.store(false, Ordering::Release);
@@ -248,7 +251,8 @@ impl SessionSupervisor {
                     }
                 }
             }
-        });
+        }
+        .instrument(span));
         Ok(())
     }
 }

@@ -102,7 +102,7 @@ impl ModbusPlanner {
                 let function = batch_points
                     .first()
                     .map(|p| p.function_code)
-                    .unwrap_or_else(|| vecp[0].function_code);
+                    .unwrap_or(vecp[0].function_code);
                 batches.push(ReadBatch {
                     function,
                     start_addr: batch_start,

@@ -131,47 +131,49 @@ impl ModbusDriver {
             Future<Output = Result<Result<T, ExceptionCode>, tokio_modbus::Error>> + Send + 'static,
         T: Send + 'static,
     {
-        // Clone session state to move into the spawned task
+        // Clone session state to move into the timeout handling path.
         let session_shared = self.session.clone();
 
-        let (res, elapsed_ms) = tokio::spawn(async move {
-            let start_ts = Instant::now();
-            let duration = StdDuration::from_millis(op_timeout);
-            let res: DriverResult<T> = match timeout(duration, op(Arc::clone(&ctx))).await {
-                Ok(Ok(inner)) => match inner {
-                    Ok(v) => Ok(v),
-                    Err(code) => Err(DriverError::ExecutionError(format!(
-                        "Modbus exception on {}: {:?}",
-                        op_label, code
-                    ))),
-                },
-                Ok(Err(e)) => {
-                    let msg = e.to_string();
-                    warn!(op = op_label, err = %msg, "Transport error, request reconnect");
-                    session_shared.healthy.store(false, Ordering::Release);
-                    let _ = session_shared
-                        .last_error
-                        .lock()
-                        .map(|mut g| *g = Some(msg.clone()));
-                    let _ = session_shared.reconnect_tx.try_send(());
-                    Err(DriverError::ExecutionError(msg))
-                }
-                Err(_elapsed) => {
-                    warn!(op = op_label, "Operation timeout, request reconnect");
-                    session_shared.healthy.store(false, Ordering::Release);
-                    let _ = session_shared
-                        .last_error
-                        .lock()
-                        .map(|mut g| *g = Some("timeout".to_string()));
-                    let _ = session_shared.reconnect_tx.try_send(());
-                    Err(DriverError::Timeout(TokioDuration::from_millis(op_timeout)))
-                }
-            };
-            let elapsed = start_ts.elapsed().as_millis() as u64;
-            (res, elapsed)
-        })
-        .await
-        .map_err(|e| DriverError::ExecutionError(e.to_string()))?;
+        // IMPORTANT:
+        // Do NOT spawn here.
+        //
+        // This function is typically called from a task already instrumented with
+        // `channel_id` (see `ng-gateway-sdk` runtime wrapper). Spawning would detach the
+        // future from the current tracing span, causing dependency logs (e.g. `tokio-modbus`)
+        // to lose channel attribution and become unfilterable by per-channel log level.
+        let start_ts = Instant::now();
+        let duration = StdDuration::from_millis(op_timeout);
+        let res: DriverResult<T> = match timeout(duration, op(Arc::clone(&ctx))).await {
+            Ok(Ok(inner)) => match inner {
+                Ok(v) => Ok(v),
+                Err(code) => Err(DriverError::ExecutionError(format!(
+                    "Modbus exception on {}: {:?}",
+                    op_label, code
+                ))),
+            },
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                warn!(op = op_label, err = %msg, "Transport error, request reconnect");
+                session_shared.healthy.store(false, Ordering::Release);
+                let _ = session_shared
+                    .last_error
+                    .lock()
+                    .map(|mut g| *g = Some(msg.clone()));
+                let _ = session_shared.reconnect_tx.try_send(());
+                Err(DriverError::ExecutionError(msg))
+            }
+            Err(_elapsed) => {
+                warn!(op = op_label, "Operation timeout, request reconnect");
+                session_shared.healthy.store(false, Ordering::Release);
+                let _ = session_shared
+                    .last_error
+                    .lock()
+                    .map(|mut g| *g = Some("timeout".to_string()));
+                let _ = session_shared.reconnect_tx.try_send(());
+                Err(DriverError::Timeout(TokioDuration::from_millis(op_timeout)))
+            }
+        };
+        let elapsed_ms = start_ts.elapsed().as_millis() as u64;
 
         // Unified metrics
         self.total_requests.fetch_add(1, Ordering::Relaxed);

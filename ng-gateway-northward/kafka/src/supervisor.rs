@@ -342,7 +342,7 @@ fn build_client_config_base(app_id: i32, conn: &KafkaConnectionConfig) -> Client
     let client_id = conn
         .client_id
         .clone()
-        .unwrap_or_else(|| format!("ng-gateway-app-{}", app_id));
+        .unwrap_or(format!("ng-gateway-app-{}", app_id));
     cfg.set("client.id", client_id.as_str());
 
     // Security protocol + optional TLS/SASL

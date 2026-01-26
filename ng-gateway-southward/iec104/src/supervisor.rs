@@ -25,7 +25,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{warn, Instrument};
 
 /// Startup action item describing which interrogation(s) to trigger when session becomes Active.
 #[derive(Clone)]
@@ -160,103 +160,112 @@ impl Iec104Supervisor {
             low_prio_flush_max_age_ms: channel.config.low_prio_flush_max_age_ms,
         };
 
-        tokio::spawn(async move {
-            let mut retry = RetryController::new(&channel.connection_policy.backoff);
-            loop {
-                if cancel_outer.is_cancelled() {
+        // Ensure the supervisor task inherits the driver's `channel_id` span so that
+        // dependency logs remain attributable and per-channel filtering works on the host.
+        let span = tracing::info_span!("iec104-supervisor", channel_id = channel.id);
+        tokio::spawn(
+            async move {
+                let mut retry = RetryController::new(&channel.connection_policy.backoff);
+                loop {
+                    if cancel_outer.is_cancelled() {
+                        shared.session.store(None);
+                        shared.healthy.store(false, Ordering::Release);
+                        shared.shutdown.store(true, Ordering::Release);
+                        let _ = shared.session_watch_tx.send(None);
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
+                        let mut e = shared.last_error.lock().await;
+                        *e = Some("supervisor cancelled".to_string());
+                        return;
+                    }
+
+                    let _ = state_tx.send(SouthwardConnectionState::Connecting);
+
+                    // Connect (supervisor-owned) and inject stream into protocol session.
+                    let stream = match connect_tcp_metered_with_timeout(
+                        socket_addr,
+                        Arc::clone(&transport_meter),
+                        options.connection_timeout_ms,
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let msg = format!("iec104 tcp connect failed: {e}");
+                            {
+                                let mut last = shared.last_error.lock().await;
+                                *last = Some(msg.clone());
+                            }
+                            shared.healthy.store(false, Ordering::Relaxed);
+                            // failure immediately visible + reconnect process visible
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(msg.clone()));
+                            match retry.on_failure() {
+                                RetryDecision::RetryAfter(dur) => {
+                                    tracing::warn!(
+                                        delay_ms = dur.as_millis() as u64,
+                                        "IEC104 connect retry"
+                                    );
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                    tokio::select! {
+                                        _ = cancel_outer.cancelled() => return,
+                                        _ = tokio::time::sleep(dur) => {}
+                                    }
+                                    continue;
+                                }
+                                RetryDecision::Exhausted => return,
+                            }
+                        }
+                    };
+                    let _ = stream.inner_ref().set_nodelay(options.tcp_nodelay);
+
+                    let (session, ev) = create_with_stream(socket_addr, options.clone(), stream);
+
+                    // Run one attempt's event loop (spawns IO internally)
+                    let child = cancel_outer.child_token();
+                    let seen_active = Self::run_event_loop(
+                        shared.clone(),
+                        session.clone(),
+                        ev,
+                        child,
+                        startup_actions.clone(),
+                        options.t1_ms,
+                        1, // max retries per startup command
+                        state_tx.clone(),
+                    )
+                    .await;
+
+                    // attempt finished, clear state then backoff and retry
                     shared.session.store(None);
                     shared.healthy.store(false, Ordering::Release);
-                    shared.shutdown.store(true, Ordering::Release);
                     let _ = shared.session_watch_tx.send(None);
-                    let _ = state_tx.send(SouthwardConnectionState::Disconnected);
-                    let mut e = shared.last_error.lock().await;
-                    *e = Some("supervisor cancelled".to_string());
-                    return;
-                }
 
-                let _ = state_tx.send(SouthwardConnectionState::Connecting);
+                    if seen_active {
+                        retry.reset();
+                    }
 
-                // Connect (supervisor-owned) and inject stream into protocol session.
-                let stream = match connect_tcp_metered_with_timeout(
-                    socket_addr,
-                    Arc::clone(&transport_meter),
-                    options.connection_timeout_ms,
-                )
-                .await
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let msg = format!("iec104 tcp connect failed: {e}");
-                        {
-                            let mut last = shared.last_error.lock().await;
-                            *last = Some(msg.clone());
-                        }
-                        shared.healthy.store(false, Ordering::Relaxed);
-                        // failure immediately visible + reconnect process visible
-                        let _ = state_tx.send(SouthwardConnectionState::Failed(msg.clone()));
-                        match retry.on_failure() {
-                            RetryDecision::RetryAfter(dur) => {
-                                tracing::warn!(
-                                    delay_ms = dur.as_millis() as u64,
-                                    "IEC104 connect retry"
-                                );
-                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
-                                tokio::select! {
-                                    _ = cancel_outer.cancelled() => return,
-                                    _ = tokio::time::sleep(dur) => {}
+                    match retry.on_failure() {
+                        RetryDecision::RetryAfter(dur) => {
+                            tracing::warn!(
+                                delay_ms = dur.as_millis() as u64,
+                                "IEC104 connect retry"
+                            );
+                            tokio::select! {
+                                _ = cancel_outer.cancelled() => return,
+                                _ = tokio::time::sleep(dur) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
                                 }
-                                continue;
-                            }
-                            RetryDecision::Exhausted => return,
-                        }
-                    }
-                };
-                let _ = stream.inner_ref().set_nodelay(options.tcp_nodelay);
-
-                let (session, ev) = create_with_stream(socket_addr, options.clone(), stream);
-
-                // Run one attempt's event loop (spawns IO internally)
-                let child = cancel_outer.child_token();
-                let seen_active = Self::run_event_loop(
-                    shared.clone(),
-                    session.clone(),
-                    ev,
-                    child,
-                    startup_actions.clone(),
-                    options.t1_ms,
-                    1, // max retries per startup command
-                    state_tx.clone(),
-                )
-                .await;
-
-                // attempt finished, clear state then backoff and retry
-                shared.session.store(None);
-                shared.healthy.store(false, Ordering::Release);
-                let _ = shared.session_watch_tx.send(None);
-
-                if seen_active {
-                    retry.reset();
-                }
-
-                match retry.on_failure() {
-                    RetryDecision::RetryAfter(dur) => {
-                        tracing::warn!(delay_ms = dur.as_millis() as u64, "IEC104 connect retry");
-                        tokio::select! {
-                            _ = cancel_outer.cancelled() => return,
-                            _ = tokio::time::sleep(dur) => {
-                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
                             }
                         }
-                    }
-                    RetryDecision::Exhausted => {
-                        let _ = state_tx.send(SouthwardConnectionState::Failed(
-                            "retry budget exhausted".to_string(),
-                        ));
-                        return;
+                        RetryDecision::Exhausted => {
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(
+                                "retry budget exhausted".to_string(),
+                            ));
+                            return;
+                        }
                     }
                 }
             }
-        });
+            .instrument(span),
+        );
         Ok(())
     }
 
