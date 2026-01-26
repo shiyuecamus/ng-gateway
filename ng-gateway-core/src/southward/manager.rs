@@ -2393,7 +2393,7 @@ impl NGSouthwardManager {
             removed_runtime_cfgs: Vec<(i32, Arc<dyn RuntimeDevice>)>,
         }
 
-        apply_with_revert(
+        let result = apply_with_revert(
             || {
                 // Snapshots for revert
                 let mut removed_devices = HashMap::new();
@@ -2497,7 +2497,15 @@ impl NGSouthwardManager {
                 }
             },
         )
-        .await
+        .await;
+
+        // Control-plane path: refresh aggregated counts for observability snapshots.
+        //
+        // IMPORTANT: we refresh even on error (after revert) to keep hub snapshot consistent
+        // with the final in-memory runtime index.
+        self.refresh_manager_snapshot_from_index().await;
+
+        result
     }
 
     /// Add runtime points to a device and wait for driver to apply. On failure, revert in-memory changes.
@@ -2973,7 +2981,7 @@ impl NGSouthwardManager {
             None => return Ok(()),
         };
 
-        apply_with_revert(
+        let result = apply_with_revert(
             || {
                 let mut removed = Vec::new();
                 self.mutate_device_actions(device_id, |current| {
@@ -3018,7 +3026,15 @@ impl NGSouthwardManager {
                 }
             },
         )
-        .await
+        .await;
+
+        // Control-plane path: refresh aggregated counts (actions totals) for observability snapshots.
+        //
+        // IMPORTANT: refresh even on error (after revert) to keep hub snapshot consistent with
+        // the final in-memory runtime index.
+        self.refresh_manager_snapshot_from_index().await;
+
+        result
     }
 }
 

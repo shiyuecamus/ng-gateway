@@ -739,7 +739,10 @@ impl DeviceRuntimeCmd for NGGateway {
             let ids_this: Vec<i32> = models.iter().map(|m| m.id).collect();
             if let Err(e) = self
                 .southward_manager
-                .remove_devices(channel_id, ids_this.clone(), true)
+                // Deleting devices is a destructive operation in DB (points/actions are deleted first),
+                // so the runtime index must NOT preserve children to avoid stale in-memory topology
+                // and incorrect aggregated metrics snapshots.
+                .remove_devices(channel_id, ids_this.clone(), false)
                 .await
             {
                 // recreate DB rows for that device group
