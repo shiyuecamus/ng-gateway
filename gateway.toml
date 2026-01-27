@@ -17,17 +17,28 @@ ca_key_path = "ca.key"
 # Southward communication configuration
 [general.southward]
 # API synchronous start wait timeout for driver connection (milliseconds)
-driver_sync_start_timeout_ms = 2000
+start_timeout_ms = 2000
+
+# Southward device snapshot TTL GC (point-level).
+#
+# This controls how long a point baseline (for ReportType::Change detection) can stay in memory
+# without being refreshed by a value change. Expired points will be evicted by a background GC task.
+[general.southward.snapshot]
+# Point baseline TTL in milliseconds. 0 disables eviction.
+device_change_cache_ttl_ms = 600000
+# GC scan interval in milliseconds.
+gc_interval_ms = 60000
+# Number of async GC workers.
+gc_workers = 2
+# Max devices to scan per GC tick (bounds CPU usage).
+max_devices_per_tick = 256
 
 # Northward communication configuration
 [general.northward]
 # Internal bounded queue capacity for northward manager
 queue_capacity = 10000
 # API synchronous start wait timeout for northward app (milliseconds)
-app_sync_start_timeout_ms = 2000
-# Cache TTL for device change detection cache (in milliseconds)
-cache_ttl_ms = 3600000
-
+start_timeout_ms = 2000
 # Collector configuration
 [general.collector]
 # Collection timeout for each device (in milliseconds)

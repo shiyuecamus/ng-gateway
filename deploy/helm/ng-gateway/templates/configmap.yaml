@@ -28,7 +28,21 @@ data:
   {{- end }}
   {{- if $config.general.southward }}
   {{- if $config.general.southward.driverSyncStartTimeout }}
-  NG__GENERAL__SOUTHWARD__DRIVER_SYNC_START_TIMEOUT_MS: {{ $config.general.southward.driverSyncStartTimeout | quote }}
+  NG__GENERAL__SOUTHWARD__START_TIMEOUT_MS: {{ $config.general.southward.driverSyncStartTimeout | quote }}
+  {{- end }}
+  {{- if $config.general.southward.snapshot }}
+  {{- if hasKey $config.general.southward.snapshot "deviceChangeCacheTtlMs" }}
+  NG__GENERAL__SOUTHWARD__SNAPSHOT__DEVICE_CHANGE_CACHE_TTL_MS: {{ $config.general.southward.snapshot.deviceChangeCacheTtlMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.southward.snapshot "gcIntervalMs" }}
+  NG__GENERAL__SOUTHWARD__SNAPSHOT__GC_INTERVAL_MS: {{ $config.general.southward.snapshot.gcIntervalMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.southward.snapshot "gcWorkers" }}
+  NG__GENERAL__SOUTHWARD__SNAPSHOT__GC_WORKERS: {{ $config.general.southward.snapshot.gcWorkers | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.southward.snapshot "maxDevicesPerTick" }}
+  NG__GENERAL__SOUTHWARD__SNAPSHOT__MAX_DEVICES_PER_TICK: {{ $config.general.southward.snapshot.maxDevicesPerTick | quote }}
+  {{- end }}
   {{- end }}
   {{- end }}
   {{- if $config.general.northward }}
@@ -36,10 +50,7 @@ data:
   NG__GENERAL__NORTHWARD__QUEUE_CAPACITY: {{ $config.general.northward.queueCapacity | quote }}
   {{- end }}
   {{- if $config.general.northward.appSyncStartTimeout }}
-  NG__GENERAL__NORTHWARD__APP_SYNC_START_TIMEOUT_MS: {{ $config.general.northward.appSyncStartTimeout | quote }}
-  {{- end }}
-  {{- if $config.general.northward.cacheTtl }}
-  NG__GENERAL__NORTHWARD__CACHE_TTL_MS: {{ $config.general.northward.cacheTtl | quote }}
+  NG__GENERAL__NORTHWARD__START_TIMEOUT_MS: {{ $config.general.northward.appSyncStartTimeout | quote }}
   {{- end }}
   {{- end }}
   {{- if $config.general.collector }}
@@ -60,6 +71,23 @@ data:
   {{- end }}
   {{- if $config.general.collector.outboundQueueCapacity }}
   NG__GENERAL__COLLECTOR__OUTBOUND_QUEUE_CAPACITY: {{ $config.general.collector.outboundQueueCapacity | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.general.logging }}
+  {{- if hasKey $config.general.logging "channelOverrideDefaultTtlMs" }}
+  NG__GENERAL__LOGGING__CHANNEL_OVERRIDE_DEFAULT_TTL_MS: {{ $config.general.logging.channelOverrideDefaultTtlMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.logging "channelOverrideMinTtlMs" }}
+  NG__GENERAL__LOGGING__CHANNEL_OVERRIDE_MIN_TTL_MS: {{ $config.general.logging.channelOverrideMinTtlMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.logging "channelOverrideMaxTtlMs" }}
+  NG__GENERAL__LOGGING__CHANNEL_OVERRIDE_MAX_TTL_MS: {{ $config.general.logging.channelOverrideMaxTtlMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.logging "overrideCleanupIntervalMs" }}
+  NG__GENERAL__LOGGING__OVERRIDE_CLEANUP_INTERVAL_MS: {{ $config.general.logging.overrideCleanupIntervalMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.logging "driverIngestQueueCapacity" }}
+  NG__GENERAL__LOGGING__DRIVER_INGEST_QUEUE_CAPACITY: {{ $config.general.logging.driverIngestQueueCapacity | quote }}
   {{- end }}
   {{- end }}
   {{- end }}

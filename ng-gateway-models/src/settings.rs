@@ -705,21 +705,78 @@ pub enum CacheType {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Southward {
     /// API synchronous start wait timeout for driver connection (milliseconds)
-    #[serde(default = "Southward::driver_sync_start_timeout_ms_default")]
-    pub driver_sync_start_timeout_ms: u64,
+    #[serde(default = "Southward::start_timeout_ms_default")]
+    pub start_timeout_ms: u64,
+    /// Device snapshot GC configuration (point-level TTL eviction).
+    #[serde(default)]
+    pub snapshot: SouthwardSnapshot,
 }
 
 impl Default for Southward {
     fn default() -> Self {
         Self {
-            driver_sync_start_timeout_ms: Southward::driver_sync_start_timeout_ms_default(),
+            start_timeout_ms: Southward::start_timeout_ms_default(),
+            snapshot: SouthwardSnapshot::default(),
         }
     }
 }
 
 impl Southward {
-    fn driver_sync_start_timeout_ms_default() -> u64 {
+    fn start_timeout_ms_default() -> u64 {
         5000
+    }
+}
+
+/// Southward device snapshot GC configuration.
+///
+/// # What this controls
+/// For `ReportType::Change` mode, the gateway keeps an in-memory baseline snapshot for change
+/// detection. This config defines a **point-level TTL** and a background GC loop that evicts
+/// expired point baselines to bound memory usage.
+///
+/// # Notes
+/// - TTL is evaluated against "last touched time" which is updated when a point value changes
+///   or the point is first seen.
+/// - `gc_interval_ms` controls how frequently the GC workers scan snapshots.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SouthwardSnapshot {
+    /// Point baseline TTL in milliseconds. `0` disables eviction.
+    #[serde(default = "SouthwardSnapshot::device_change_cache_ttl_ms_default")]
+    pub device_change_cache_ttl_ms: u64,
+    /// GC scan interval in milliseconds.
+    #[serde(default = "SouthwardSnapshot::gc_interval_ms_default")]
+    pub gc_interval_ms: u64,
+    /// Number of async GC workers.
+    #[serde(default = "SouthwardSnapshot::gc_workers_default")]
+    pub gc_workers: usize,
+    /// Max devices to scan per GC tick.
+    #[serde(default = "SouthwardSnapshot::max_devices_per_tick_default")]
+    pub max_devices_per_tick: usize,
+}
+
+impl Default for SouthwardSnapshot {
+    fn default() -> Self {
+        Self {
+            device_change_cache_ttl_ms: Self::device_change_cache_ttl_ms_default(),
+            gc_interval_ms: Self::gc_interval_ms_default(),
+            gc_workers: Self::gc_workers_default(),
+            max_devices_per_tick: Self::max_devices_per_tick_default(),
+        }
+    }
+}
+
+impl SouthwardSnapshot {
+    fn device_change_cache_ttl_ms_default() -> u64 {
+        10 * 60 * 1000
+    }
+    fn gc_interval_ms_default() -> u64 {
+        60 * 1000
+    }
+    fn gc_workers_default() -> usize {
+        2
+    }
+    fn max_devices_per_tick_default() -> usize {
+        256
     }
 }
 
@@ -730,19 +787,15 @@ pub struct Northward {
     #[serde(default = "Northward::queue_capacity_default")]
     pub queue_capacity: usize,
     /// API synchronous start wait timeout for northward app (milliseconds)
-    #[serde(default = "Northward::app_sync_start_timeout_ms_default")]
-    pub app_sync_start_timeout_ms: u64,
-    /// Cache TTL for device change detection cache (in milliseconds)
-    #[serde(default = "Northward::cache_ttl_ms_default")]
-    pub cache_ttl_ms: u64,
+    #[serde(default = "Northward::start_timeout_ms_default")]
+    pub start_timeout_ms: u64,
 }
 
 impl Default for Northward {
     fn default() -> Self {
         Self {
             queue_capacity: Northward::queue_capacity_default(),
-            app_sync_start_timeout_ms: Northward::app_sync_start_timeout_ms_default(),
-            cache_ttl_ms: Northward::cache_ttl_ms_default(),
+            start_timeout_ms: Northward::start_timeout_ms_default(),
         }
     }
 }
@@ -752,11 +805,7 @@ impl Northward {
         10000
     }
 
-    fn app_sync_start_timeout_ms_default() -> u64 {
+    fn start_timeout_ms_default() -> u64 {
         5000
-    }
-
-    fn cache_ttl_ms_default() -> u64 {
-        3600000
     }
 }

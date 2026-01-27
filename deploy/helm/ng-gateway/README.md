@@ -170,13 +170,17 @@ gateway:
       
       # Southward communication
       southward:
-        driverSyncStartTimeout: 2000  # milliseconds (maps to NG__GENERAL__SOUTHWARD__DRIVER_SYNC_START_TIMEOUT_MS)
+        driverSyncStartTimeout: 2000  # milliseconds (maps to NG__GENERAL__SOUTHWARD__START_TIMEOUT_MS)
+        snapshot:
+          deviceChangeCacheTtlMs: 600000
+          gcIntervalMs: 60000
+          gcWorkers: 2
+          maxDevicesPerTick: 256
       
       # Northward communication
       northward:
         queueCapacity: 10000
         appSyncStartTimeout: 2000
-        cacheTtl: 3600000
       
       # Collector
       collector:
@@ -186,14 +190,24 @@ gateway:
         retryAttempts: 3
         retryDelay: 1000
         outboundQueueCapacity: 10000
+
+      # Logging runtime configuration
+      logging:
+        channelOverrideDefaultTtlMs: 300000
+        channelOverrideMinTtlMs: 10000
+        channelOverrideMaxTtlMs: 1800000
+        overrideCleanupIntervalMs: 5000
+        driverIngestQueueCapacity: 10000
     
     # Web configuration
     web:
       routerPrefix: "/api"
       workers: 0
-      
+      port: 5678
+
       ssl:
         enabled: true
+        port: 5679
         type: "auto"
         cert: "./certs/cert.pem"
         key: "./certs/key.pem"
@@ -219,15 +233,8 @@ gateway:
         timeout: 5000
         idleTimeout: 5000
         maxLifetime: 5000
-        maxConnections: 10
+        maxConnections: 100
         autoCreate: true
-    
-    # Metrics
-    metrics:
-      enabled: false
-      endpoint: "http://localhost:4317"
-      exportInterval: 60000
-      serviceName: "ng"
 ```
 
 ### Type Conversion
@@ -243,7 +250,7 @@ The nested configuration structure is automatically converted to environment var
 - `logLevel` → `RUST_LOG`
 - `timezone` → `TZ`
 - `general.name` → `NG__GENERAL__NAME`
-- `general.southward.driverSyncStartTimeout` → `NG__GENERAL__SOUTHWARD__DRIVER_SYNC_START_TIMEOUT_MS`
+- `general.southward.driverSyncStartTimeout` → `NG__GENERAL__SOUTHWARD__START_TIMEOUT_MS`
 - `web.port` → `NG__WEB__PORT`
 - `web.ssl.enabled` → `NG__WEB__SSL__ENABLED`
 - And so on...

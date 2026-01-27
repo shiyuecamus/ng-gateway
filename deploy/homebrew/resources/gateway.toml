@@ -17,12 +17,17 @@ ca_cert_path = "ca.crt"
 ca_key_path = "ca.key"
 
 [general.southward]
-driver_sync_start_timeout_ms = 2000
+start_timeout_ms = 2000
+
+[general.southward.snapshot]
+device_change_cache_ttl_ms = 600000
+gc_interval_ms = 60000
+gc_workers = 2
+max_devices_per_tick = 256
 
 [general.northward]
 queue_capacity = 10000
-app_sync_start_timeout_ms = 2000
-cache_ttl_ms = 3600000
+start_timeout_ms = 2000
 
 [general.collector]
 collection_timeout_ms = 30000

@@ -294,11 +294,15 @@ impl Gateway for NGGateway {
             .collect();
         driver_loader.load_all(&id_paths).await;
 
-        // Initialize southward manager
+        // Initialize southward manager (owns snapshot GC config).
         let southward_manager = Arc::new(NGSouthwardManager::new(
             Arc::clone(&driver_registry),
             Arc::clone(&metrics_hub),
+            settings.general.southward.snapshot.clone(),
         ));
+
+        // Start best-effort device snapshot GC (idempotent; disabled when ttl_ms == 0).
+        southward_manager.start_snapshot_gc();
 
         // Close the semantic loop for driver log level control:
         // lease/override changes (including expiry) => `ng_driver_set_max_level`.
@@ -542,7 +546,7 @@ impl ChannelRuntimeCmd for NGGateway {
                 &created,
                 &self.data_tx,
                 StartPolicy::SyncWaitConnected {
-                    timeout_ms: settings.general.southward.driver_sync_start_timeout_ms,
+                    timeout_ms: settings.general.southward.start_timeout_ms,
                 },
             )
             .await
@@ -607,7 +611,7 @@ impl ChannelRuntimeCmd for NGGateway {
                     .restart_channel(
                         &updated,
                         &self.data_tx,
-                        settings.general.southward.driver_sync_start_timeout_ms,
+                        settings.general.southward.start_timeout_ms,
                     )
                     .await
                 {
@@ -660,7 +664,7 @@ impl ChannelRuntimeCmd for NGGateway {
                     .restart_channel(
                         &channel,
                         &self.data_tx,
-                        settings.general.southward.driver_sync_start_timeout_ms,
+                        settings.general.southward.start_timeout_ms,
                     )
                     .await?;
                 self.southward_manager
@@ -1209,7 +1213,7 @@ impl AppRuntimeCmd for NGGateway {
                 &conn,
                 self.northward_events_tx.clone(),
                 self.shutdown_token.child_token(),
-                settings.general.northward.app_sync_start_timeout_ms,
+                settings.general.northward.start_timeout_ms,
             )
             .await
         {
@@ -1248,7 +1252,7 @@ impl AppRuntimeCmd for NGGateway {
                         &conn,
                         self.northward_events_tx.clone(),
                         self.shutdown_token.child_token(),
-                        settings.general.northward.app_sync_start_timeout_ms,
+                        settings.general.northward.start_timeout_ms,
                     )
                     .await
                 {
@@ -1294,7 +1298,7 @@ impl AppRuntimeCmd for NGGateway {
                         &conn,
                         self.northward_events_tx.clone(),
                         self.shutdown_token.child_token(),
-                        settings.general.northward.app_sync_start_timeout_ms,
+                        settings.general.northward.start_timeout_ms,
                     )
                     .await?;
             }

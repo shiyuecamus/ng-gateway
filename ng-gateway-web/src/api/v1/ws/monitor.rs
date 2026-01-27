@@ -584,12 +584,12 @@ async fn send_device_snapshot(
 #[inline]
 fn point_map_to_json(
     point_key_by_id: &HashMap<i32, Arc<str>>,
-    input: &HashMap<i32, NGValue>,
+    input: &HashMap<i32, (u64, NGValue)>,
 ) -> HashMap<String, serde_json::Value> {
     let mut out = HashMap::with_capacity(input.len().saturating_mul(2));
     let opts = NGValueJsonOptions::default();
 
-    for (point_id, value) in input.iter() {
+    for (point_id, (_ts_ms, value)) in input.iter() {
         let key = point_key_by_id
             .get(point_id)
             .map(|k| k.as_ref().to_string())

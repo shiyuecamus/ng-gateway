@@ -552,7 +552,7 @@ impl NGNorthwardManager {
                         let values = data_snapshot
                             .telemetry
                             .iter()
-                            .map(|(point_id, value)| {
+                            .map(|(point_id, (_ts, value))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)
@@ -607,7 +607,7 @@ impl NGNorthwardManager {
                         let client_attributes = data_snapshot
                             .client_attributes
                             .iter()
-                            .map(|(point_id, value)| {
+                            .map(|(point_id, (_ts, value))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)
@@ -623,7 +623,7 @@ impl NGNorthwardManager {
                         let shared_attributes = data_snapshot
                             .shared_attributes
                             .iter()
-                            .map(|(point_id, value)| {
+                            .map(|(point_id, (_ts, value))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)
@@ -639,7 +639,7 @@ impl NGNorthwardManager {
                         let server_attributes = data_snapshot
                             .server_attributes
                             .iter()
-                            .map(|(point_id, value)| {
+                            .map(|(point_id, (_ts, value))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)

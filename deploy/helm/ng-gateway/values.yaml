@@ -104,8 +104,8 @@ gateway:
   # Ports are automatically read from gateway.config.web.port and gateway.config.web.ssl.port
   service:
     type: ClusterIP
-    httpPort: 8978
-    httpsPort: 8979
+    httpPort: 5678
+    httpsPort: 5679
     annotations: {}
     # For NodePort/LoadBalancer
     nodePort:
@@ -135,14 +135,22 @@ gateway:
       southward:
         # milliseconds
         driverSyncStartTimeout: 2000
+        # Device snapshot GC configuration (point-level TTL eviction).
+        snapshot:
+          # Point baseline TTL in milliseconds. 0 disables eviction.
+          deviceChangeCacheTtlMs: 600000
+          # GC scan interval in milliseconds.
+          gcIntervalMs: 60000
+          # Number of async GC workers.
+          gcWorkers: 2
+          # Max devices to scan per GC tick.
+          maxDevicesPerTick: 256
       
       # Northward communication configuration
       northward:
         queueCapacity: 10000
         # milliseconds
         appSyncStartTimeout: 2000
-        # milliseconds
-        cacheTtl: 3600000
       
       # Collector configuration
       collector:
@@ -155,18 +163,39 @@ gateway:
         # milliseconds
         retryDelay: 1000
         outboundQueueCapacity: 10000
+
+      # Logging runtime configuration (global + per-channel overrides).
+      logging:
+        # Default TTL for channel log level overrides in milliseconds.
+        channelOverrideDefaultTtlMs: 300000
+        # Minimum allowed TTL (ms) to avoid abusive rapid toggling.
+        channelOverrideMinTtlMs: 10000
+        # Maximum allowed TTL (ms) to avoid "permanent debug".
+        channelOverrideMaxTtlMs: 1800000
+        # Override cleanup tick interval in milliseconds.
+        overrideCleanupIntervalMs: 5000
+        # Driver->host log ingest queue capacity (bounded, drop-old-keep-new).
+        driverIngestQueueCapacity: 10000
     
     # Web configuration
     web:
       routerPrefix: "/api"
-      port: 8978
+      host: "0.0.0.0"
+      port: 5678
       # 0 = use CPU count, >0 = exact number, <0 = CPU count / abs(workers)
       workers: 0
       
+      # Web UI (single-container, served by the gateway process)
+      ui:
+        enabled: true
+        # embedded_zip | filesystem
+        mode: "filesystem"
+        filesystemRoot: "./ng-gateway-ui/apps/web-antd/dist"
+
       # SSL configuration
       ssl:
         enabled: true
-        port: 8979
+        port: 5679
         # auto: generate or load from ca_cert_path and ca_key_path, local: load from cert and key
         type: "auto"
         cert: "./certs/cert.pem"
@@ -176,6 +205,28 @@ gateway:
       cors:
         # allow_all, whitelist
         mode: "allow_all"
+        whitelist:
+          origins:
+            - "*"
+          methods:
+            - "GET"
+            - "POST"
+            - "PUT"
+            - "DELETE"
+          headers:
+            - "Content-Type"
+            - "AccessToken"
+            - "X-CSRF-Token"
+            - "Authorization"
+            - "Token"
+            - "X-Token"
+            - "X-User-Id"
+          exposeHeaders:
+            - "Content-Length"
+            - "Access-Control-Allow-Origin"
+            - "Access-Control-Allow-Headers"
+            - "Content-Type"
+          credentials: true
       
       # JWT configuration
       jwt:
@@ -206,14 +257,6 @@ gateway:
         maxConnections: 100
         # auto create database file and directory if not exists
         autoCreate: true
-    
-    # Metrics configuration
-    metrics:
-      enabled: false
-      endpoint: "http://localhost:4317"
-      # milliseconds
-      exportInterval: 60000
-      serviceName: "ng"
   
   # Additional environment variables from secrets (optional)
   envFromSecrets: []
