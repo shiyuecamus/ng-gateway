@@ -347,39 +347,41 @@ impl Driver for OpcUaDriver {
         > = Some(Box::new(move |session: Arc<Session>| {
             let subs_mgr = subs_mgr.clone();
             let read_chunk_size = Arc::clone(&read_chunk_size);
-            tokio::spawn(async move {
-                // Detect server-side limits (read + subscribe) and clamp by client decoding constraints.
-                let cap = probe_capacity(&session).await;
+            tokio::spawn(
+                async move {
+                    // Detect server-side limits (read + subscribe) and clamp by client decoding constraints.
+                    let cap = probe_capacity(&session).await;
 
-                // Client-side hard decode limit for arrays (async-opcua-types).
-                let mut effective = opcua_constants::MAX_ARRAY_LENGTH.max(1);
+                    // Client-side hard decode limit for arrays (async-opcua-types).
+                    let mut effective = opcua_constants::MAX_ARRAY_LENGTH.max(1);
 
-                if let Some(n) = cap.read.max_nodes_per_read {
-                    effective = effective.min(n as usize);
+                    if let Some(n) = cap.read.max_nodes_per_read {
+                        effective = effective.min(n as usize);
+                    }
+                    if let Some(n) = cap.read.max_array_length {
+                        effective = effective.min(n as usize);
+                    }
+                    effective = effective.max(1);
+
+                    read_chunk_size.store(effective as u64, Ordering::Release);
+                    tracing::info!(
+                        effective_read_batch_size = effective,
+                        client_max_array_length = opcua_constants::MAX_ARRAY_LENGTH,
+                        server_max_nodes_per_read = ?cap.read.max_nodes_per_read,
+                        server_max_array_length = ?cap.read.max_array_length,
+                        "OPC UA read batch size resolved"
+                    );
+
+                    if let Some(mgr) = subs_mgr {
+                        mgr.send_command(SubscriptionCommand::NewSession {
+                            session,
+                            capacity: cap.subscription,
+                        })
+                        .await;
+                    }
                 }
-                if let Some(n) = cap.read.max_array_length {
-                    effective = effective.min(n as usize);
-                }
-                effective = effective.max(1);
-
-                read_chunk_size.store(effective as u64, Ordering::Release);
-                tracing::info!(
-                    effective_read_batch_size = effective,
-                    client_max_array_length = opcua_constants::MAX_ARRAY_LENGTH,
-                    server_max_nodes_per_read = ?cap.read.max_nodes_per_read,
-                    server_max_array_length = ?cap.read.max_array_length,
-                    "OPC UA read batch size resolved"
-                );
-
-                if let Some(mgr) = subs_mgr {
-                    mgr.send_command(SubscriptionCommand::NewSession {
-                        session,
-                        capacity: cap.subscription,
-                    })
-                    .await;
-                }
-            }
-            .instrument(tracing::Span::current()))
+                .instrument(tracing::Span::current()),
+            )
         }));
         supervisor.run(inner_for_supervisor, on_connected).await;
         Ok(())

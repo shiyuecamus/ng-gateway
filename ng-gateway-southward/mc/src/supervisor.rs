@@ -151,99 +151,101 @@ impl McSupervisor {
         // Ensure the supervisor task inherits the driver's `channel_id` span so that
         // dependency logs remain attributable and per-channel filtering works on the host.
         let span = tracing::info_span!("mc-supervisor", channel_id = channel.id);
-        tokio::spawn(async move {
-            let mut retry = RetryController::new(&channel.connection_policy.backoff);
+        tokio::spawn(
+            async move {
+                let mut retry = RetryController::new(&channel.connection_policy.backoff);
 
-            loop {
-                if cancel_outer.is_cancelled() {
-                    shared.shutdown.store(true, Ordering::Release);
-                    let _ = state_tx.send(SouthwardConnectionState::Disconnected);
-                    let mut last = shared.last_error.lock().await;
-                    *last = Some("supervisor cancelled".to_string());
-                    return;
-                }
-
-                let _ = state_tx.send(SouthwardConnectionState::Connecting);
-
-                let stream = match connect_tcp_metered_with_timeout(
-                    options.socket_addr,
-                    Arc::clone(&transport_meter),
-                    channel.connection_policy.connect_timeout_ms,
-                )
-                .await
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let msg = format!("mc tcp connect failed: {e}");
-                        {
-                            let mut last = shared.last_error.lock().await;
-                            *last = Some(msg.clone());
-                        }
-                        shared.healthy.store(false, Ordering::Relaxed);
-                        // failure immediately visible + reconnect process visible
-                        let _ = state_tx.send(SouthwardConnectionState::Failed(msg.clone()));
-                        match retry.on_failure() {
-                            RetryDecision::RetryAfter(delay) => {
-                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
-                                tokio::select! {
-                                    _ = cancel_outer.cancelled() => return,
-                                    _ = tokio::time::sleep(delay) => {}
-                                }
-                                continue;
-                            }
-                            RetryDecision::Exhausted => return,
-                        }
-                    }
-                };
-                let _ = stream.inner_ref().set_nodelay(options.tcp_nodelay);
-
-                let (session, ev) = create_with_stream(Arc::clone(&options), stream);
-                shared.session.store(Some(session.clone()));
-                let _ = shared.session_watch_tx.send(Some(session.clone()));
-
-                let child = cancel_outer.child_token();
-                let seen_active = Self::run_event_loop(
-                    Arc::clone(&shared),
-                    Arc::clone(&session),
-                    ev,
-                    child,
-                    state_tx.clone(),
-                )
-                .await;
-
-                shared.session.store(None);
-                shared.healthy.store(false, Ordering::Release);
-                let _ = shared.session_watch_tx.send(None);
-
-                if seen_active {
-                    retry.reset();
-                }
-
-                match retry.on_failure() {
-                    RetryDecision::RetryAfter(delay) => {
-                        tracing::warn!(
-                            delay_ms = delay.as_millis() as u64,
-                            "MC session reconnect retry"
-                        );
-                        tokio::select! {
-                            _ = cancel_outer.cancelled() => return,
-                            _ = tokio::time::sleep(delay) => {
-                                let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
-                            }
-                        }
-                    }
-                    RetryDecision::Exhausted => {
+                loop {
+                    if cancel_outer.is_cancelled() {
+                        shared.shutdown.store(true, Ordering::Release);
+                        let _ = state_tx.send(SouthwardConnectionState::Disconnected);
                         let mut last = shared.last_error.lock().await;
-                        *last = Some("retry budget exhausted".to_string());
-                        let _ = state_tx.send(SouthwardConnectionState::Failed(
-                            "retry budget exhausted".to_string(),
-                        ));
+                        *last = Some("supervisor cancelled".to_string());
                         return;
+                    }
+
+                    let _ = state_tx.send(SouthwardConnectionState::Connecting);
+
+                    let stream = match connect_tcp_metered_with_timeout(
+                        options.socket_addr,
+                        Arc::clone(&transport_meter),
+                        channel.connection_policy.connect_timeout_ms,
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let msg = format!("mc tcp connect failed: {e}");
+                            {
+                                let mut last = shared.last_error.lock().await;
+                                *last = Some(msg.clone());
+                            }
+                            shared.healthy.store(false, Ordering::Relaxed);
+                            // failure immediately visible + reconnect process visible
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(msg.clone()));
+                            match retry.on_failure() {
+                                RetryDecision::RetryAfter(delay) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                    tokio::select! {
+                                        _ = cancel_outer.cancelled() => return,
+                                        _ = tokio::time::sleep(delay) => {}
+                                    }
+                                    continue;
+                                }
+                                RetryDecision::Exhausted => return,
+                            }
+                        }
+                    };
+                    let _ = stream.inner_ref().set_nodelay(options.tcp_nodelay);
+
+                    let (session, ev) = create_with_stream(Arc::clone(&options), stream);
+                    shared.session.store(Some(session.clone()));
+                    let _ = shared.session_watch_tx.send(Some(session.clone()));
+
+                    let child = cancel_outer.child_token();
+                    let seen_active = Self::run_event_loop(
+                        Arc::clone(&shared),
+                        Arc::clone(&session),
+                        ev,
+                        child,
+                        state_tx.clone(),
+                    )
+                    .await;
+
+                    shared.session.store(None);
+                    shared.healthy.store(false, Ordering::Release);
+                    let _ = shared.session_watch_tx.send(None);
+
+                    if seen_active {
+                        retry.reset();
+                    }
+
+                    match retry.on_failure() {
+                        RetryDecision::RetryAfter(delay) => {
+                            tracing::warn!(
+                                delay_ms = delay.as_millis() as u64,
+                                "MC session reconnect retry"
+                            );
+                            tokio::select! {
+                                _ = cancel_outer.cancelled() => return,
+                                _ = tokio::time::sleep(delay) => {
+                                    let _ = state_tx.send(SouthwardConnectionState::Reconnecting);
+                                }
+                            }
+                        }
+                        RetryDecision::Exhausted => {
+                            let mut last = shared.last_error.lock().await;
+                            *last = Some("retry budget exhausted".to_string());
+                            let _ = state_tx.send(SouthwardConnectionState::Failed(
+                                "retry budget exhausted".to_string(),
+                            ));
+                            return;
+                        }
                     }
                 }
             }
-        }
-        .instrument(span));
+            .instrument(span),
+        );
 
         Ok(())
     }

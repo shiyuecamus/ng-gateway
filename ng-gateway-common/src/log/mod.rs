@@ -3,12 +3,15 @@
 //! This module defines the process-wide logging subsystem for the gateway:
 //! - Console + rolling file
 //! - Runtime log level control (global + per-channel with TTL)
+//! - Split file logging by driver type
 
 pub mod control;
 pub mod driver;
 pub mod host;
+pub mod split_file;
 
 pub use host::Logger;
+pub use split_file::{DriverFileRegistry, DriverTypeExtractorLayer, SplitFileLayer};
 
 use ng_gateway_error::NGResult;
 use ng_gateway_models::settings::Logging as LoggingSettings;

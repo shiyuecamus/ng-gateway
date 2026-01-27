@@ -112,6 +112,8 @@ pub struct SetGlobalLogLevelRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelLogOverrideView {
     pub level: LogLevel,
+    /// TTL in ms used when setting this override. Enables accurate countdown progress in UI.
+    pub ttl_ms: u64,
     pub expires_at_ms: i64,
 }
 
@@ -131,4 +133,27 @@ pub struct SetChannelLogLevelRequest {
     pub level: LogLevel,
     #[serde(default)]
     pub ttl_ms: Option<u64>,
+}
+
+/// Log file information for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFileInfo {
+    pub name: String,
+    pub size: u64,
+    pub modified_at: i64,
+}
+
+/// Response for listing log files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFilesListResponse {
+    pub files: Vec<LogFileInfo>,
+}
+
+/// Request for downloading log files.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadLogFilesRequest {
+    pub files: Vec<String>,
 }

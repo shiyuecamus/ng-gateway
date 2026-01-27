@@ -22,8 +22,9 @@ pub use crate::domain::{
         PreparedDeviceCommit, PreparedDevicePointsCommit, PreparedPointCommit,
     },
     logging::{
-        ChannelLogLevelView, ChannelLogOverrideView, GlobalLogLevelView, LogLevel,
-        SetChannelLogLevelRequest, SetGlobalLogLevelRequest, TtlRange,
+        ChannelLogLevelView, ChannelLogOverrideView, DownloadLogFilesRequest, GlobalLogLevelView,
+        LogFileInfo, LogFilesListResponse, LogLevel, SetChannelLogLevelRequest,
+        SetGlobalLogLevelRequest, TtlRange,
     },
     menu::{ChangeMenuStatus, MenuInfo, MenuMeta, MenuTree, NewMenu, NewMenuWithId, UpdateMenu},
     net_debug::{

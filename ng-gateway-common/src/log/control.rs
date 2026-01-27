@@ -32,6 +32,8 @@ pub struct LogOverrideLease {
     pub id: Uuid,
     pub scope: LogOverrideScope,
     pub level: LogLevel,
+    /// TTL in ms used when creating this lease. Exposed to API for countdown progress.
+    pub ttl_ms: u64,
     pub expires_at_ms: i64,
 }
 
@@ -197,6 +199,7 @@ impl LogOverrideManager {
             id,
             scope,
             level,
+            ttl_ms,
             expires_at_ms,
         };
         self.leases.insert(id, lease.clone());

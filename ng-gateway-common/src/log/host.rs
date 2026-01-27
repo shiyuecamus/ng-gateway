@@ -5,13 +5,16 @@
 //! - Console output
 //! - Rolling file output
 
-use crate::log::control;
+use super::{control, DriverFileRegistry, DriverTypeExtractorLayer, SplitFileLayer};
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::domain::prelude::LogLevel;
+use ng_gateway_models::{constants::LOG_DIR, domain::prelude::LogLevel};
 use ng_gateway_sdk::log::fields::CHANNEL_ID;
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
 };
 use tracing::{
     field::{Field, Visit},
@@ -19,7 +22,6 @@ use tracing::{
     subscriber::{set_global_default, Interest},
     Level, Metadata, Subscriber,
 };
-use tracing_appender::{non_blocking::WorkerGuard, rolling};
 use tracing_subscriber::{
     fmt::{self},
     layer::SubscriberExt,
@@ -147,14 +149,14 @@ where
 ///
 /// # Responsibilities
 /// - Hold the current base level (used by the dynamic filter)
-/// - Hold file appender guard (to flush logs on shutdown)
+/// - Hold split file layer registry (for listing log files)
 pub struct Logger {
     // Stored as u8 to keep the hot-path lock-free.
     //
     // Mapping uses `ng_gateway_models::domain::logging::LogLevel`:
     // - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
     level: Arc<AtomicU8>,
-    _file_guard: Option<WorkerGuard>,
+    split_file_registry: Option<Arc<DriverFileRegistry>>,
 }
 
 #[allow(unused)]
@@ -165,8 +167,13 @@ impl Logger {
         let level_u8: u8 = LogLevel::from(level).into();
         Self {
             level: Arc::new(AtomicU8::new(level_u8)),
-            _file_guard: None,
+            split_file_registry: None,
         }
+    }
+
+    /// Get the split file registry for listing log files.
+    pub fn split_file_registry(&self) -> Option<Arc<DriverFileRegistry>> {
+        self.split_file_registry.clone()
     }
 
     /// Set the baseline (non-lease) log level.
@@ -192,10 +199,6 @@ impl Logger {
     /// - This must only be called once per process.
     /// - `log::control::init(...)` must have been called before this, so overrides are available.
     pub fn initialize(&mut self) -> NGResult<()> {
-        let file_appender = rolling::daily("logs", "ng.log");
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        self._file_guard = Some(_guard);
-
         if let Some(rt) = control::global() {
             let base_u8 = self.level.load(Ordering::Relaxed);
             rt.overrides().set_base_level(LogLevel::from(base_u8));
@@ -203,6 +206,7 @@ impl Logger {
 
         let filter = LogFilter::new(Arc::clone(&self.level));
 
+        // Console layer: output all logs to console
         let console_layer = {
             #[cfg(debug_assertions)]
             let mut layer = fmt::layer().pretty().with_writer(std::io::stdout);
@@ -221,32 +225,21 @@ impl Logger {
             layer.with_filter(filter.clone())
         };
 
-        let file_layer = {
-            #[cfg(debug_assertions)]
-            let mut layer = fmt::layer()
-                .pretty()
-                .with_writer(non_blocking)
-                .with_ansi(false);
-            #[cfg(not(debug_assertions))]
-            let mut layer = fmt::layer().with_writer(non_blocking).with_ansi(false);
-
-            #[cfg(debug_assertions)]
-            {
-                layer = layer.with_file(true).with_line_number(true);
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                layer = layer.with_file(false).with_line_number(false);
-            }
-
-            layer.with_filter(filter.clone())
-        };
+        // Split file layer: route logs to different files based on driver_type
+        let log_dir = PathBuf::from(LOG_DIR);
+        let split_file_layer = SplitFileLayer::new(log_dir);
+        let registry = split_file_layer.registry();
+        self.split_file_registry = Some(Arc::clone(&registry));
 
         let subscriber = Registry::default()
             // Install a tiny span layer to cache `channel_id` for the filter.
             .with(ChannelIdLayer)
+            // Install driver_type extractor layer to cache driver_type in spans.
+            .with(DriverTypeExtractorLayer)
+            // Console layer: all logs go to console
             .with(console_layer)
-            .with(file_layer);
+            // Split file layer: logs are routed to host.log or {driver_type}.log
+            .with(split_file_layer.with_filter(filter.clone()));
 
         set_global_default(subscriber).map_err(|_| NGError::from("Failed to set logger"))?;
         Ok(())

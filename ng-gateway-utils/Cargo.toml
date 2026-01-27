@@ -30,6 +30,14 @@ workspace = true
 [dependencies.serde_json]
 workspace = true
 
+# Bytes (used for streaming downloads)
+[dependencies.bytes]
+workspace = true
+
+# ZIP (used by streaming log downloads)
+[dependencies.zip]
+version = "6.0"
+
 # Date and Time
 [dependencies.chrono]
 workspace = true

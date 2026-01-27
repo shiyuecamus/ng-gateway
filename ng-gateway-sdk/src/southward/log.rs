@@ -47,6 +47,19 @@ pub mod fields {
     pub const CHANNEL_ID: &str = "channel_id";
     /// Synthetic field key used by `tracing` for event body.
     pub const MESSAGE: &str = "message";
+    /// Field key that marks a log as originating from a driver.
+    ///
+    /// Used by the host to apply driver-specific routing and processing.
+    pub const SOURCE: &str = "source";
+    /// The `SOURCE` value used by the driver->host bridge.
+    pub const SOURCE_DRIVER: &str = "driver";
+    /// Field key for driver type attribution (e.g. "modbus", "opcua", "s7").
+    pub const DRIVER_TYPE: &str = "driver_type";
+
+    /// Stable tracing target for driver logs re-emitted by the host.
+    pub const TARGET_DRIVER: &str = "driver";
+    /// Stable span name used by the host-side driver ingest bridge.
+    pub const SPAN_DRIVER_LOG: &str = "driver-log";
 
     /// Extract an `i32` from a JSON map field.
     #[inline]

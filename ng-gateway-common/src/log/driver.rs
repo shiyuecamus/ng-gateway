@@ -9,10 +9,10 @@
 //! they must go through the same console/file pipeline as host logs.
 
 use crate::log::control;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use ng_gateway_sdk::log::{fields as log_fields, LogSinkV1, LOG_SINK_ABI_V1};
 use once_cell::sync::OnceCell;
-use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
@@ -48,14 +48,22 @@ impl HostLogSinkHandle {
     /// This enables the loader to register the log sink **before** probing metadata,
     /// while still ending up with a correct `driver_type` label for re-emitted events.
     pub fn set_driver_type(&self, driver_type: String) {
-        *self.ctx.driver_type.write() = driver_type;
+        // Update label atomically and clear cached spans so the next event rebuilds spans
+        // with the updated `driver_type` field.
+        self.ctx.driver_type.store(Arc::new(driver_type));
+        self.ctx.span_cache.clear();
     }
 }
 
 #[derive(Clone)]
 struct HostSinkContext {
     driver_id: i32,
-    driver_type: Arc<RwLock<String>>,
+    /// Driver type label stored in an `ArcSwap<String>` for lock-free reads.
+    ///
+    /// We intentionally store `String` (Sized) rather than `str` to keep `arc-swap`
+    /// trait bounds simple and portable.
+    driver_type: Arc<ArcSwap<String>>,
+    /// Cached spans keyed by channel id (and a sentinel for no-channel events).
     span_cache: Arc<DashMap<i32, Span>>,
 }
 
@@ -111,7 +119,7 @@ pub fn create_sink(driver_id: i32, driver_type: String) -> HostLogSinkHandle {
     HostLogSinkHandle {
         ctx: Box::new(HostSinkContext {
             driver_id,
-            driver_type: Arc::new(RwLock::new(driver_type)),
+            driver_type: Arc::new(ArcSwap::from(Arc::new(driver_type))),
             span_cache: Arc::new(DashMap::new()),
         }),
     }
@@ -230,75 +238,87 @@ fn reemit_as_tracing(ctx: &HostSinkContext, ev: HostWireEvent) {
             .or_else(|| log_fields::map_i32(&s.fields, log_fields::CHANNEL_ID))
     });
 
-    if let Some(ch) = channel_id {
-        // Avoid allocating a new span per log event (hot path).
-        let span = ctx
-            .span_cache
-            .get(&ch)
-            .map(|s| s.clone())
-            .unwrap_or_else(|| {
-                let span =
-                    tracing::info_span!("driver-log", channel_id = ch, driver_id = ctx.driver_id);
-                ctx.span_cache.insert(ch, span.clone());
-                span
-            });
-        let _enter = span.enter();
-        emit_driver_event(level, &ev, ctx);
-    } else {
-        emit_driver_event(level, &ev, ctx);
-    }
+    // Use a sentinel key to avoid span allocation for no-channel events.
+    // Channel ids are expected to be positive; this sentinel is reserved for "no channel".
+    const NO_CHANNEL_KEY: i32 = i32::MIN;
+    let key = channel_id.unwrap_or(NO_CHANNEL_KEY);
+
+    // Avoid allocating a new span per log event (hot path).
+    let span = ctx
+        .span_cache
+        .get(&key)
+        .map(|s| s.clone())
+        .unwrap_or_else(|| {
+            let dt = ctx.driver_type.load();
+            let dt_str: &str = dt.as_str();
+
+            let span = if key == NO_CHANNEL_KEY {
+                tracing::info_span!(
+                    log_fields::SPAN_DRIVER_LOG,
+                    source = log_fields::SOURCE_DRIVER,
+                    driver_id = ctx.driver_id,
+                    driver_type = dt_str
+                )
+            } else {
+                tracing::info_span!(
+                    log_fields::SPAN_DRIVER_LOG,
+                    source = log_fields::SOURCE_DRIVER,
+                    driver_id = ctx.driver_id,
+                    driver_type = dt_str,
+                    channel_id = key
+                )
+            };
+            ctx.span_cache.insert(key, span.clone());
+            span
+        });
+    let _enter = span.enter();
+    emit_driver_event(level, &ev, ctx);
 }
 
 fn emit_driver_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostSinkContext) {
     // Keep a stable callsite target and attach original driver target as a field.
     // Avoid pre-serializing JSON fields on the hot path; formatting only happens if enabled.
-    let driver_type = ctx.driver_type.read();
     match level {
         tracing::Level::ERROR => tracing::error!(
-            target: "driver",
-            source = "driver",
+            target: log_fields::TARGET_DRIVER,
+            source = log_fields::SOURCE_DRIVER,
             driver_id = ctx.driver_id,
-            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
             driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::WARN => tracing::warn!(
-            target: "driver",
-            source = "driver",
+            target: log_fields::TARGET_DRIVER,
+            source = log_fields::SOURCE_DRIVER,
             driver_id = ctx.driver_id,
-            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
             driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::INFO => tracing::info!(
-            target: "driver",
-            source = "driver",
+            target: log_fields::TARGET_DRIVER,
+            source = log_fields::SOURCE_DRIVER,
             driver_id = ctx.driver_id,
-            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
             driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::DEBUG => tracing::debug!(
-            target: "driver",
-            source = "driver",
+            target: log_fields::TARGET_DRIVER,
+            source = log_fields::SOURCE_DRIVER,
             driver_id = ctx.driver_id,
-            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
             driver_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::TRACE => tracing::trace!(
-            target: "driver",
-            source = "driver",
+            target: log_fields::TARGET_DRIVER,
+            source = log_fields::SOURCE_DRIVER,
             driver_id = ctx.driver_id,
-            driver_type = %driver_type.as_str(),
             driver_target = %ev.target,
             driver_fields = ?ev.fields,
             "{}",

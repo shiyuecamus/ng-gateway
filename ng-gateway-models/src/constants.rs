@@ -34,6 +34,7 @@ pub const BEARER_TOKEN: &str = "Bearer";
 pub const SYSTEM_ADMIN_ROLE_CODE: &str = "SYSTEM_ADMIN";
 pub const SYSTEM_ADMIN_ROLE_NAME: &str = "系统管理员";
 
+pub const LOG_DIR: &str = "./logs";
 pub const DATA_DIR: &str = "./data";
 pub const CERT_DIR: &str = "./certs";
 pub const PKI_DIR: &str = "./pki";

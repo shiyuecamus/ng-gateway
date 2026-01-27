@@ -63,6 +63,8 @@ workspace = true
 workspace = true
 [dependencies.dashmap]
 workspace = true
+[dependencies.arc-swap]
+workspace = true
 
 # ORM
 [dependencies.sea-orm]

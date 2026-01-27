@@ -540,6 +540,7 @@ async fn build_channel_log_level_view(id: i32) -> Result<ChannelLogLevelView, We
         effective,
         r#override: lease.map(|l| ChannelLogOverrideView {
             level: l.level,
+            ttl_ms: l.ttl_ms,
             expires_at_ms: l.expires_at_ms,
         }),
         ttl: TtlRange {

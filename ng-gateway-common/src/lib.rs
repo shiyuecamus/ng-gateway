@@ -19,7 +19,7 @@ pub use ng_gateway_error::{NGError, NGResult};
 // Legacy app context (keeping for backward compatibility)
 use log::Logger;
 use ng_gateway_models::constants::{
-    BUILTIN_DIR, CERT_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR, PKI_DIR, PLUGIN_DIR,
+    BUILTIN_DIR, CERT_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR, LOG_DIR, PKI_DIR, PLUGIN_DIR,
 };
 use ng_gateway_models::initializer::BuiltinSynchronizer;
 use ng_gateway_models::{
@@ -296,6 +296,11 @@ impl NGAppContext {
         self.logger.get_level()
     }
 
+    #[inline]
+    pub fn logger(&self) -> &Logger {
+        &self.logger
+    }
+
     /// Starts the gateway and listens for shutdown signals.
     ///
     /// It runs the gateway task asynchronously and listens for Ctrl+C signals
@@ -428,6 +433,8 @@ fn apply_runtime_dir(runtime_dir: &str) -> NGResult<()> {
 fn ensure_runtime_directories() -> NGResult<()> {
     // Compose directory list
     let dirs = [
+        // Logs directory (used by tracing file appenders).
+        Path::new(LOG_DIR).to_path_buf(),
         // SQLite data directory is always a relative path under the runtime root.
         // `runtime_dir` is applied by `apply_runtime_dir()` before we reach here.
         Path::new(DATA_DIR).to_path_buf(),
