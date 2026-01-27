@@ -79,8 +79,8 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing driver module RBAC rules...");
 
-    perm_checker
-        .register(
+    let rules = vec![
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/install"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -89,11 +89,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Create,
                 )?)
                 .or(has_scope("driver:create")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::DELETE,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -102,61 +99,43 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("driver:delete")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/probe"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Driver, Operation::Read)?)
                 .or(has_scope("driver:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/list"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Driver, Operation::Read)?)
                 .or(has_scope("driver:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/page"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Driver, Operation::Read)?)
                 .or(has_scope("driver:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/detail/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Driver, Operation::Read)?)
                 .or(has_scope("driver:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/metadata/{{driver_type}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Driver, Operation::Read)?)
                 .or(has_scope("driver:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}/change-status"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -165,29 +144,26 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Write,
                 )?)
                 .or(has_scope("driver:write")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/referenced/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Driver, Operation::Read)?)
                 .or(has_scope("driver:read")?),
-        )
-        .await?;
-
-    // Template download (read)
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/template/{{id}}/{{entity}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Driver, Operation::Read)?)
                 .or(has_scope("driver:read")?),
-        )
-        .await?;
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Driver module RBAC rules initialized successfully");
     Ok(())

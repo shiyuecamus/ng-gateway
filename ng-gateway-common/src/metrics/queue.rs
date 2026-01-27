@@ -206,7 +206,16 @@ impl QueueMetricsHub {
         // Use DashMap entry API to ensure only one observer is created per queue name,
         // even under concurrent registration.
         match self.queues.entry(queue_name.clone()) {
-            Entry::Occupied(existing) => Ok(Arc::clone(existing.get())),
+            Entry::Occupied(existing) => {
+                // Allow capacity gauge to reflect runtime tuning (queue rebuild).
+                if let Ok(cap_gauge) = self
+                    .cap_vec
+                    .get_metric_with_label_values(&[queue_name.as_str()])
+                {
+                    cap_gauge.set(capacity as i64);
+                }
+                Ok(Arc::clone(existing.get()))
+            }
             Entry::Vacant(vacant) => {
                 // Resolve child metrics once to avoid label lookups on hot paths.
                 let depth = self

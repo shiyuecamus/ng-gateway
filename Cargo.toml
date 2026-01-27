@@ -108,6 +108,10 @@ default-features = false
 features = ["toml"]
 version = "0.15"
 
+# Toml
+[workspace.dependencies.toml_edit]
+version = "0.24"
+
 # Serialization Support
 [workspace.dependencies.bytes]
 features = ["serde"]

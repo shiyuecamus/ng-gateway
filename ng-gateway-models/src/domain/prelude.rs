@@ -21,11 +21,6 @@ pub use crate::domain::{
         CommitResult, DeviceGroup, DeviceRef, ImportPreview, PreparedActionCommit,
         PreparedDeviceCommit, PreparedDevicePointsCommit, PreparedPointCommit,
     },
-    logging::{
-        ChannelLogLevelView, ChannelLogOverrideView, DownloadLogFilesRequest, GlobalLogLevelView,
-        LogFileInfo, LogFilesListResponse, LogLevel, SetChannelLogLevelRequest,
-        SetGlobalLogLevelRequest, TtlRange,
-    },
     menu::{ChangeMenuStatus, MenuInfo, MenuMeta, MenuTree, NewMenu, NewMenuWithId, UpdateMenu},
     net_debug::{
         HttpMethod, HttpRequest, HttpResponse, PingMode, PingRequest, PingResponse, PingSample,
@@ -36,6 +31,21 @@ pub use crate::domain::{
     relation::{NewRelation, RelationDelete, RelationInfo, RelationQuery, UpdateRelation},
     role::{
         ChangeRoleStatus, NewRole, NewRoleWithId, RoleInfo, RolePageParams, SimpleRole, UpdateRole,
+    },
+    system_settings::{
+        ApplySystemSettingsResult, ChannelLogLevelView, ChannelLogOverrideView,
+        CleanupLogFilesRequest, CleanupLogFilesResponse, CollectorSettingsView,
+        DownloadLogFilesRequest, GlobalLogLevelView, LogFileInfo, LogFilesListResponse, LogLevel,
+        LoggingCleanupSettingsView, LoggingFileOutputSettingsView,
+        LoggingFileRetentionSettingsView, LoggingFileRotationSettingsView, LoggingOutputFormat,
+        LoggingOutputSettingsView, LoggingRotationMode, LoggingTimeRotation, NorthwardSettingsView,
+        PatchCollectorSettingsRequest, PatchLoggingCleanupSettingsRequest,
+        PatchLoggingFileOutputRequest, PatchLoggingFileRetentionRequest,
+        PatchLoggingFileRotationRequest, PatchLoggingOutputSettingsRequest,
+        PatchNorthwardSettingsRequest, PatchRetryPolicyRequest, PatchSouthwardSettingsRequest,
+        RetryPolicySettingsView, RuntimeSettingKey, SetChannelLogLevelRequest,
+        SetGlobalLogLevelRequest, SettingField, SettingValueSource, SouthwardSettingsView,
+        SystemSettingsDomain, SystemSettingsImpact, SystemSettingsOverviewView, TtlRange,
     },
     user::{
         ChangeUserPassword, ChangeUserPasswordWithId, ChangeUserStatus, NewUser, NewUserWithId,

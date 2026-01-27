@@ -78,66 +78,48 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing user module RBAC rules...");
 
-    perm_checker
-        .register(
+    let rules: Vec<(Method, String, Box<dyn PermRule>)> = vec![
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/list"),
-            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?,
-        )
-        .await?;
-
-    perm_checker
-        .register(
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/page"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::User, Operation::Read)?)
                 .or(has_scope("user:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/detail/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::User, Operation::Read)?)
                 .or(has_scope("user:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::User, Operation::Create)?)
                 .or(has_scope("user:create")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::User, Operation::Write)?)
                 .or(has_scope("user:write")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::DELETE,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::User, Operation::Delete)?)
                 .or(has_scope("user:delete")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/reset-password"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -146,18 +128,19 @@ pub(crate) async fn init_rbac_rules(
                     Operation::ResetPassword,
                 )?)
                 .or(has_scope("user:reset-password")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/change-status"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::User, Operation::Write)?)
                 .or(has_scope("user:write")?),
-        )
-        .await?;
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("User module RBAC rules initialized successfully");
     Ok(())
@@ -178,7 +161,11 @@ pub(crate) async fn init_rbac_rules(
 /// - Bad Request (400): When user ID is missing
 /// - Not Found (404): When user is not found
 async fn user_info(ctx: RequestContext) -> WebResult<WebResponse<UserInfoWithRoles>> {
-    let user_id = ctx.grant.unwrap().user_id.parse::<i32>().unwrap();
+    let grant = ctx.grant.ok_or(WebError::Unauthorized)?;
+    let user_id: i32 = grant
+        .user_id
+        .parse()
+        .map_err(|_| WebError::BadRequest("Invalid user id".to_string()))?;
     let userinfo = UserRepository::find_user_info(user_id)
         .await?
         .ok_or(WebError::NotFound(EntityType::User.to_string()))?;
@@ -347,13 +334,21 @@ async fn delete(params: Path<PathId>) -> WebResult<WebResponse<bool>> {
 /// - Not Found (404): When user is not found
 async fn change_password(req: Json<ChangeUserPassword>) -> WebResult<WebResponse<bool>> {
     let req = req.into_inner();
+    let old_password = req
+        .old_password
+        .as_deref()
+        .ok_or(WebError::BadRequest("old_password is required".to_string()))?;
+    let new_password = req
+        .new_password
+        .as_deref()
+        .ok_or(WebError::BadRequest("new_password is required".to_string()))?;
     let user = match UserRepository::find_by_id(req.id).await? {
         Some(user) => user,
         None => {
             return Err(WebError::NotFound(EntityType::User.to_string()));
         }
     };
-    if !hash::bcrypt_check(req.old_password.as_deref().unwrap(), &user.password) {
+    if !hash::bcrypt_check(old_password, &user.password) {
         return Err(WebError::BadRequest(
             "Old password is incorrect".to_string(),
         ));
@@ -361,7 +356,7 @@ async fn change_password(req: Json<ChangeUserPassword>) -> WebResult<WebResponse
     UserRepository::update::<DatabaseConnection>(
         ChangeUserPasswordWithId {
             id: req.id,
-            password: hash::bcrypt_hash(req.new_password.as_deref().unwrap()),
+            password: hash::bcrypt_hash(new_password),
         }
         .into_active_model(),
         None,
@@ -386,13 +381,17 @@ async fn change_password(req: Json<ChangeUserPassword>) -> WebResult<WebResponse
 /// - Not Found (404): When user is not found
 async fn reset_password(req: Json<ResetUserPassword>) -> WebResult<WebResponse<bool>> {
     let req = req.into_inner();
+    let new_password = req
+        .new_password
+        .as_deref()
+        .ok_or(WebError::BadRequest("new_password is required".to_string()))?;
     if !UserRepository::exists_by_id(req.id).await? {
         return Err(WebError::NotFound(EntityType::User.to_string()));
     }
     UserRepository::update::<DatabaseConnection>(
         ChangeUserPasswordWithId {
             id: req.id,
-            password: hash::bcrypt_hash(req.new_password.as_deref().unwrap()),
+            password: hash::bcrypt_hash(new_password),
         }
         .into_active_model(),
         None,

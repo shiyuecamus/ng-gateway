@@ -5,10 +5,14 @@
 //! - Console output
 //! - Rolling file output
 
-use super::{control, DriverFileRegistry, DriverTypeExtractorLayer, SplitFileLayer};
+use super::{
+    control,
+    span_ext::{ChannelIdExt, ChannelIdLayer},
+    DriverFileRegistry, DriverTypeExtractorLayer, SplitFileLayer,
+};
+use arc_swap::ArcSwapOption;
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::{constants::LOG_DIR, domain::prelude::LogLevel};
-use ng_gateway_sdk::log::fields::CHANNEL_ID;
+use ng_gateway_models::{domain::prelude::LogLevel, settings::LoggingOutput};
 use std::{
     path::PathBuf,
     sync::{
@@ -17,78 +21,19 @@ use std::{
     },
 };
 use tracing::{
-    field::{Field, Visit},
-    span::{Attributes, Id, Record},
     subscriber::{set_global_default, Interest},
     Level, Metadata, Subscriber,
 };
 use tracing_subscriber::{
+    filter::Filtered,
     fmt::{self},
-    layer::SubscriberExt,
-    layer::{Context as FilterContext, Filter},
+    layer::{Context as FilterContext, Filter, SubscriberExt},
     registry::LookupSpan,
-    Layer, Registry,
+    reload, Layer, Registry,
 };
 
-/// Span extension: cached `channel_id` for per-channel filtering.
-///
-/// This is intentionally tiny (single i32) to keep hot-path overhead minimal.
-#[derive(Debug, Clone, Copy, Default)]
-struct ChannelIdExt(Option<i32>);
-
-/// A tiny `tracing` layer that records `channel_id` from span fields into extensions.
-///
-/// This enables per-channel dynamic log filtering without requiring heavy JSON field caching.
-#[derive(Default)]
-struct ChannelIdLayer;
-
-impl<S> Layer<S> for ChannelIdLayer
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: FilterContext<'_, S>) {
-        let Some(span) = ctx.span(id) else { return };
-        let mut v = ChannelIdVisitor::default();
-        attrs.record(&mut v);
-        span.extensions_mut().insert(ChannelIdExt(v.channel_id));
-    }
-
-    fn on_record(&self, id: &Id, values: &Record<'_>, ctx: FilterContext<'_, S>) {
-        let Some(span) = ctx.span(id) else { return };
-        let mut exts = span.extensions_mut();
-        let mut v = ChannelIdVisitor::default();
-        values.record(&mut v);
-        if v.channel_id.is_none() {
-            return;
-        }
-        if let Some(ext) = exts.get_mut::<ChannelIdExt>() {
-            ext.0 = v.channel_id;
-        } else {
-            exts.insert(ChannelIdExt(v.channel_id));
-        }
-    }
-}
-
-#[derive(Default)]
-struct ChannelIdVisitor {
-    channel_id: Option<i32>,
-}
-
-impl Visit for ChannelIdVisitor {
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        if field.name() == CHANNEL_ID {
-            self.channel_id = Some(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
-        }
-    }
-
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        if field.name() == CHANNEL_ID {
-            self.channel_id = Some((value.min(i32::MAX as u64)) as i32);
-        }
-    }
-
-    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
-}
+type ReloadableFileLayer = Option<Filtered<SplitFileLayer, LogFilter, Registry>>;
+type FileLayerHandle = reload::Handle<ReloadableFileLayer, Registry>;
 
 /// Dynamic log filter used by all layers (console/file/realtime).
 ///
@@ -153,10 +98,12 @@ where
 pub struct Logger {
     // Stored as u8 to keep the hot-path lock-free.
     //
-    // Mapping uses `ng_gateway_models::domain::logging::LogLevel`:
+    // Mapping uses `ng_gateway_models::domain::system_settings::LogLevel`:
     // - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
     level: Arc<AtomicU8>,
-    split_file_registry: Option<Arc<DriverFileRegistry>>,
+    split_file_registry: ArcSwapOption<DriverFileRegistry>,
+    file_layer_handle: Option<FileLayerHandle>,
+    filter: Option<LogFilter>,
 }
 
 #[allow(unused)]
@@ -167,13 +114,15 @@ impl Logger {
         let level_u8: u8 = LogLevel::from(level).into();
         Self {
             level: Arc::new(AtomicU8::new(level_u8)),
-            split_file_registry: None,
+            split_file_registry: ArcSwapOption::empty(),
+            file_layer_handle: None,
+            filter: None,
         }
     }
 
     /// Get the split file registry for listing log files.
     pub fn split_file_registry(&self) -> Option<Arc<DriverFileRegistry>> {
-        self.split_file_registry.clone()
+        self.split_file_registry.load_full()
     }
 
     /// Set the baseline (non-lease) log level.
@@ -198,13 +147,14 @@ impl Logger {
     /// # Important
     /// - This must only be called once per process.
     /// - `log::control::init(...)` must have been called before this, so overrides are available.
-    pub fn initialize(&mut self) -> NGResult<()> {
+    pub fn initialize(&mut self, output: &LoggingOutput) -> NGResult<()> {
         if let Some(rt) = control::global() {
             let base_u8 = self.level.load(Ordering::Relaxed);
             rt.overrides().set_base_level(LogLevel::from(base_u8));
         }
 
         let filter = LogFilter::new(Arc::clone(&self.level));
+        self.filter = Some(filter.clone());
 
         // Console layer: output all logs to console
         let console_layer = {
@@ -225,23 +175,72 @@ impl Logger {
             layer.with_filter(filter.clone())
         };
 
-        // Split file layer: route logs to different files based on driver_type
-        let log_dir = PathBuf::from(LOG_DIR);
-        let split_file_layer = SplitFileLayer::new(log_dir);
-        let registry = split_file_layer.registry();
-        self.split_file_registry = Some(Arc::clone(&registry));
+        let initial_file_layer = if output.file.enabled {
+            let log_dir = PathBuf::from(output.file.dir.as_str());
+            let mut split = SplitFileLayer::new(log_dir, output.file.rotation.clone());
+            split.set_format(output.format.clone());
+            split.set_include_span_fields(output.include_span_fields);
+            let registry = split.registry();
+            self.split_file_registry.store(Some(registry));
+            Some(split.with_filter(filter.clone()))
+        } else {
+            self.split_file_registry.store(None);
+            None
+        };
 
+        let (file_layer, file_handle) = reload::Layer::new(initial_file_layer);
+        self.file_layer_handle = Some(file_handle);
+
+        // Important: install the reload layer first so it binds to `Registry`.
+        // Subsequent `.with(...)` calls wrap it, and the reload layer does not need to implement
+        // `Layer<Layered<...>>`.
         let subscriber = Registry::default()
+            // Split file layer: logs are routed to host.log or {driver_type}.log
+            .with(file_layer)
             // Install a tiny span layer to cache `channel_id` for the filter.
             .with(ChannelIdLayer)
             // Install driver_type extractor layer to cache driver_type in spans.
             .with(DriverTypeExtractorLayer)
             // Console layer: all logs go to console
-            .with(console_layer)
-            // Split file layer: logs are routed to host.log or {driver_type}.log
-            .with(split_file_layer.with_filter(filter.clone()));
+            .with(console_layer);
 
         set_global_default(subscriber).map_err(|_| NGError::from("Failed to set logger"))?;
+        Ok(())
+    }
+
+    /// Reload the logging output pipeline (best-effort).
+    ///
+    /// # Semantics
+    /// - Can toggle file output on/off
+    /// - Can change file dir
+    /// - Can switch text/json and include_span_fields
+    ///
+    /// # Note
+    /// This does **not** rebuild the global subscriber; it reloads the file layer in-place.
+    pub fn reload_output(&self, output: &LoggingOutput) -> NGResult<()> {
+        let Some(handle) = self.file_layer_handle.as_ref() else {
+            return Err(NGError::from("Logger runtime is not initialized"));
+        };
+        let Some(filter) = self.filter.as_ref() else {
+            return Err(NGError::from("Logger runtime is not initialized"));
+        };
+
+        let next_layer = if output.file.enabled {
+            let log_dir = PathBuf::from(output.file.dir.as_str());
+            let mut split = SplitFileLayer::new(log_dir, output.file.rotation.clone());
+            split.set_format(output.format.clone());
+            split.set_include_span_fields(output.include_span_fields);
+            let registry = split.registry();
+            self.split_file_registry.store(Some(registry));
+            Some(split.with_filter(filter.clone()))
+        } else {
+            self.split_file_registry.store(None);
+            None
+        };
+
+        handle
+            .reload(next_layer)
+            .map_err(|e| NGError::from(format!("Failed to reload logging output: {e}")))?;
         Ok(())
     }
 }

@@ -161,6 +161,18 @@ impl NGMetricsHub {
         self.northward.set_apps_active(value);
     }
 
+    /// Increment collector retries counter (timeout-triggered).
+    #[inline]
+    pub fn inc_collector_retries_timeout(&self) {
+        self.collector.inc_retries_timeout();
+    }
+
+    /// Increment collector retries counter (error-triggered).
+    #[inline]
+    pub fn inc_collector_retries_error(&self) {
+        self.collector.inc_retries_error();
+    }
+
     /// Increment events received counter for northward manager.
     #[inline]
     pub fn inc_northward_events_received(&self) {

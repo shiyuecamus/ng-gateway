@@ -8,6 +8,7 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
+use crate::{middleware::RequestContext, rbac::has_any_role};
 use actix_web::{http::Method, web};
 use actix_web_validator::Json;
 use futures::StreamExt;
@@ -19,6 +20,7 @@ use ng_gateway_models::{
         HttpMethod, HttpRequest, HttpResponse, PingMode, PingRequest, PingResponse, PingSample,
         TcpConnectRequest, TcpConnectResponse,
     },
+    rbac::PermRule,
     web::WebResponse,
     PermChecker,
 };
@@ -29,8 +31,6 @@ use tokio::{
 };
 use tracing::{info, instrument};
 use url::Url;
-
-use crate::{middleware::RequestContext, rbac::has_any_role};
 
 pub(super) const ROUTER_PREFIX: &str = "/net-debug";
 
@@ -50,14 +50,26 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing net-debug module RBAC rules...");
 
-    for (method, path) in [
-        (Method::POST, format!("{router_prefix}{ROUTER_PREFIX}/ping")),
-        (Method::POST, format!("{router_prefix}{ROUTER_PREFIX}/tcp")),
-        (Method::POST, format!("{router_prefix}{ROUTER_PREFIX}/http")),
-    ] {
-        perm_checker
-            .register(method, path, has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?)
-            .await?;
+    let rules: [(Method, String, Box<dyn PermRule>); 3] = [
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/ping"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/tcp"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/http"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
     }
 
     info!("Net-debug module RBAC rules initialized successfully");
@@ -99,10 +111,10 @@ async fn ping(
     let mut rtts: Vec<u64> = Vec::new();
     let mut note: Option<String> = None;
 
-    if target_ip.is_none() {
-        return Err(WebError::BadRequest("Unable to resolve host".to_string()));
-    }
-    let ip = target_ip.unwrap();
+    let ip = match target_ip {
+        Some(ip) => ip,
+        None => return Err(WebError::BadRequest("Unable to resolve host".to_string())),
+    };
 
     for seq in 0..count {
         let start = Instant::now();
@@ -180,14 +192,13 @@ async fn ping(
         ((sent - received) as f64) * 100.0 / (sent as f64)
     };
 
-    let (min_ms, max_ms, avg_ms) = if rtts.is_empty() {
-        (None, None, None)
-    } else {
-        let min = *rtts.iter().min().unwrap();
-        let max = *rtts.iter().max().unwrap();
-        let sum: u64 = rtts.iter().sum();
-        let avg = sum / (rtts.len() as u64);
-        (Some(min), Some(max), Some(avg))
+    let (min_ms, max_ms, avg_ms) = match (rtts.iter().copied().min(), rtts.iter().copied().max()) {
+        (Some(min), Some(max)) => {
+            let sum: u64 = rtts.iter().sum();
+            let avg = sum / (rtts.len() as u64);
+            (Some(min), Some(max), Some(avg))
+        }
+        _ => (None, None, None),
     };
 
     Ok(WebResponse::ok(PingResponse {

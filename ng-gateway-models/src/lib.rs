@@ -17,8 +17,8 @@ use crate::{
     casbin::{CasbinCmd, CasbinResult},
     core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
-        Claims, NewAction, NewApp, NewAppSub, NewChannel, NewDevice, NewPoint, UpdateAction,
-        UpdateApp, UpdateAppSub, UpdateChannel, UpdateDevice, UpdatePoint,
+        Claims, NewAction, NewApp, NewAppSub, NewChannel, NewDevice, NewPoint, RuntimeSettingKey,
+        UpdateAction, UpdateApp, UpdateAppSub, UpdateChannel, UpdateDevice, UpdatePoint,
     },
     entities::prelude::{AppModel, ChannelModel, DeviceModel},
     enums::common::Status,
@@ -326,6 +326,25 @@ pub trait Gateway:
 
     /// Get the realtime monitor hub for accessing device connection states
     fn realtime_monitor_hub(&self) -> Arc<dyn RealtimeMonitorHub>;
+
+    /// Apply runtime tuning changes for collector-related settings.
+    ///
+    /// # Notes
+    /// - Settings are already mutated/persisted before this hook is called.
+    /// - Implementations should be best-effort and avoid blocking the caller for long periods.
+    async fn apply_collector_runtime_tuning(
+        &self,
+        changed: &[RuntimeSettingKey],
+        max_concurrent_collections: usize,
+        outbound_queue_capacity: usize,
+    ) -> NGResult<()>;
+
+    /// Apply runtime tuning changes for northward-related settings.
+    async fn apply_northward_runtime_tuning(
+        &self,
+        changed: &[RuntimeSettingKey],
+        queue_capacity: usize,
+    ) -> NGResult<()>;
 }
 
 /// Trait for accessing southward channel connection states

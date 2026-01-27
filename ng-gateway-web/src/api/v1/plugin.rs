@@ -60,8 +60,8 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing northward plugin module RBAC rules...");
 
-    perm_checker
-        .register(
+    let rules = vec![
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/install"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -70,11 +70,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Create,
                 )?)
                 .or(has_scope("northward-plugin:create")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::DELETE,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -83,68 +80,54 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("northward-plugin:delete")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/probe"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Plugin, Operation::Read)?)
                 .or(has_scope("northward-plugin:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/list"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Plugin, Operation::Read)?)
                 .or(has_scope("northward-plugin:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/page"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Plugin, Operation::Read)?)
                 .or(has_scope("northward-plugin:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/detail/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Plugin, Operation::Read)?)
                 .or(has_scope("northward-plugin:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/metadata/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Plugin, Operation::Read)?)
                 .or(has_scope("northward-plugin:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/referenced/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Plugin, Operation::Read)?)
                 .or(has_scope("northward-plugin:read")?),
-        )
-        .await?;
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Northward plugin module RBAC rules initialized successfully");
     Ok(())

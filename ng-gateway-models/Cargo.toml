@@ -59,6 +59,10 @@ workspace = true
 [dependencies.sysinfo]
 workspace = true
 
+# Lock-free Arc swap (used by runtime-tunable settings wrappers)
+[dependencies.arc-swap]
+workspace = true
+
 # Once Cell
 [dependencies.once_cell]
 workspace = true

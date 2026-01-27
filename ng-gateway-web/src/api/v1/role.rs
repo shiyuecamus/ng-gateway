@@ -72,73 +72,59 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing role module RBAC rules...");
 
-    perm_checker
-        .register(
+    let rules: Vec<(Method, String, Box<dyn PermRule>)> = vec![
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/list"),
-            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?,
-        )
-        .await?;
-
-    perm_checker
-        .register(
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/page"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Role, Operation::Read)?)
                 .or(has_scope("role:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/detail/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Role, Operation::Read)?)
                 .or(has_scope("role:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Role, Operation::Create)?)
                 .or(has_scope("role:create")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Role, Operation::Write)?)
                 .or(has_scope("role:write")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::DELETE,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Role, Operation::Delete)?)
                 .or(has_scope("role:delete")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/change-status"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Role, Operation::Write)?)
                 .or(has_scope("role:write")?),
-        )
-        .await?;
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Role module RBAC rules initialized successfully");
     Ok(())

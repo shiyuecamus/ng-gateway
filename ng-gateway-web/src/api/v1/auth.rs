@@ -35,8 +35,15 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 /// # Returns
 /// - `Result<WebResponse<LoginResponse>, WebError>`: Login response or error
 pub async fn login(req: Json<LoginRequest>) -> WebResult<WebResponse<LoginResponse>> {
-    let username = req.username.as_ref().unwrap();
-    let password = req.password.as_ref().unwrap();
+    let req = req.into_inner();
+    let username = req
+        .username
+        .as_deref()
+        .ok_or(WebError::BadRequest("username is required".to_string()))?;
+    let password = req
+        .password
+        .as_deref()
+        .ok_or(WebError::BadRequest("password is required".to_string()))?;
 
     let user = match UserRepository::find_by_username_and_status(username, Status::Enabled).await? {
         Some(user) => user,
@@ -47,11 +54,10 @@ pub async fn login(req: Json<LoginRequest>) -> WebResult<WebResponse<LoginRespon
         return Err(WebError::Unauthorized);
     }
 
-    let settings = NGAppContext::instance()
-        .await
+    let ctx = NGAppContext::instance().await;
+    let settings = ctx
         .settings()
-        .map_err(|_| WebError::InternalError("Failed to get settings".to_string()))?
-        .clone();
+        .map_err(|_| WebError::InternalError("Failed to get settings".to_string()))?;
 
     let claims = Claims::new(
         settings.web.jwt.issuer.clone(),

@@ -135,16 +135,16 @@ gateway:
       southward:
         # milliseconds
         driverSyncStartTimeout: 2000
-        # Device snapshot GC configuration (point-level TTL eviction).
-        snapshot:
-          # Point baseline TTL in milliseconds. 0 disables eviction.
-          deviceChangeCacheTtlMs: 600000
-          # GC scan interval in milliseconds.
-          gcIntervalMs: 60000
-          # Number of async GC workers.
-          gcWorkers: 2
-          # Max devices to scan per GC tick.
-          maxDevicesPerTick: 256
+        # Device snapshot TTL GC (point-level baseline eviction).
+        #
+        # Point baseline TTL in milliseconds. 0 disables eviction.
+        deviceChangeCacheTtlMs: 600000
+        # Snapshot GC scan interval in milliseconds.
+        snapshotGcIntervalMs: 60000
+        # Number of async snapshot GC workers.
+        snapshotGcWorkers: 2
+        # Max devices to scan per snapshot GC tick.
+        maxDevicesPerSnapshotTick: 256
       
       # Northward communication configuration
       northward:
@@ -156,26 +156,41 @@ gateway:
       collector:
         # milliseconds
         collectionTimeout: 30000
-        # milliseconds
-        metricsInterval: 60000
         maxConcurrentCollections: 200
-        retryAttempts: 3
-        # milliseconds
-        retryDelay: 1000
+        retryPolicy:
+          maxAttempts: 3
+          initialIntervalMs: 1000
+          maxIntervalMs: 30000
+          randomizationFactor: 0.2
+          multiplier: 2.0
+          # maxElapsedTimeMs: 0   # 0/omit => unlimited
         outboundQueueCapacity: 10000
-
-      # Logging runtime configuration (global + per-channel overrides).
-      logging:
-        # Default TTL for channel log level overrides in milliseconds.
+    
+    # Logging configuration (top-level)
+    logging:
+      control:
         channelOverrideDefaultTtlMs: 300000
-        # Minimum allowed TTL (ms) to avoid abusive rapid toggling.
         channelOverrideMinTtlMs: 10000
-        # Maximum allowed TTL (ms) to avoid "permanent debug".
         channelOverrideMaxTtlMs: 1800000
-        # Override cleanup tick interval in milliseconds.
         overrideCleanupIntervalMs: 5000
-        # Driver->host log ingest queue capacity (bounded, drop-old-keep-new).
         driverIngestQueueCapacity: 10000
+      output:
+        format: "text"               # text | json
+        includeSpanFields: true
+        file:
+          enabled: true
+          dir: "./logs"
+          rotation:
+            mode: "both"             # time | size | both
+            time: "daily"            # hourly | daily
+            sizeMb: 100
+            maxFiles: 200
+          retention:
+            maxDays: 7
+            maxTotalSizeMb: 2048
+      cleanup:
+        enabled: true
+        intervalMs: 60000
     
     # Web configuration
     web:

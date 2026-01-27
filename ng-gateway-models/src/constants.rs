@@ -42,3 +42,14 @@ pub const DRIVER_DIR: &str = "./drivers";
 pub const PLUGIN_DIR: &str = "./plugins";
 pub const BUILTIN_DIR: &str = "builtin";
 pub const CUSTOM_DIR: &str = "custom";
+
+/// Environment variable prefix for config overrides (used by `config::Environment`).
+///
+/// Example:
+/// - `NG__GENERAL__COLLECTOR__COLLECTION_TIMEOUT_MS=10000`
+pub const ENV_PREFIX: &str = "NG";
+
+/// Environment variable segment separator for config overrides.
+///
+/// Must match `config::Environment::separator(...)` used in settings loading.
+pub const ENV_SEPARATOR: &str = "__";

@@ -8,13 +8,13 @@
 //! - Comprehensive monitoring and diagnostics
 
 use crate::{
-    collector::Collector,
+    collector::NGCollector,
     commands::{gateway_command_registry, GetStatusHandler},
     driver::{DriverLoader, DriverRegistry},
     lifecycle::StartPolicy,
-    northward::{NGNorthwardManager, NorthwardLoader},
+    northward::{NGNorthwardManager, NorthwardEventsBus, NorthwardLoader},
     realtime::NGRealtimeMonitorHub,
-    southward::NGSouthwardManager,
+    southward::{NGSouthwardManager, SouthwardDataBus},
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -34,8 +34,8 @@ use ng_gateway_models::{
     core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
         ChangeAppStatus, ChangeChannelStatus, ChangeDeviceStatus, LogLevel, NewAction, NewApp,
-        NewAppSub, NewChannel, NewDevice, NewPoint, UpdateAction, UpdateApp, UpdateAppSub,
-        UpdateChannel, UpdateDevice, UpdatePoint,
+        NewAppSub, NewChannel, NewDevice, NewPoint, RuntimeSettingKey, UpdateAction, UpdateApp,
+        UpdateAppSub, UpdateChannel, UpdateDevice, UpdatePoint,
     },
     entities::prelude::{
         ActionModel, AppModel, AppSubModel, ChannelModel, DeviceModel, PointModel,
@@ -75,7 +75,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
 // --- Type aliases to reduce type complexity and improve readability ---
-type DataSender = InstrumentedSender<Arc<NorthwardData>>;
 type DataReceiver = InstrumentedReceiver<Arc<NorthwardData>>;
 type EventsSender = InstrumentedSender<(i32, NorthwardEvent)>;
 type EventsReceiver = InstrumentedReceiver<(i32, NorthwardEvent)>;
@@ -202,18 +201,18 @@ pub struct NGGateway {
     monitor_hub: Arc<NGRealtimeMonitorHub>,
 
     /// High-performance collection engine
-    collector: Arc<Collector>,
+    collector: Arc<NGCollector>,
 
     /// Gateway state management
     state: Arc<RwLock<GatewayState>>,
 
     /// Data batch channel (bounded, single consumer)
-    data_tx: DataSender,
+    southward_data_bus: Arc<SouthwardDataBus>,
     /// Data batch receiver (bounded, single consumer, taken on forwarding start)
     data_rx: SharedReceiver,
 
     /// Northward events channel (bounded, single consumer)
-    northward_events_tx: EventsSender,
+    northward_events_bus: Arc<NorthwardEventsBus>,
     /// Northward events receiver (bounded, single consumer, taken on event processor start)
     northward_events_rx: SharedEventsReceiver,
 
@@ -221,9 +220,9 @@ pub struct NGGateway {
     start_time: Option<DateTime<Utc>>,
 
     /// Forwarding task handle for graceful shutdown
-    forwarding_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    forwarding_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Northward events task handle for graceful shutdown
-    northward_events_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    northward_events_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Cancellation token for tasks
     shutdown_token: CancellationToken,
 }
@@ -248,29 +247,32 @@ impl Gateway for NGGateway {
             InitContextError::Primitive(format!("Failed to initialize metrics hub: {e}"))
         })?);
 
-        // Create bounded data batch channel (single consumer) to propagate backpressure
+        // Create bounded data batch channel (single consumer) to propagate backpressure.
+        // The sender is wrapped by a swappable outbound bus so we can rebuild the queue at runtime.
         let (data_tx, data_rx) = bounded(
             &metrics_hub,
             "collector_outbound",
-            settings.general.collector.outbound_queue_capacity,
+            settings.general.collector.outbound_queue_capacity(),
         )
         .map_err(|e| {
             InitContextError::Primitive(format!(
                 "Failed to create instrumented queue collector_outbound: {e}"
             ))
         })?;
+        let southward_data_bus = Arc::new(SouthwardDataBus::new(data_tx));
 
         // Create bounded northward events channel (single consumer) for event routing
         let (northward_events_tx, northward_events_rx): (EventsSender, EventsReceiver) = bounded(
             &metrics_hub,
             "northward_events",
-            settings.general.northward.queue_capacity,
+            settings.general.northward.queue_capacity(),
         )
         .map_err(|e| {
             InitContextError::Primitive(format!(
                 "Failed to create instrumented queue northward_events: {e}"
             ))
         })?;
+        let northward_events_bus = Arc::new(NorthwardEventsBus::new(northward_events_tx));
 
         // Initialize driver system
         let driver_registry = Arc::new(DashMap::new());
@@ -295,10 +297,12 @@ impl Gateway for NGGateway {
         driver_loader.load_all(&id_paths).await;
 
         // Initialize southward manager (owns snapshot GC config).
+        // Use Arc to avoid repeated multi-Arc clones for hot-reloadable settings.
+        let southward_cfg = Arc::new(settings.general.southward.clone());
         let southward_manager = Arc::new(NGSouthwardManager::new(
             Arc::clone(&driver_registry),
             Arc::clone(&metrics_hub),
-            settings.general.southward.snapshot.clone(),
+            Arc::clone(&southward_cfg),
         ));
 
         // Start best-effort device snapshot GC (idempotent; disabled when ttl_ms == 0).
@@ -326,7 +330,7 @@ impl Gateway for NGGateway {
         })?;
 
         southward_manager
-            .initialize_topology(southward_config, &data_tx)
+            .initialize_topology(southward_config, &southward_data_bus)
             .await
             .map_err(|e| {
                 InitContextError::Primitive(format!("Failed to initialize data manager: {e}"))
@@ -334,7 +338,7 @@ impl Gateway for NGGateway {
 
         // Start channels (monitors are spawned inside)
         southward_manager
-            .start_channels(&data_tx)
+            .start_channels(&southward_data_bus)
             .await
             .map_err(|e| InitContextError::Primitive(format!("Failed to start channels: {e}")))?;
 
@@ -375,7 +379,7 @@ impl Gateway for NGGateway {
         })?;
 
         northward_manager
-            .initialize_topology(northward_config, &conn, &northward_events_tx)
+            .initialize_topology(northward_config, &conn, &northward_events_bus)
             .await
             .map_err(|e| {
                 InitContextError::Primitive(format!("Failed to initialize northward topology: {e}"))
@@ -388,22 +392,22 @@ impl Gateway for NGGateway {
             driver_registry,
             driver_loader,
             southward_manager: Arc::clone(&southward_manager),
-            collector: Arc::new(Collector::new(
-                settings.general.collector,
+            collector: Arc::new(NGCollector::new(
+                settings.general.collector.clone(),
                 southward_manager,
                 Arc::clone(&metrics_hub),
-                data_tx.clone(),
+                Arc::clone(&southward_data_bus),
                 CancellationToken::new(),
             )),
             state: Arc::new(RwLock::new(GatewayState::Uninitialized)),
-            data_tx,
+            southward_data_bus: Arc::clone(&southward_data_bus),
             data_rx: Arc::new(RwLock::new(Some(data_rx))),
-            northward_events_tx,
+            northward_events_bus: Arc::clone(&northward_events_bus),
             northward_events_rx: Arc::new(RwLock::new(Some(northward_events_rx))),
             monitor_hub: Arc::new(NGRealtimeMonitorHub::new()),
             start_time: Some(Utc::now()),
-            forwarding_task: Arc::new(RwLock::new(None)),
-            northward_events_task: Arc::new(RwLock::new(None)),
+            forwarding_tasks: Arc::new(RwLock::new(Vec::new())),
+            northward_events_tasks: Arc::new(RwLock::new(Vec::new())),
             shutdown_token: CancellationToken::new(),
         });
 
@@ -461,8 +465,8 @@ impl Gateway for NGGateway {
         self.shutdown_token.cancel();
 
         // Wait for tasks to finish with timeout; abort if exceeding to prevent hang
-        if let Some(handle) = self.forwarding_task.write().await.take() {
-            let mut handle = handle;
+        let mut forwarding = self.forwarding_tasks.write().await;
+        for mut handle in forwarding.drain(..) {
             tokio::select! {
                 _ = &mut handle => {}
                 _ = sleep(time::Duration::from_secs(2)) => {
@@ -470,8 +474,8 @@ impl Gateway for NGGateway {
                 }
             }
         }
-        if let Some(handle) = self.northward_events_task.write().await.take() {
-            let mut handle = handle;
+        let mut event_tasks = self.northward_events_tasks.write().await;
+        for mut handle in event_tasks.drain(..) {
             tokio::select! {
                 _ = &mut handle => {}
                 _ = sleep(time::Duration::from_secs(2)) => {
@@ -525,6 +529,52 @@ impl Gateway for NGGateway {
     fn realtime_monitor_hub(&self) -> Arc<dyn RealtimeMonitorHub> {
         Arc::clone(&self.monitor_hub) as Arc<dyn RealtimeMonitorHub>
     }
+
+    async fn apply_collector_runtime_tuning(
+        &self,
+        changed: &[RuntimeSettingKey],
+        max_concurrent_collections: usize,
+        outbound_queue_capacity: usize,
+    ) -> NGResult<()> {
+        let mut need_rebuild_outbound = false;
+        let mut need_update_concurrency = false;
+
+        for k in changed.iter() {
+            match k {
+                RuntimeSettingKey::GeneralCollectorMaxConcurrentCollections => {
+                    need_update_concurrency = true;
+                }
+                RuntimeSettingKey::GeneralCollectorOutboundQueueCapacity => {
+                    need_rebuild_outbound = true;
+                }
+                _ => {}
+            }
+        }
+
+        if need_update_concurrency {
+            self.collector
+                .set_max_concurrent_collections(max_concurrent_collections.max(1));
+        }
+
+        if need_rebuild_outbound {
+            self.rebuild_outbound_queue(outbound_queue_capacity.max(1))
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn apply_northward_runtime_tuning(
+        &self,
+        changed: &[RuntimeSettingKey],
+        queue_capacity: usize,
+    ) -> NGResult<()> {
+        if changed.contains(&RuntimeSettingKey::GeneralNorthwardQueueCapacity) {
+            self.rebuild_northward_events_queue(queue_capacity.max(1))
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -544,9 +594,9 @@ impl ChannelRuntimeCmd for NGGateway {
             .southward_manager
             .create_and_start_channel(
                 &created,
-                &self.data_tx,
+                &self.southward_data_bus,
                 StartPolicy::SyncWaitConnected {
-                    timeout_ms: settings.general.southward.start_timeout_ms,
+                    timeout_ms: settings.general.southward.start_timeout_ms(),
                 },
             )
             .await
@@ -592,7 +642,7 @@ impl ChannelRuntimeCmd for NGGateway {
                 // Refresh instance to reflect metadata changes while disabled
                 if let Err(e) = self
                     .southward_manager
-                    .replace_channel_instance(&updated, &self.data_tx)
+                    .replace_channel_instance(&updated, &self.southward_data_bus)
                     .await
                 {
                     let _ = ChannelRepository::update::<DatabaseConnection>(
@@ -610,8 +660,8 @@ impl ChannelRuntimeCmd for NGGateway {
                     .southward_manager
                     .restart_channel(
                         &updated,
-                        &self.data_tx,
-                        settings.general.southward.start_timeout_ms,
+                        &self.southward_data_bus,
+                        settings.general.southward.start_timeout_ms(),
                     )
                     .await
                 {
@@ -663,8 +713,8 @@ impl ChannelRuntimeCmd for NGGateway {
                 self.southward_manager
                     .restart_channel(
                         &channel,
-                        &self.data_tx,
-                        settings.general.southward.start_timeout_ms,
+                        &self.southward_data_bus,
+                        settings.general.southward.start_timeout_ms(),
                     )
                     .await?;
                 self.southward_manager
@@ -1211,9 +1261,9 @@ impl AppRuntimeCmd for NGGateway {
                 &created,
                 None,
                 &conn,
-                self.northward_events_tx.clone(),
+                Arc::clone(&self.northward_events_bus),
                 self.shutdown_token.child_token(),
-                settings.general.northward.start_timeout_ms,
+                settings.general.northward.start_timeout_ms(),
             )
             .await
         {
@@ -1250,9 +1300,9 @@ impl AppRuntimeCmd for NGGateway {
                         &updated,
                         sub,
                         &conn,
-                        self.northward_events_tx.clone(),
+                        Arc::clone(&self.northward_events_bus),
                         self.shutdown_token.child_token(),
-                        settings.general.northward.start_timeout_ms,
+                        settings.general.northward.start_timeout_ms(),
                     )
                     .await
                 {
@@ -1296,9 +1346,9 @@ impl AppRuntimeCmd for NGGateway {
                         &app,
                         subs,
                         &conn,
-                        self.northward_events_tx.clone(),
+                        Arc::clone(&self.northward_events_bus),
                         self.shutdown_token.child_token(),
-                        settings.general.northward.start_timeout_ms,
+                        settings.general.northward.start_timeout_ms(),
                     )
                     .await?;
             }
@@ -1437,18 +1487,14 @@ impl NGGateway {
         );
     }
 
-    /// Set up data forwarding to northward system
-    async fn setup_data_forwarding(&self) -> NGResult<()> {
-        // Take the receiver once to start forwarding
-        let mut data_rx_guard = self.data_rx.write().await;
-        let mut data_rx = data_rx_guard.take().ok_or(NGError::InvalidStateError(
-            "Data forwarding already started".to_string(),
-        ))?;
-        drop(data_rx_guard);
-        let northward_manager = Arc::clone(&self.northward_manager);
-        let monitor_hub = Arc::clone(&self.monitor_hub);
-        let token = self.shutdown_token.clone();
-        let handle = tokio::spawn(async move {
+    #[inline]
+    fn spawn_data_forwarder_task(
+        northward_manager: Arc<NGNorthwardManager>,
+        monitor_hub: Arc<NGRealtimeMonitorHub>,
+        token: CancellationToken,
+        mut data_rx: DataReceiver,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
             info!("Starting high-performance data forwarding task");
             loop {
                 tokio::select! {
@@ -1458,9 +1504,7 @@ impl NGGateway {
                     maybe_data = data_rx.recv() => {
                         match maybe_data {
                             Some(data) => {
-                                // 1) Broadcast raw data to realtime monitor hub
                                 monitor_hub.broadcast(&data);
-                                // 2) Forward to northward manager for snapshot/filter + app routing
                                 northward_manager.route(data).await
                             }
                             None => {
@@ -1471,36 +1515,19 @@ impl NGGateway {
                     }
                 }
             }
-        });
-        self.forwarding_task.write().await.replace(handle);
-
-        Ok(())
+        })
     }
 
-    /// Start unified northward event processor
-    ///
-    /// This creates a single task that processes ALL northward events
-    /// from all apps through the shared global event channel.
-    ///
-    /// Benefits:
-    /// - Automatically supports runtime app addition/removal
-    /// - Simple and efficient single-channel design
-    /// - Symmetric with southward data forwarding
-    async fn start_northward_event_processor(&self) -> NGResult<()> {
-        // Take the global events receiver (can only be done once)
-        let mut events_rx_guard = self.northward_events_rx.write().await;
-        let mut events_rx = events_rx_guard.take().ok_or(NGError::InvalidStateError(
-            "Northward events processor already started".to_string(),
-        ))?;
-        drop(events_rx_guard);
-
-        let northward_manager = Arc::clone(&self.northward_manager);
-        let southward_manager = Arc::clone(&self.southward_manager);
-        let metrics_hub = Arc::clone(&self.metrics_hub);
+    #[inline]
+    fn spawn_northward_event_processor_task(
+        northward_manager: Arc<NGNorthwardManager>,
+        southward_manager: Arc<NGSouthwardManager>,
+        metrics_hub: Arc<NGMetricsHub>,
+        token: CancellationToken,
+        mut events_rx: EventsReceiver,
+    ) -> tokio::task::JoinHandle<()> {
         let write_serializers = Arc::new(WriteSerializers::default());
-        let token = self.shutdown_token.clone();
-
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             info!("🚀 Unified northward event processor started");
 
             loop {
@@ -1512,7 +1539,6 @@ impl NGGateway {
                     maybe_event = events_rx.recv() => {
                         match maybe_event {
                             Some((app_id, event)) => {
-                                // Process event through unified handler
                                 Self::handle_northward_event(
                                     app_id,
                                     event,
@@ -1532,9 +1558,100 @@ impl NGGateway {
             }
 
             info!("✅ Northward event processor stopped");
-        });
+        })
+    }
 
-        self.northward_events_task.write().await.replace(handle);
+    /// Set up data forwarding to northward system
+    async fn setup_data_forwarding(&self) -> NGResult<()> {
+        // Take the receiver once to start forwarding
+        let mut data_rx_guard = self.data_rx.write().await;
+        let data_rx = data_rx_guard.take().ok_or(NGError::InvalidStateError(
+            "Data forwarding already started".to_string(),
+        ))?;
+        drop(data_rx_guard);
+        let northward_manager = Arc::clone(&self.northward_manager);
+        let monitor_hub = Arc::clone(&self.monitor_hub);
+        let token = self.shutdown_token.clone();
+        let handle =
+            Self::spawn_data_forwarder_task(northward_manager, monitor_hub, token, data_rx);
+        self.forwarding_tasks.write().await.push(handle);
+
+        Ok(())
+    }
+
+    /// Rebuild the outbound queue (collector/southward -> gateway forwarding) with a new capacity.
+    ///
+    /// This is used by runtime tuning for `outbound_queue_capacity`.
+    pub async fn rebuild_outbound_queue(&self, capacity: usize) -> NGResult<()> {
+        let capacity = capacity.max(1);
+        let (tx, rx) = bounded(&self.metrics_hub, "collector_outbound", capacity)?;
+        self.southward_data_bus.swap_sender(tx);
+
+        // Start a new forwarder for the new receiver; old forwarders drain and exit naturally.
+        let handle = Self::spawn_data_forwarder_task(
+            Arc::clone(&self.northward_manager),
+            Arc::clone(&self.monitor_hub),
+            self.shutdown_token.clone(),
+            rx,
+        );
+        self.forwarding_tasks.write().await.push(handle);
+        Ok(())
+    }
+
+    /// Rebuild the northward events queue (apps/plugins -> gateway event processor) with a new capacity.
+    ///
+    /// This is used by runtime tuning for `general.northward.queue_capacity`.
+    pub async fn rebuild_northward_events_queue(&self, capacity: usize) -> NGResult<()> {
+        let capacity = capacity.max(1);
+        let (tx, rx) = bounded(&self.metrics_hub, "northward_events", capacity)?;
+        self.northward_events_bus.swap_sender(tx);
+
+        // If the event processor is not started yet, replace the receiver so the first start uses
+        // the new queue. Otherwise, spawn a new processor for the new receiver.
+        let mut guard = self.northward_events_rx.write().await;
+        if guard.is_some() {
+            *guard = Some(rx);
+            return Ok(());
+        }
+        drop(guard);
+
+        let handle = Self::spawn_northward_event_processor_task(
+            Arc::clone(&self.northward_manager),
+            Arc::clone(&self.southward_manager),
+            Arc::clone(&self.metrics_hub),
+            self.shutdown_token.clone(),
+            rx,
+        );
+        self.northward_events_tasks.write().await.push(handle);
+        Ok(())
+    }
+
+    /// Start unified northward event processor
+    ///
+    /// This creates a single task that processes ALL northward events
+    /// from all apps through the shared global event channel.
+    ///
+    /// Benefits:
+    /// - Automatically supports runtime app addition/removal
+    /// - Simple and efficient single-channel design
+    /// - Symmetric with southward data forwarding
+    async fn start_northward_event_processor(&self) -> NGResult<()> {
+        // Take the global events receiver (can only be done once)
+        let mut events_rx_guard = self.northward_events_rx.write().await;
+        let events_rx = events_rx_guard.take().ok_or(NGError::InvalidStateError(
+            "Northward events processor already started".to_string(),
+        ))?;
+        drop(events_rx_guard);
+
+        let handle = Self::spawn_northward_event_processor_task(
+            Arc::clone(&self.northward_manager),
+            Arc::clone(&self.southward_manager),
+            Arc::clone(&self.metrics_hub),
+            self.shutdown_token.clone(),
+            events_rx,
+        );
+
+        self.northward_events_tasks.write().await.push(handle);
 
         Ok(())
     }
@@ -2060,7 +2177,7 @@ impl NGGateway {
 
     #[inline]
     /// Get collection engine reference
-    pub fn get_collector(&self) -> &Collector {
+    pub fn get_collector(&self) -> &NGCollector {
         &self.collector
     }
 

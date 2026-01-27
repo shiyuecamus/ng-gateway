@@ -43,75 +43,61 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing northward app module RBAC rules...");
 
-    perm_checker
-        .register(
+    let rules = vec![
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/list"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Read)?)
                 .or(has_scope("northward-app:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/page"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Read)?)
                 .or(has_scope("northward-app:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/detail/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Read)?)
                 .or(has_scope("northward-app:read")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Create)?)
                 .or(has_scope("northward-app:create")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Write)?)
                 .or(has_scope("northward-app:write")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::DELETE,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Delete)?)
                 .or(has_scope("northward-app:delete")?),
-        )
-        .await?;
-
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}/change-status"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Write)?)
                 .or(has_scope("northward-app:write")?),
-        )
-        .await?;
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Northward app module RBAC rules initialized successfully");
     Ok(())

@@ -6,19 +6,25 @@
 //! - Uses rolling file appenders for each log file
 //! - Maintains thread-safe writer handles for each driver type
 
+use super::span_ext::ChannelIdExt;
 use dashmap::{DashMap, Entry};
+use ng_gateway_models::settings::{LoggingFileRotation, LoggingFormat, RotationMode, TimeRotation};
 use ng_gateway_sdk::log::fields as log_fields;
-use std::{fmt::Write as _, io::Write, path::PathBuf, sync::Arc};
+use serde_json;
+use std::{
+    fmt::Write as _,
+    fs::OpenOptions,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tracing::{
     field::{Field, Visit},
     span::{Attributes, Id, Record},
     subscriber::Interest,
     Event, Level, Metadata, Subscriber,
 };
-use tracing_appender::{
-    non_blocking::{NonBlocking, WorkerGuard},
-    rolling,
-};
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
 /// Sanitize a driver type label into a safe file stem.
@@ -147,10 +153,11 @@ pub struct DriverFileRegistry {
     writers: DashMap<Arc<str>, NonBlocking>,
     guards: DashMap<Arc<str>, WorkerGuard>,
     log_dir: PathBuf,
+    rotation: LoggingFileRotation,
 }
 
 impl DriverFileRegistry {
-    fn new(log_dir: PathBuf) -> Self {
+    fn new(log_dir: PathBuf, rotation: LoggingFileRotation) -> Self {
         // Ensure log directory exists (best-effort). This avoids surprising runtime failures
         // when the logger initializes before runtime directories are created.
         let _ = std::fs::create_dir_all(&log_dir);
@@ -158,6 +165,7 @@ impl DriverFileRegistry {
             writers: DashMap::new(),
             guards: DashMap::new(),
             log_dir,
+            rotation,
         }
     }
 
@@ -167,7 +175,11 @@ impl DriverFileRegistry {
             Entry::Occupied(o) => o.get().clone(),
             Entry::Vacant(v) => {
                 // Create new writer exactly once per driver type.
-                let appender = rolling::daily(&self.log_dir, format!("{}.log", &*driver_type));
+                let appender = RotatingFileAppender::new(
+                    self.log_dir.clone(),
+                    format!("{}.log", &*driver_type),
+                    self.rotation.clone(),
+                );
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
                 // Keep guard alive to avoid dropping the worker thread.
@@ -185,7 +197,11 @@ impl DriverFileRegistry {
         match self.writers.entry(Arc::<str>::from(HOST_KEY)) {
             Entry::Occupied(o) => o.get().clone(),
             Entry::Vacant(v) => {
-                let appender = rolling::daily(&self.log_dir, "host.log");
+                let appender = RotatingFileAppender::new(
+                    self.log_dir.clone(),
+                    "host.log".to_string(),
+                    self.rotation.clone(),
+                );
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
                 self.guards.insert(Arc::clone(v.key()), guard);
                 v.insert(non_blocking.clone());
@@ -218,6 +234,173 @@ impl DriverFileRegistry {
         files.dedup();
         files
     }
+}
+
+/// A file appender that supports time/size/both rotation.
+///
+/// This is designed to be used under `tracing_appender::non_blocking`, so all writes and
+/// rotations happen on a single worker thread (no extra locking required).
+struct RotatingFileAppender {
+    dir: PathBuf,
+    stem: String,
+    rotation: LoggingFileRotation,
+    current_name: String,
+    current_size: u64,
+    file: Box<dyn Write + Send>,
+}
+
+impl RotatingFileAppender {
+    fn new(dir: PathBuf, stem: String, rotation: LoggingFileRotation) -> Self {
+        let _ = std::fs::create_dir_all(&dir);
+        let now = chrono::Utc::now();
+        let current_name = compute_active_name(&stem, &rotation, now);
+        let (file, size) = open_for_append(&dir, &current_name);
+        Self {
+            dir,
+            stem,
+            rotation,
+            current_name,
+            current_size: size,
+            file,
+        }
+    }
+
+    fn maybe_rotate(&mut self, now: chrono::DateTime<chrono::Utc>, incoming_len: usize) {
+        let desired = compute_active_name(&self.stem, &self.rotation, now);
+        if desired != self.current_name {
+            self.current_name = desired;
+            let (file, size) = open_for_append(&self.dir, &self.current_name);
+            self.file = file;
+            self.current_size = size;
+        }
+
+        if !rotation_has_size(&self.rotation.mode) {
+            return;
+        }
+        let size_mb = self.rotation.size_mb.max(1);
+        let limit = size_mb.saturating_mul(1024 * 1024);
+        let incoming = incoming_len as u64;
+        if self.current_size.saturating_add(incoming) <= limit {
+            return;
+        }
+
+        self.roll_by_size();
+    }
+
+    fn roll_by_size(&mut self) {
+        let keep_total = self.rotation.max_files.max(1);
+        let keep_rotated = keep_total.saturating_sub(1);
+        let base_path = self.dir.join(&self.current_name);
+
+        // If we cannot keep rotated files, just truncate the active file.
+        if keep_rotated == 0 {
+            let (file, _) = open_for_truncate(&self.dir, &self.current_name);
+            self.file = file;
+            self.current_size = 0;
+            return;
+        }
+
+        // Close the file handle before renaming.
+        let _ = self.file.flush();
+
+        // Shift rotated suffixes: `.N-1` -> `.N`
+        for i in (1..keep_rotated).rev() {
+            let src = rotated_path(&self.dir, &self.current_name, i);
+            let dst = rotated_path(&self.dir, &self.current_name, i + 1);
+            let _ = std::fs::remove_file(&dst);
+            let _ = std::fs::rename(&src, &dst);
+        }
+
+        // Move current base to `.1`
+        let first = rotated_path(&self.dir, &self.current_name, 1);
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::rename(&base_path, &first);
+
+        // Open a new active file.
+        let (file, _) = open_for_truncate(&self.dir, &self.current_name);
+        self.file = file;
+        self.current_size = 0;
+    }
+}
+
+impl Write for RotatingFileAppender {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let now = chrono::Utc::now();
+        self.maybe_rotate(now, buf.len());
+        let n = self.file.write(buf)?;
+        self.current_size = self.current_size.saturating_add(n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+#[inline]
+fn rotation_has_size(mode: &RotationMode) -> bool {
+    matches!(mode, RotationMode::Size | RotationMode::Both)
+}
+
+#[inline]
+fn rotation_has_time(mode: &RotationMode) -> bool {
+    matches!(mode, RotationMode::Time | RotationMode::Both)
+}
+
+fn compute_active_name(
+    stem: &str,
+    rotation: &LoggingFileRotation,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    if rotation_has_time(&rotation.mode) {
+        let suffix = match rotation.time {
+            TimeRotation::Hourly => now.format("%Y-%m-%d-%H").to_string(),
+            TimeRotation::Daily => now.format("%Y-%m-%d").to_string(),
+        };
+        format!("{stem}.{suffix}")
+    } else {
+        stem.to_string()
+    }
+}
+
+#[inline]
+fn rotated_path(dir: &Path, base_name: &str, idx: usize) -> PathBuf {
+    dir.join(format!("{base_name}.{idx}"))
+}
+
+fn open_for_append(dir: &Path, name: &str) -> (Box<dyn Write + Send>, u64) {
+    let path = dir.join(name);
+    let file = OpenOptions::new().create(true).append(true).open(&path);
+    if let Ok(f) = file {
+        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        return (Box::new(f), size);
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path);
+    if let Ok(f) = file {
+        return (Box::new(f), 0);
+    }
+    (Box::new(io::sink()), 0)
+}
+
+fn open_for_truncate(dir: &Path, name: &str) -> (Box<dyn Write + Send>, u64) {
+    let path = dir.join(name);
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path);
+    if let Ok(f) = file {
+        return (Box::new(f), 0);
+    }
+    let file = OpenOptions::new().create(true).append(true).open(&path);
+    if let Ok(f) = file {
+        return (Box::new(f), 0);
+    }
+    (Box::new(io::sink()), 0)
 }
 
 /// Visitor that extracts `message` and formats all other fields.
@@ -291,14 +474,28 @@ impl Visit for EventFieldsFormatter {
 /// Split file layer that routes logs to different files based on driver_type.
 pub struct SplitFileLayer {
     registry: Arc<DriverFileRegistry>,
+    format: LoggingFormat,
+    include_span_fields: bool,
 }
 
 impl SplitFileLayer {
     /// Create a new split file layer.
-    pub fn new(log_dir: PathBuf) -> Self {
+    pub fn new(log_dir: PathBuf, rotation: LoggingFileRotation) -> Self {
         Self {
-            registry: Arc::new(DriverFileRegistry::new(log_dir)),
+            registry: Arc::new(DriverFileRegistry::new(log_dir, rotation)),
+            format: LoggingFormat::Text,
+            include_span_fields: true,
         }
+    }
+
+    #[inline]
+    pub fn set_format(&mut self, format: LoggingFormat) {
+        self.format = format;
+    }
+
+    #[inline]
+    pub fn set_include_span_fields(&mut self, enabled: bool) {
+        self.include_span_fields = enabled;
     }
 
     /// Get the registry for listing log files.
@@ -344,29 +541,118 @@ where
         let mut ev_visitor = EventFieldsFormatter::default();
         event.record(&mut ev_visitor);
 
-        // Format the log line.
-        //
-        // We intentionally keep this close to the console output:
-        // - `target` (e.g. `sqlx::query`)
-        // - `message` (if present)
-        // - event fields (if present)
-        let line = if ev_visitor.has_fields {
-            format!(
-                "{} [{}] {}: {} {{{}}}\n",
-                now.format("%Y-%m-%d %H:%M:%S%.3f"),
-                level.as_str(),
-                target,
-                ev_visitor.message,
-                ev_visitor.fields
-            )
+        // Optional span fields (best-effort): channel_id + span stack names.
+        let (channel_id, spans) = if self.include_span_fields {
+            let mut names: Vec<&'static str> = Vec::new();
+            let mut chan: Option<i32> = None;
+            if let Some(span) = ctx.lookup_current() {
+                // Walk from current to root.
+                let mut cur = Some(span);
+                while let Some(s) = cur {
+                    names.push(s.metadata().name());
+                    if chan.is_none() {
+                        let exts = s.extensions();
+                        chan = exts.get::<ChannelIdExt>().and_then(|e| e.0);
+                    }
+                    cur = s.parent();
+                }
+            }
+            names.reverse();
+            (chan, Some(names))
         } else {
-            format!(
-                "{} [{}] {}: {}\n",
-                now.format("%Y-%m-%d %H:%M:%S%.3f"),
-                level.as_str(),
-                target,
-                ev_visitor.message
-            )
+            (None, None)
+        };
+
+        let line = match self.format {
+            LoggingFormat::Text => {
+                // Keep close to console output:
+                // - `target` (e.g. `sqlx::query`)
+                // - `message` (if present)
+                // - event fields (if present)
+                // - optional span context
+                let span_part = if let Some(spans) = &spans {
+                    if spans.is_empty() && channel_id.is_none() {
+                        String::new()
+                    } else {
+                        format!(
+                            " [spans={}]{}",
+                            spans.join("->"),
+                            channel_id
+                                .map(|v| format!(" channel_id={v}"))
+                                .unwrap_or_default()
+                        )
+                    }
+                } else {
+                    String::new()
+                };
+
+                if ev_visitor.has_fields {
+                    format!(
+                        "{} [{}] {}: {} {{{}}}{}\n",
+                        now.format("%Y-%m-%d %H:%M:%S%.3f"),
+                        level.as_str(),
+                        target,
+                        ev_visitor.message,
+                        ev_visitor.fields,
+                        span_part
+                    )
+                } else {
+                    format!(
+                        "{} [{}] {}: {}{}\n",
+                        now.format("%Y-%m-%d %H:%M:%S%.3f"),
+                        level.as_str(),
+                        target,
+                        ev_visitor.message,
+                        span_part
+                    )
+                }
+            }
+            LoggingFormat::Json => {
+                // Low-cardinality JSON line (best-effort field encoding).
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "ts".to_string(),
+                    serde_json::Value::String(
+                        now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    ),
+                );
+                obj.insert(
+                    "level".to_string(),
+                    serde_json::Value::String(level.as_str().to_string()),
+                );
+                obj.insert(
+                    "target".to_string(),
+                    serde_json::Value::String(target.to_string()),
+                );
+                obj.insert(
+                    "message".to_string(),
+                    serde_json::Value::String(ev_visitor.message.clone()),
+                );
+                if ev_visitor.has_fields {
+                    obj.insert(
+                        "fields".to_string(),
+                        serde_json::Value::String(ev_visitor.fields.clone()),
+                    );
+                }
+                if let Some(v) = channel_id {
+                    obj.insert(
+                        "channel_id".to_string(),
+                        serde_json::Value::Number(v.into()),
+                    );
+                }
+                if let Some(spans) = spans {
+                    obj.insert(
+                        "spans".to_string(),
+                        serde_json::Value::Array(
+                            spans
+                                .into_iter()
+                                .map(|s| serde_json::Value::String(s.to_string()))
+                                .collect(),
+                        ),
+                    );
+                }
+                serde_json::Value::Object(obj).to_string() + "\n"
+            }
         };
 
         // Write to the non-blocking writer

@@ -1,6 +1,7 @@
 use actix_web::{http::Method, web};
 use ng_gateway_common::casbin::NGPermChecker;
 use ng_gateway_error::{rbac::RBACError, WebResult};
+use ng_gateway_models::rbac::PermRule;
 use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE, domain::prelude::MenuTree, enums::common::Status,
     web::WebResponse, PermChecker, DEFAULT_ROOT_TREE_ID,
@@ -46,13 +47,15 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing menu module RBAC rules...");
 
-    perm_checker
-        .register(
-            Method::GET,
-            format!("{router_prefix}{ROUTER_PREFIX}/all"),
-            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?,
-        )
-        .await?;
+    let rules: Vec<(Method, String, Box<dyn PermRule>)> = vec![(
+        Method::GET,
+        format!("{router_prefix}{ROUTER_PREFIX}/all"),
+        Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+    )];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Menu module RBAC rules initialized successfully");
     Ok(())

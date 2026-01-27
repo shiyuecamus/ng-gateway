@@ -246,6 +246,12 @@ pub struct CollectorMetricsSnapshot {
     pub current_permits: usize,
     /// Available semaphore permits.
     pub available_permits: usize,
+    /// Total retries performed by the collector (cumulative).
+    pub retries_total: u64,
+    /// Retries triggered by timeouts (cumulative).
+    pub retries_timeout_total: u64,
+    /// Retries triggered by driver errors (cumulative).
+    pub retries_error_total: u64,
 }
 
 /// Serializable snapshot of app metrics

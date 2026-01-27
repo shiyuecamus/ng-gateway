@@ -185,7 +185,6 @@ gateway:
       # Collector
       collector:
         collectionTimeout: 30000
-        metricsInterval: 60000
         maxConcurrentCollections: 200
         retryAttempts: 3
         retryDelay: 1000

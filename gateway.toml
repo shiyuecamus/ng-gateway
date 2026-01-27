@@ -23,15 +23,15 @@ start_timeout_ms = 2000
 #
 # This controls how long a point baseline (for ReportType::Change detection) can stay in memory
 # without being refreshed by a value change. Expired points will be evicted by a background GC task.
-[general.southward.snapshot]
+#
 # Point baseline TTL in milliseconds. 0 disables eviction.
 device_change_cache_ttl_ms = 600000
-# GC scan interval in milliseconds.
-gc_interval_ms = 60000
-# Number of async GC workers.
-gc_workers = 2
-# Max devices to scan per GC tick (bounds CPU usage).
-max_devices_per_tick = 256
+# Snapshot GC scan interval in milliseconds.
+snapshot_gc_interval_ms = 60000
+# Number of async snapshot GC workers.
+snapshot_gc_workers = 2
+# Max devices to scan per snapshot GC tick (bounds CPU usage).
+max_devices_per_snapshot_tick = 256
 
 # Northward communication configuration
 [general.northward]
@@ -43,34 +43,57 @@ start_timeout_ms = 2000
 [general.collector]
 # Collection timeout for each device (in milliseconds)
 collection_timeout_ms = 30000
-# Metrics collection interval (in milliseconds)
-metrics_interval_ms = 60000
 # Maximum concurrent collections per channel
 max_concurrent_collections = 200
-# Retry attempts for failed collections
-retry_attempts = 3
-# Retry delay in milliseconds
-retry_delay_ms = 1000
+# Optional maximum total elapsed time in milliseconds (omit for no policy limit;
+# collector still enforces its own per-group budget)
+# max_elapsed_time_ms = 5000
 # Outbound queue capacity from collector to gateway (bounded channel)
 outbound_queue_capacity = 10000
+# Retry policy for failed collections (unified with SDK retry semantics)
+[general.collector.retry_policy]
+# Maximum number of retries after a failure.
+# - max_attempts = 0: no retries
+# - max_attempts omitted: unlimited retries (still bounded by collector budget)
+max_attempts = 3
+# Initial retry interval in milliseconds
+initial_interval_ms = 1000
+# Maximum retry interval cap in milliseconds
+max_interval_ms = 30000
+# Randomization factor in range [0.0, 1.0] (e.g. 0.2 means ±20% jitter)
+randomization_factor = 0.2
+# Multiplicative factor for each retry step (>= 1.0)
+multiplier = 2.0
 
-# Logging
-[general.logging]
-# Default TTL for channel log level overrides in milliseconds.
-# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_DEFAULT_TTL_MS
+# Logging (top-level)
+[logging.control]
 channel_override_default_ttl_ms = 300000
-# Minimum allowed TTL (ms) to avoid abusive rapid toggling.
-# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_MIN_TTL_MS
 channel_override_min_ttl_ms = 10000
-# Maximum allowed TTL (ms) to avoid "permanent debug".
-# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_MAX_TTL_MS
 channel_override_max_ttl_ms = 1800000
-# Override cleanup tick interval in milliseconds.
-# Environment override: NG__LOGGING__OVERRIDE_CLEANUP_INTERVAL_MS
 override_cleanup_interval_ms = 5000
-# Driver->host log ingest queue capacity (bounded, drop-old-keep-new).
-# Environment override: NG__LOGGING__DRIVER_INGEST_QUEUE_CAPACITY
 driver_ingest_queue_capacity = 10000
+
+[logging.output]
+format = "text"               # text | json
+include_span_fields = true
+
+[logging.output.file]
+enabled = true
+dir = "./logs"
+
+[logging.output.file.rotation]
+mode = "both"                 # time | size | both
+time = "daily"                # hourly | daily
+size_mb = 100
+max_files = 200
+
+[logging.output.file.retention]
+max_days = 7
+max_total_size_mb = 2048
+
+[logging.cleanup]
+enabled = true
+interval_ms = 60000
 
 # Web
 [web]

@@ -11,7 +11,7 @@
 
 ### 0.1 本次要做的运行时配置范围（必须全覆盖）
 
-- **采集引擎**：`collection_timeout_ms`、`max_concurrent_collections`、`retry_attempts`、`retry_delay_ms`、`outbound_queue_capacity`
+- **采集引擎**：`collection_timeout_ms`、`max_concurrent_collections`、`retry_policy`、`outbound_queue_capacity`
 - **南向/北向启动同步等待**：
   - `general.southward.start_timeout_ms`
   - `general.northward.start_timeout_ms`
@@ -48,9 +48,9 @@
 
 你现在要的是：**Settings 成为全局唯一权威且运行时可变**，因此需要破坏式重构。
 
-### 1.2 collector retry 字段“有名无实”
+### 1.2 collector retry 需要统一语义与执行点
 
-`retry_attempts`/`retry_delay_ms` 虽然在 `gateway.toml` 与 `settings.rs` 存在，但目前缺少：
+`retry_policy` 虽然是一个明确的结构化配置，但如果不统一到 SDK 的 `RetryController + RetryPolicy`，依然会出现：
 
 - 明确语义（哪些失败算一次 attempt？哪些错误可重试？与 timeout 的关系？）
 - 真实执行点（采集流程里没有按此策略做 retry）
@@ -289,29 +289,29 @@ max_total_size_mb = 2048
   - 对后续采集立刻生效
   - 对正在进行的采集：不强制中断（除非你们实现 cooperative cancel），但下一轮必生效
 
-#### 5.1.2 `retry_attempts` / `retry_delay_ms`（必须补齐“最佳实践完整语义”）
+#### 5.1.2 `retry_policy`（统一走 `RetryController + RetryPolicy`，最佳实践语义）
 
-你要求“字段存在但没用，需要规划最佳实践”，这里给出可落地且可解释的严格语义：
+为了避免“每个模块手写一套 retry 逻辑导致语义漂移”，采集引擎与南北向插件/驱动统一使用 SDK 的：
+`RetryPolicy`（配置） + `RetryController`（预算控制器）。
 
 - **attempt 定义**：一次 attempt = 对同一采集请求（同一 device 的同一轮采集）的“一次驱动读取调用序列”
 - **重试触发条件（建议）**：
   - I/O 超时（driver call timeout 或 `collection_timeout_ms` 内的子超时）
   - 可恢复的网络/临时错误（连接瞬断、临时拒绝）
   - 不重试：参数错误/协议错误/数据格式错误/权限错误（不可恢复）
-- **重试次数语义**：
-  - `retry_attempts = 0`：不重试（只做 1 次 attempt）
-  - `retry_attempts = N`：最多额外重试 N 次（总尝试次数 = 1 + N）
-- **退避语义**：
-  - `retry_delay_ms` 作为 base delay
-  - 第 k 次重试 delay = `retry_delay_ms * 2^(k-1)`（指数退避）
-  - 增加 jitter（例如 0.8x~1.2x）避免同步风暴
-- **超时预算闭环（非常关键）**：
+- **策略字段语义（与 SDK 一致）**：
+  - `max_attempts`：最多额外重试次数（不含首次 attempt）
+    - `max_attempts = 0`：不重试
+    - `max_attempts` 省略：无限重试（但仍受预算限制，见下）
+  - `initial_interval_ms` / `max_interval_ms` / `multiplier` / `randomization_factor`：指数退避 + jitter（由 SDK 实现）
+  - `max_elapsed_time_ms`：策略侧的“最大总耗时预算”（可选）
+- **预算闭环（非常关键）**：
   - 单轮采集总预算受 `collection_timeout_ms` 限制
-  - 重试 sleep + 重新调用必须在预算内，预算耗尽立即失败并进入下一轮
+  - 实现上需要把 `collection_timeout_ms` 作为 **hard budget**，对 `RetryPolicy.max_elapsed_time_ms` 取 `min`，确保 retry sleep + 再次调用永远不会超过采集总预算
 - **并发语义**：
-  - 重试不会突破 `max_concurrent_collections`；同一 device 的重试应在同一 permit 内完成（避免重试导致并发膨胀）
+  - 重试不会突破 `max_concurrent_collections`；同一 group call 的重试应在同一 permit 内完成（避免重试导致并发膨胀）
 
-> 这套语义的关键价值：**可解释**（UI 可以展示“最多重试 N 次、指数退避、不会超过采集总超时”）且**不会引入并发雪崩**。
+> 这套语义的关键价值：**全局一致**（所有模块同一 RetryController）、**可解释**（UI/文档可直接复用 SDK 语义）、且不会引入并发雪崩。
 
 #### 5.1.3 `max_concurrent_collections`
 
@@ -653,7 +653,7 @@ impact 语义建议：
 | 配置项 | impact（默认） | 运行时怎么生效 | 需要重启谁 |
 |---|---|---|---|
 | `collection_timeout_ms` | hot_apply | 影响后续采集 timeout | 无 |
-| `retry_attempts` / `retry_delay_ms` | hot_apply | 影响后续采集重试 | 无 |
+| `retry_policy` | hot_apply | 影响后续采集重试（统一 `RetryController`） | 无 |
 | `max_concurrent_collections` | hot_apply | 支持动态调整 semaphore permits | `collector` |
 | `outbound_queue_capacity` | restart_component | 重建 bounded channel/pipeline | `collector`（或 collector->gateway pipeline） |
 | `general.southward.start_timeout_ms` | hot_apply | 影响后续 channel create/restart | 无 |

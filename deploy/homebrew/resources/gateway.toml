@@ -18,12 +18,10 @@ ca_key_path = "ca.key"
 
 [general.southward]
 start_timeout_ms = 2000
-
-[general.southward.snapshot]
 device_change_cache_ttl_ms = 600000
-gc_interval_ms = 60000
-gc_workers = 2
-max_devices_per_tick = 256
+snapshot_gc_interval_ms = 60000
+snapshot_gc_workers = 2
+max_devices_per_snapshot_tick = 256
 
 [general.northward]
 queue_capacity = 10000
@@ -31,29 +29,45 @@ start_timeout_ms = 2000
 
 [general.collector]
 collection_timeout_ms = 30000
-metrics_interval_ms = 60000
 max_concurrent_collections = 200
-retry_attempts = 3
-retry_delay_ms = 1000
 outbound_queue_capacity = 10000
 
-# Logging
-[general.logging]
-# Default TTL for channel log level overrides in milliseconds.
-# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_DEFAULT_TTL_MS
+[general.collector.retry_policy]
+max_attempts = 3
+initial_interval_ms = 1000
+max_interval_ms = 30000
+randomization_factor = 0.2
+multiplier = 2.0
+
+# Logging (top-level)
+[logging.control]
 channel_override_default_ttl_ms = 300000
-# Minimum allowed TTL (ms) to avoid abusive rapid toggling.
-# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_MIN_TTL_MS
 channel_override_min_ttl_ms = 10000
-# Maximum allowed TTL (ms) to avoid "permanent debug".
-# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_MAX_TTL_MS
 channel_override_max_ttl_ms = 1800000
-# Override cleanup tick interval in milliseconds.
-# Environment override: NG__LOGGING__OVERRIDE_CLEANUP_INTERVAL_MS
 override_cleanup_interval_ms = 5000
-# Driver->host log ingest queue capacity (bounded, drop-old-keep-new).
-# Environment override: NG__LOGGING__DRIVER_INGEST_QUEUE_CAPACITY
 driver_ingest_queue_capacity = 10000
+
+[logging.output]
+format = "text"               # text | json
+include_span_fields = true
+
+[logging.output.file]
+enabled = true
+dir = "./logs"
+
+[logging.output.file.rotation]
+mode = "both"                 # time | size | both
+time = "daily"                # hourly | daily
+size_mb = 100
+max_files = 200
+
+[logging.output.file.retention]
+max_days = 7
+max_total_size_mb = 2048
+
+[logging.cleanup]
+enabled = true
+interval_ms = 60000
 
 # Web
 [web]

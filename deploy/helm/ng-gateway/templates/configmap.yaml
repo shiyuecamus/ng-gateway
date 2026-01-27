@@ -30,19 +30,17 @@ data:
   {{- if $config.general.southward.driverSyncStartTimeout }}
   NG__GENERAL__SOUTHWARD__START_TIMEOUT_MS: {{ $config.general.southward.driverSyncStartTimeout | quote }}
   {{- end }}
-  {{- if $config.general.southward.snapshot }}
-  {{- if hasKey $config.general.southward.snapshot "deviceChangeCacheTtlMs" }}
-  NG__GENERAL__SOUTHWARD__SNAPSHOT__DEVICE_CHANGE_CACHE_TTL_MS: {{ $config.general.southward.snapshot.deviceChangeCacheTtlMs | quote }}
+  {{- if hasKey $config.general.southward "deviceChangeCacheTtlMs" }}
+  NG__GENERAL__SOUTHWARD__DEVICE_CHANGE_CACHE_TTL_MS: {{ $config.general.southward.deviceChangeCacheTtlMs | quote }}
   {{- end }}
-  {{- if hasKey $config.general.southward.snapshot "gcIntervalMs" }}
-  NG__GENERAL__SOUTHWARD__SNAPSHOT__GC_INTERVAL_MS: {{ $config.general.southward.snapshot.gcIntervalMs | quote }}
+  {{- if hasKey $config.general.southward "snapshotGcIntervalMs" }}
+  NG__GENERAL__SOUTHWARD__SNAPSHOT_GC_INTERVAL_MS: {{ $config.general.southward.snapshotGcIntervalMs | quote }}
   {{- end }}
-  {{- if hasKey $config.general.southward.snapshot "gcWorkers" }}
-  NG__GENERAL__SOUTHWARD__SNAPSHOT__GC_WORKERS: {{ $config.general.southward.snapshot.gcWorkers | quote }}
+  {{- if hasKey $config.general.southward "snapshotGcWorkers" }}
+  NG__GENERAL__SOUTHWARD__SNAPSHOT_GC_WORKERS: {{ $config.general.southward.snapshotGcWorkers | quote }}
   {{- end }}
-  {{- if hasKey $config.general.southward.snapshot "maxDevicesPerTick" }}
-  NG__GENERAL__SOUTHWARD__SNAPSHOT__MAX_DEVICES_PER_TICK: {{ $config.general.southward.snapshot.maxDevicesPerTick | quote }}
-  {{- end }}
+  {{- if hasKey $config.general.southward "maxDevicesPerSnapshotTick" }}
+  NG__GENERAL__SOUTHWARD__MAX_DEVICES_PER_SNAPSHOT_TICK: {{ $config.general.southward.maxDevicesPerSnapshotTick | quote }}
   {{- end }}
   {{- end }}
   {{- if $config.general.northward }}
@@ -57,37 +55,96 @@ data:
   {{- if $config.general.collector.collectionTimeout }}
   NG__GENERAL__COLLECTOR__COLLECTION_TIMEOUT_MS: {{ $config.general.collector.collectionTimeout | quote }}
   {{- end }}
-  {{- if $config.general.collector.metricsInterval }}
-  NG__GENERAL__COLLECTOR__METRICS_INTERVAL_MS: {{ $config.general.collector.metricsInterval | quote }}
-  {{- end }}
   {{- if $config.general.collector.maxConcurrentCollections }}
   NG__GENERAL__COLLECTOR__MAX_CONCURRENT_COLLECTIONS: {{ $config.general.collector.maxConcurrentCollections | quote }}
   {{- end }}
-  {{- if $config.general.collector.retryAttempts }}
-  NG__GENERAL__COLLECTOR__RETRY_ATTEMPTS: {{ $config.general.collector.retryAttempts | quote }}
+  {{- if $config.general.collector.retryPolicy }}
+  {{- if hasKey $config.general.collector.retryPolicy "maxAttempts" }}
+  NG__GENERAL__COLLECTOR__RETRY_POLICY__MAX_ATTEMPTS: {{ $config.general.collector.retryPolicy.maxAttempts | quote }}
   {{- end }}
-  {{- if $config.general.collector.retryDelay }}
-  NG__GENERAL__COLLECTOR__RETRY_DELAY_MS: {{ $config.general.collector.retryDelay | quote }}
+  {{- if hasKey $config.general.collector.retryPolicy "initialIntervalMs" }}
+  NG__GENERAL__COLLECTOR__RETRY_POLICY__INITIAL_INTERVAL_MS: {{ $config.general.collector.retryPolicy.initialIntervalMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.collector.retryPolicy "maxIntervalMs" }}
+  NG__GENERAL__COLLECTOR__RETRY_POLICY__MAX_INTERVAL_MS: {{ $config.general.collector.retryPolicy.maxIntervalMs | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.collector.retryPolicy "randomizationFactor" }}
+  NG__GENERAL__COLLECTOR__RETRY_POLICY__RANDOMIZATION_FACTOR: {{ $config.general.collector.retryPolicy.randomizationFactor | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.collector.retryPolicy "multiplier" }}
+  NG__GENERAL__COLLECTOR__RETRY_POLICY__MULTIPLIER: {{ $config.general.collector.retryPolicy.multiplier | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.collector.retryPolicy "maxElapsedTimeMs" }}
+  NG__GENERAL__COLLECTOR__RETRY_POLICY__MAX_ELAPSED_TIME_MS: {{ $config.general.collector.retryPolicy.maxElapsedTimeMs | quote }}
+  {{- end }}
   {{- end }}
   {{- if $config.general.collector.outboundQueueCapacity }}
   NG__GENERAL__COLLECTOR__OUTBOUND_QUEUE_CAPACITY: {{ $config.general.collector.outboundQueueCapacity | quote }}
   {{- end }}
   {{- end }}
-  {{- if $config.general.logging }}
-  {{- if hasKey $config.general.logging "channelOverrideDefaultTtlMs" }}
-  NG__GENERAL__LOGGING__CHANNEL_OVERRIDE_DEFAULT_TTL_MS: {{ $config.general.logging.channelOverrideDefaultTtlMs | quote }}
+  {{- if $config.logging }}
+  {{- if $config.logging.control }}
+  {{- if hasKey $config.logging.control "channelOverrideDefaultTtlMs" }}
+  NG__LOGGING__CONTROL__CHANNEL_OVERRIDE_DEFAULT_TTL_MS: {{ $config.logging.control.channelOverrideDefaultTtlMs | quote }}
   {{- end }}
-  {{- if hasKey $config.general.logging "channelOverrideMinTtlMs" }}
-  NG__GENERAL__LOGGING__CHANNEL_OVERRIDE_MIN_TTL_MS: {{ $config.general.logging.channelOverrideMinTtlMs | quote }}
+  {{- if hasKey $config.logging.control "channelOverrideMinTtlMs" }}
+  NG__LOGGING__CONTROL__CHANNEL_OVERRIDE_MIN_TTL_MS: {{ $config.logging.control.channelOverrideMinTtlMs | quote }}
   {{- end }}
-  {{- if hasKey $config.general.logging "channelOverrideMaxTtlMs" }}
-  NG__GENERAL__LOGGING__CHANNEL_OVERRIDE_MAX_TTL_MS: {{ $config.general.logging.channelOverrideMaxTtlMs | quote }}
+  {{- if hasKey $config.logging.control "channelOverrideMaxTtlMs" }}
+  NG__LOGGING__CONTROL__CHANNEL_OVERRIDE_MAX_TTL_MS: {{ $config.logging.control.channelOverrideMaxTtlMs | quote }}
   {{- end }}
-  {{- if hasKey $config.general.logging "overrideCleanupIntervalMs" }}
-  NG__GENERAL__LOGGING__OVERRIDE_CLEANUP_INTERVAL_MS: {{ $config.general.logging.overrideCleanupIntervalMs | quote }}
+  {{- if hasKey $config.logging.control "overrideCleanupIntervalMs" }}
+  NG__LOGGING__CONTROL__OVERRIDE_CLEANUP_INTERVAL_MS: {{ $config.logging.control.overrideCleanupIntervalMs | quote }}
   {{- end }}
-  {{- if hasKey $config.general.logging "driverIngestQueueCapacity" }}
-  NG__GENERAL__LOGGING__DRIVER_INGEST_QUEUE_CAPACITY: {{ $config.general.logging.driverIngestQueueCapacity | quote }}
+  {{- if hasKey $config.logging.control "driverIngestQueueCapacity" }}
+  NG__LOGGING__CONTROL__DRIVER_INGEST_QUEUE_CAPACITY: {{ $config.logging.control.driverIngestQueueCapacity | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.logging.output }}
+  {{- if hasKey $config.logging.output "format" }}
+  NG__LOGGING__OUTPUT__FORMAT: {{ $config.logging.output.format | quote }}
+  {{- end }}
+  {{- if hasKey $config.logging.output "includeSpanFields" }}
+  NG__LOGGING__OUTPUT__INCLUDE_SPAN_FIELDS: {{ $config.logging.output.includeSpanFields | quote }}
+  {{- end }}
+  {{- if $config.logging.output.file }}
+  {{- if hasKey $config.logging.output.file "enabled" }}
+  NG__LOGGING__OUTPUT__FILE__ENABLED: {{ $config.logging.output.file.enabled | quote }}
+  {{- end }}
+  {{- if hasKey $config.logging.output.file "dir" }}
+  NG__LOGGING__OUTPUT__FILE__DIR: {{ $config.logging.output.file.dir | quote }}
+  {{- end }}
+  {{- if $config.logging.output.file.rotation }}
+  {{- if hasKey $config.logging.output.file.rotation "mode" }}
+  NG__LOGGING__OUTPUT__FILE__ROTATION__MODE: {{ $config.logging.output.file.rotation.mode | quote }}
+  {{- end }}
+  {{- if hasKey $config.logging.output.file.rotation "time" }}
+  NG__LOGGING__OUTPUT__FILE__ROTATION__TIME: {{ $config.logging.output.file.rotation.time | quote }}
+  {{- end }}
+  {{- if hasKey $config.logging.output.file.rotation "sizeMb" }}
+  NG__LOGGING__OUTPUT__FILE__ROTATION__SIZE_MB: {{ $config.logging.output.file.rotation.sizeMb | quote }}
+  {{- end }}
+  {{- if hasKey $config.logging.output.file.rotation "maxFiles" }}
+  NG__LOGGING__OUTPUT__FILE__ROTATION__MAX_FILES: {{ $config.logging.output.file.rotation.maxFiles | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.logging.output.file.retention }}
+  {{- if hasKey $config.logging.output.file.retention "maxDays" }}
+  NG__LOGGING__OUTPUT__FILE__RETENTION__MAX_DAYS: {{ $config.logging.output.file.retention.maxDays | quote }}
+  {{- end }}
+  {{- if hasKey $config.logging.output.file.retention "maxTotalSizeMb" }}
+  NG__LOGGING__OUTPUT__FILE__RETENTION__MAX_TOTAL_SIZE_MB: {{ $config.logging.output.file.retention.maxTotalSizeMb | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.logging.cleanup }}
+  {{- if hasKey $config.logging.cleanup "enabled" }}
+  NG__LOGGING__CLEANUP__ENABLED: {{ $config.logging.cleanup.enabled | quote }}
+  {{- end }}
+  {{- if hasKey $config.logging.cleanup "intervalMs" }}
+  NG__LOGGING__CLEANUP__INTERVAL_MS: {{ $config.logging.cleanup.intervalMs | quote }}
+  {{- end }}
   {{- end }}
   {{- end }}
   {{- end }}

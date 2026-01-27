@@ -50,6 +50,9 @@ pub(crate) struct CollectorMetricsHub {
     cycle_fail_seconds: Histogram,
     cycle_timeout_seconds: Histogram,
 
+    retries_timeout_total: IntCounter,
+    retries_error_total: IntCounter,
+
     // snapshot-only state (single source of truth for REST/WS)
     avg_cycle_ns: AtomicU64,
     last_update: RwLock<Option<DateTime<Utc>>>,
@@ -143,6 +146,27 @@ impl CollectorMetricsHub {
             .get_metric_with_label_values(&["available"])
             .map_err(|e| NGError::from(format!("Failed to get permits(available): {e}")))?;
 
+        let retries_total = IntCounterVec::new(
+            opts!(
+                "collector_retries_total",
+                "Total collector retries labeled by reason (timeout|error)."
+            ),
+            &["reason"],
+        )
+        .map_err(|e| NGError::from(format!("Failed to create collector_retries_total: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(retries_total.clone()),
+            "collector_retries_total",
+        );
+
+        let retries_timeout_total = retries_total
+            .get_metric_with_label_values(&["timeout"])
+            .map_err(|e| NGError::from(format!("Failed to get retries(timeout): {e}")))?;
+        let retries_error_total = retries_total
+            .get_metric_with_label_values(&["error"])
+            .map_err(|e| NGError::from(format!("Failed to get retries(error): {e}")))?;
+
         Ok(Self {
             active_tasks,
             permits_current,
@@ -153,6 +177,8 @@ impl CollectorMetricsHub {
             cycle_success_seconds,
             cycle_fail_seconds,
             cycle_timeout_seconds,
+            retries_timeout_total,
+            retries_error_total,
             avg_cycle_ns: AtomicU64::new(0),
             last_update: RwLock::new(None),
         })
@@ -218,6 +244,20 @@ impl CollectorMetricsHub {
         self.touch();
     }
 
+    /// Increment retries counter for timeout-triggered retries.
+    #[inline]
+    pub(crate) fn inc_retries_timeout(&self) {
+        self.retries_timeout_total.inc_by(1);
+        self.touch();
+    }
+
+    /// Increment retries counter for error-triggered retries.
+    #[inline]
+    pub(crate) fn inc_retries_error(&self) {
+        self.retries_error_total.inc_by(1);
+        self.touch();
+    }
+
     /// Snapshot collector metrics for REST/WS consumers.
     pub(crate) fn snapshot(&self) -> CollectorMetricsSnapshot {
         let success = self.cycles_success_total.get();
@@ -238,6 +278,9 @@ impl CollectorMetricsHub {
             available_permits: self.permits_available.get().max(0) as usize,
             // Not yet implemented; keep stable placeholder for now.
             batch_efficiency: 0.0,
+            retries_total: self.retries_timeout_total.get() + self.retries_error_total.get(),
+            retries_timeout_total: self.retries_timeout_total.get(),
+            retries_error_total: self.retries_error_total.get(),
         }
     }
 }

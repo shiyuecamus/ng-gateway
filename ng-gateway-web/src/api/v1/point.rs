@@ -66,40 +66,27 @@ pub(crate) async fn init_rbac_rules(
     router_prefix: &str,
     perm_checker: &NGPermChecker,
 ) -> WebResult<(), RBACError> {
-    // Detail
-    perm_checker
-        .register(
+    let rules = vec![
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/detail/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Point, Operation::Read)?)
                 .or(has_scope("point:read")?),
-        )
-        .await?;
-
-    // List
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/list"),
-            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?,
-        )
-        .await?;
-
-    // Page
-    perm_checker
-        .register(
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/page"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Point, Operation::Read)?)
                 .or(has_scope("point:read")?),
-        )
-        .await?;
-
-    // Create
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -108,23 +95,15 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Create,
                 )?)
                 .or(has_scope("point:create")?),
-        )
-        .await?;
-
-    // Update
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Point, Operation::Write)?)
                 .or(has_scope("point:write")?),
-        )
-        .await?;
-
-    // Delete
-    perm_checker
-        .register(
+        ),
+        (
             Method::DELETE,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -133,12 +112,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("point:delete")?),
-        )
-        .await?;
-
-    // Batch Delete
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/batch-delete"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -147,12 +122,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("point:delete")?),
-        )
-        .await?;
-
-    // Clear by device
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/clear"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -161,8 +132,12 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("point:delete")?),
-        )
-        .await?;
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Point module RBAC rules initialized successfully");
     Ok(())

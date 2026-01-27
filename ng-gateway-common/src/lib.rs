@@ -12,6 +12,7 @@ pub mod casbin;
 pub mod event;
 pub mod log;
 pub mod metrics;
+pub mod settings;
 
 // Re-export error types
 pub use ng_gateway_error::{NGError, NGResult};
@@ -121,8 +122,10 @@ impl NGAppContext {
 
         apply_runtime_dir(&settings.general.runtime_dir)?;
 
-        // Initialize log control runtime and install logger subscriber.
-        log::init_runtime(&mut logger, &settings.general.logging)?;
+        let shutdown_token = CancellationToken::new();
+
+        // Initialize logging subsystem (control + output + cleanup worker).
+        log::init_log(&mut logger, &settings, shutdown_token.child_token())?;
 
         let span = span!(Level::INFO, "init-app");
         let _guard = span.enter();
@@ -135,7 +138,7 @@ impl NGAppContext {
 
         let mut ctx = NGAppContext {
             shutting_down: AtomicBool::new(false),
-            shutdown_token: CancellationToken::new(),
+            shutdown_token,
             logger,
             settings: Some(settings),
             event_bus: Some(event_bus),

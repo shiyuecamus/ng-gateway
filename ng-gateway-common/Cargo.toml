@@ -5,8 +5,8 @@ publish = { workspace = true }
 version = { workspace = true }
 repository = { workspace = true }
 
-[dependencies]
-crossbeam-queue = "0.3.12"
+[dependencies.toml_edit]
+workspace = true
 
 [dependencies.colored]
 workspace = true

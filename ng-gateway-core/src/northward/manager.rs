@@ -9,6 +9,7 @@
 use super::{
     super::{
         lifecycle::{start_with_policy, StartPolicy},
+        northward::NorthwardEventsBus,
         southward::manager::NGSouthwardManager,
     },
     actor::AppActor,
@@ -19,7 +20,7 @@ use super::{
 };
 use crate::northward::NorthwardRegistry;
 use dashmap::DashMap;
-use ng_gateway_common::metrics::{channel::InstrumentedSender, NGMetricsHub};
+use ng_gateway_common::metrics::NGMetricsHub;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
     core::metrics::{AppActorState, NorthwardAppStatsSnapshot, NorthwardManagerMetricsSnapshot},
@@ -29,7 +30,7 @@ use ng_gateway_models::{
 };
 use ng_gateway_sdk::{
     AttributeData, DeviceConnectedData, DeviceDisconnectedData, NorthwardConnectionState,
-    NorthwardData, NorthwardEvent, NorthwardInitContext, PointValue, TelemetryData,
+    NorthwardData, NorthwardInitContext, PointValue, TelemetryData,
 };
 use sea_orm::DatabaseConnection;
 use std::{collections::HashMap, sync::Arc};
@@ -89,7 +90,7 @@ impl NGNorthwardManager {
         &self,
         topology: Vec<(AppModel, Option<AppSubModel>)>,
         db: &DatabaseConnection,
-        global_events_tx: &InstrumentedSender<(i32, NorthwardEvent)>,
+        northward_events_bus: &Arc<NorthwardEventsBus>,
     ) -> NGResult<()> {
         info!(
             "Initializing northward topology with {} apps",
@@ -117,7 +118,11 @@ impl NGNorthwardManager {
                     {
                         Ok(_) => {
                             // Start event bridge (forwards plugin events to global channel)
-                            self.start_app_event_bridge(app.id, &actor, global_events_tx.clone());
+                            self.start_app_event_bridge(
+                                app.id,
+                                &actor,
+                                Arc::clone(northward_events_bus),
+                            );
 
                             self.app_actors.insert(app.id, Arc::clone(&actor));
 
@@ -400,13 +405,20 @@ impl NGNorthwardManager {
         app: &AppModel,
         sub: Option<AppSubModel>,
         db: &DatabaseConnection,
-        global_events_tx: InstrumentedSender<(i32, NorthwardEvent)>,
+        northward_events_bus: Arc<NorthwardEventsBus>,
         shutdown_token: CancellationToken,
         timeout_ms: u64,
     ) -> NGResult<()> {
         self.stop_and_remove_app(app.id).await;
-        self.create_and_start_app(app, sub, db, global_events_tx, shutdown_token, timeout_ms)
-            .await
+        self.create_and_start_app(
+            app,
+            sub,
+            db,
+            northward_events_bus,
+            shutdown_token,
+            timeout_ms,
+        )
+        .await
     }
 
     /// Create and start a new app at runtime
@@ -430,7 +442,7 @@ impl NGNorthwardManager {
         app: &AppModel,
         sub: Option<AppSubModel>,
         db: &DatabaseConnection,
-        global_events_tx: InstrumentedSender<(i32, NorthwardEvent)>,
+        northward_events_bus: Arc<NorthwardEventsBus>,
         shutdown_token: CancellationToken,
         timeout_ms: u64,
     ) -> NGResult<()> {
@@ -463,7 +475,7 @@ impl NGNorthwardManager {
         }
 
         // Start event bridge (forwards plugin events to global channel)
-        self.start_app_event_bridge(app.id, &actor, global_events_tx);
+        self.start_app_event_bridge(app.id, &actor, northward_events_bus);
 
         // Insert into registry
         self.app_actors.insert(app.id, Arc::clone(&actor));
@@ -830,7 +842,7 @@ impl NGNorthwardManager {
         &self,
         app_id: i32,
         actor: &Arc<AppActor>,
-        global_events_tx: InstrumentedSender<(i32, NorthwardEvent)>,
+        northward_events_bus: Arc<NorthwardEventsBus>,
     ) {
         let Some(mut app_events_rx) = actor.take_events_rx() else {
             warn!(
@@ -852,7 +864,8 @@ impl NGNorthwardManager {
                 metrics_hub.inc_northward_events_received();
 
                 // Forward to global channel (with app_id tag)
-                if let Err(e) = global_events_tx.send((app_id, event)).await {
+                let tx = northward_events_bus.sender();
+                if let Err(e) = tx.send((app_id, event)).await {
                     error!(
                         "Failed to forward event from app {} to global channel: {}",
                         app_id, e

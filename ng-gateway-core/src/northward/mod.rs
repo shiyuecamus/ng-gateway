@@ -1,4 +1,5 @@
 mod actor;
+mod bus;
 mod extension;
 pub mod loader;
 mod manager;
@@ -7,6 +8,7 @@ mod runtime_api;
 mod subscription_sync;
 
 pub use actor::AppActor;
+pub use bus::NorthwardEventsBus;
 pub use extension::AppExtensionManager;
 pub use loader::{NorthwardLoader, NorthwardProbeInfo, NorthwardRegistry};
 pub use manager::NGNorthwardManager;

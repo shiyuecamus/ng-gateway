@@ -7,7 +7,7 @@
 
 use dashmap::DashMap;
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::{domain::prelude::LogLevel, settings::Logging};
+use ng_gateway_models::{domain::prelude::LogLevel, settings::LoggingControl};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -85,6 +85,18 @@ impl Default for LogControlSettings {
             channel_override_max_ttl_ms: 30 * 60 * 1000,
             override_cleanup_interval_ms: 5_000,
             driver_ingest_queue_capacity: 10_000,
+        }
+    }
+}
+
+impl From<LoggingControl> for LogControlSettings {
+    fn from(v: LoggingControl) -> Self {
+        Self {
+            channel_override_default_ttl_ms: v.channel_override_default_ttl_ms,
+            channel_override_min_ttl_ms: v.channel_override_min_ttl_ms,
+            channel_override_max_ttl_ms: v.channel_override_max_ttl_ms,
+            override_cleanup_interval_ms: v.override_cleanup_interval_ms,
+            driver_ingest_queue_capacity: v.driver_ingest_queue_capacity,
         }
     }
 }
@@ -397,17 +409,5 @@ impl LogControlRuntime {
     pub fn apply_settings(&self, new_settings: LogControlSettings) {
         *self.settings.write() = new_settings;
         self.overrides.update_settings(&new_settings);
-    }
-}
-
-impl From<Logging> for LogControlSettings {
-    fn from(v: Logging) -> Self {
-        Self {
-            channel_override_default_ttl_ms: v.channel_override_default_ttl_ms,
-            channel_override_min_ttl_ms: v.channel_override_min_ttl_ms,
-            channel_override_max_ttl_ms: v.channel_override_max_ttl_ms,
-            override_cleanup_interval_ms: v.override_cleanup_interval_ms,
-            driver_ingest_queue_capacity: v.driver_ingest_queue_capacity,
-        }
     }
 }

@@ -1,7 +1,7 @@
-use crate::southward::index::RuntimeIndex;
+use crate::southward::{index::RuntimeIndex, SouthwardDataBus};
 use chrono::Utc;
 use dashmap::DashMap;
-use ng_gateway_common::metrics::{channel::InstrumentedSender, NGMetricsHub};
+use ng_gateway_common::metrics::NGMetricsHub;
 use ng_gateway_sdk::{
     DeviceConnectedData, DeviceDisconnectedData, NorthwardData, SouthwardConnectionState,
 };
@@ -30,7 +30,7 @@ impl ChannelMonitor {
     }
 
     /// Spawn a connection monitor for a specific channel
-    pub fn spawn(&self, channel_id: i32, data_tx: &InstrumentedSender<Arc<NorthwardData>>) {
+    pub fn spawn(&self, channel_id: i32, southward_data_bus: &Arc<SouthwardDataBus>) {
         if self.tasks.contains_key(&channel_id) {
             return;
         }
@@ -48,7 +48,7 @@ impl ChannelMonitor {
             Some(chan) => chan.config.driver_id().to_string(),
             None => return,
         };
-        let monitor_data_tx = data_tx.clone();
+        let monitor_outbound = Arc::clone(southward_data_bus);
         let device_map = Arc::clone(&self.index.channel_devices);
         let devices_table = Arc::clone(&self.index.devices);
         let monitor_metrics_hub = Arc::clone(&self.metrics_hub);
@@ -200,8 +200,9 @@ impl ChannelMonitor {
                 // Emit initial transition based on current state to avoid missing first events
                 let init_state = rx.borrow().clone();
                 if let Some(events) = handle_transition(init_state) {
+                    let tx = monitor_outbound.sender();
                     for event in events.into_iter() {
-                        let _ = monitor_data_tx.send(event).await;
+                        let _ = tx.send(event).await;
                     }
                 }
                 loop {
@@ -211,8 +212,9 @@ impl ChannelMonitor {
                             if r.is_err() { break; }
                             let state = rx.borrow().clone();
                             if let Some(events) = handle_transition(state) {
+                                let tx = monitor_outbound.sender();
                                 for event in events.into_iter() {
-                                    let _ = monitor_data_tx.send(event).await;
+                                    let _ = tx.send(event).await;
                                 }
                             }
                         }
@@ -228,13 +230,9 @@ impl ChannelMonitor {
     }
 
     /// Spawn monitors for all channel ids
-    pub fn spawn_all(
-        &self,
-        channel_ids: Vec<i32>,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
-    ) {
+    pub fn spawn_all(&self, channel_ids: Vec<i32>, southward_data_bus: &Arc<SouthwardDataBus>) {
         for id in channel_ids.into_iter() {
-            self.spawn(id, data_tx);
+            self.spawn(id, southward_data_bus);
         }
     }
 

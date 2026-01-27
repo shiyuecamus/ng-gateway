@@ -1,6 +1,5 @@
-use ng_gateway_common::metrics::{
-    channel::InstrumentedSender, southward::SouthwardChannelMetricHandles,
-};
+use crate::southward::SouthwardDataBus;
+use ng_gateway_common::metrics::southward::SouthwardChannelMetricHandles;
 use ng_gateway_sdk::{NorthwardData, NorthwardError, NorthwardPublisher, NorthwardResult};
 use std::sync::Arc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -13,7 +12,7 @@ use tokio::sync::mpsc::error::TrySendError;
 /// on saturation without blocking async tasks.
 #[derive(Debug)]
 pub struct MpscNorthwardPublisher {
-    tx: InstrumentedSender<Arc<NorthwardData>>,
+    tx: Arc<SouthwardDataBus>,
     prom: Arc<SouthwardChannelMetricHandles>,
 }
 
@@ -22,10 +21,7 @@ impl MpscNorthwardPublisher {
     ///
     /// This enables per-channel **report/push** metrics for drivers that actively publish
     /// data via `publisher.try_publish(...)` (Report/Subscribe mode).
-    pub fn new(
-        tx: InstrumentedSender<Arc<NorthwardData>>,
-        prom: Arc<SouthwardChannelMetricHandles>,
-    ) -> Self {
+    pub fn new(tx: Arc<SouthwardDataBus>, prom: Arc<SouthwardChannelMetricHandles>) -> Self {
         Self { tx, prom }
     }
 }
@@ -40,7 +36,8 @@ impl NorthwardPublisher for MpscNorthwardPublisher {
             NorthwardData::Telemetry(_) | NorthwardData::Attributes(_) | NorthwardData::Alarm(_)
         );
         let device_id = if should_count { data.device_id() } else { 0 };
-        match self.tx.try_send(data) {
+        let tx = self.tx.sender();
+        match tx.try_send(data) {
             Ok(()) => {
                 let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
                 if should_count {

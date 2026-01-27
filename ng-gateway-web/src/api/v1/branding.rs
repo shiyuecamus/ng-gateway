@@ -14,6 +14,7 @@ use actix_web::{http::Method, web};
 use futures::StreamExt;
 use ng_gateway_common::casbin::NGPermChecker;
 use ng_gateway_error::{rbac::RBACError, web::WebError, WebResult};
+use ng_gateway_models::rbac::PermRule;
 use ng_gateway_models::web::WebResponse;
 use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE, domain::prelude::UpdateBrandingTitle, PermChecker,
@@ -47,29 +48,27 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing branding module RBAC rules...");
 
-    perm_checker
-        .register(
+    let rules: [(Method, String, Box<dyn PermRule>); 3] = [
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}/title"),
-            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?,
-        )
-        .await?;
-
-    perm_checker
-        .register(
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/logo"),
-            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?,
-        )
-        .await?;
-
-    perm_checker
-        .register(
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/favicon"),
-            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?,
-        )
-        .await?;
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Branding module RBAC rules initialized successfully");
     Ok(())

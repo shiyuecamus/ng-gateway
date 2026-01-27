@@ -1,20 +1,23 @@
-use crate::NGSouthwardManager;
+use crate::{southward::SouthwardDataBus, NGSouthwardManager};
+use arc_swap::ArcSwap;
 use chrono::Utc;
 use futures::{future::join_all, StreamExt};
 use ng_gateway_common::metrics::{
-    channel::InstrumentedSender,
     southward::{CollectBatchOutcome, SouthwardChannelMetricHandles},
     NGMetricsHub,
 };
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::{core::metrics::CollectorMetricsSnapshot, settings::CollectorConfig};
+use ng_gateway_models::{core::metrics::CollectorMetricsSnapshot, settings::Collector};
 use ng_gateway_sdk::{
-    CollectItem, CollectionGroupKey, CollectionType, Driver, NorthwardData, RuntimeDevice,
-    RuntimePoint,
+    CollectItem, CollectionGroupKey, CollectionType, Driver, NorthwardData, RetryController,
+    RetryDecision, RetryPolicy, RuntimeDevice, RuntimePoint,
 };
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -54,11 +57,21 @@ struct GroupCollectError {
     is_timeout: bool,
 }
 
+/// Context for a group collection execution
+struct GroupCollectContext {
+    total_budget: Duration,
+    retry_policy: RetryPolicy,
+    semaphore: Arc<ArcSwap<Semaphore>>,
+    metrics_hub: Arc<NGMetricsHub>,
+    prom: Option<Arc<SouthwardChannelMetricHandles>>,
+    token: CancellationToken,
+}
+
 /// Collection engine with enhanced performance and reliability
 #[derive(Clone)]
-pub struct Collector {
+pub struct NGCollector {
     /// Engine configuration
-    config: CollectorConfig,
+    config: Collector,
     /// Channel manager reference
     southward_manager: Arc<NGSouthwardManager>,
     /// Metrics hub (single source of truth).
@@ -70,12 +83,14 @@ pub struct Collector {
     /// Channel-specific cancellation tokens
     channel_tokens: Arc<RwLock<HashMap<i32, CancellationToken>>>,
     /// Fixed semaphore for bounded concurrency
-    semaphore: Arc<Semaphore>,
+    semaphore: Arc<ArcSwap<Semaphore>>,
+    /// Best-effort total permits (for metrics & debugging).
+    semaphore_limit: Arc<AtomicUsize>,
     /// Data batch sender (bounded)
-    data_tx: Arc<InstrumentedSender<Arc<NorthwardData>>>,
+    southward_data_bus: Arc<SouthwardDataBus>,
 }
 
-impl Collector {
+impl NGCollector {
     #[inline]
     async fn refresh_active_tasks_metric(&self) {
         // Best-effort: number of per-channel collection tasks currently registered.
@@ -86,12 +101,13 @@ impl Collector {
     #[inline]
     /// Create a new collection engine
     pub fn new(
-        config: CollectorConfig,
+        config: Collector,
         southward_manager: Arc<NGSouthwardManager>,
         metrics_hub: Arc<NGMetricsHub>,
-        data_tx: InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: Arc<SouthwardDataBus>,
         master_token: CancellationToken,
     ) -> Self {
+        let max_concurrency = config.max_concurrent_collections();
         Self {
             config,
             southward_manager,
@@ -99,9 +115,21 @@ impl Collector {
             collection_tasks: Arc::new(RwLock::new(HashMap::new())),
             master_token,
             channel_tokens: Arc::new(RwLock::new(HashMap::new())),
-            semaphore: Arc::new(Semaphore::new(config.max_concurrent_collections)),
-            data_tx: Arc::new(data_tx),
+            semaphore: Arc::new(ArcSwap::from_pointee(Semaphore::new(max_concurrency))),
+            semaphore_limit: Arc::new(AtomicUsize::new(max_concurrency)),
+            southward_data_bus,
         }
+    }
+
+    /// Hot-apply max concurrent collections (global).
+    ///
+    /// This swaps the semaphore instance for future acquisitions. In-flight group calls
+    /// continue using their already-acquired permits.
+    #[inline]
+    pub fn set_max_concurrent_collections(&self, max: usize) {
+        let max = max.max(1);
+        self.semaphore_limit.store(max, Ordering::Relaxed);
+        self.semaphore.store(Arc::new(Semaphore::new(max)));
     }
 
     #[instrument(name = "collection-start", skip_all)]
@@ -189,9 +217,9 @@ impl Collector {
         let period_ms = channel.config.period().unwrap_or(10000);
         let southward_manager = Arc::clone(&self.southward_manager);
         let metrics_hub = Arc::clone(&self.metrics_hub);
-        let config = self.config;
+        let config = self.config.clone();
         let semaphore = Arc::clone(&self.semaphore);
-        let data_tx = Arc::clone(&self.data_tx);
+        let southward_data_bus = Arc::clone(&self.southward_data_bus);
         let channel_name = channel.config.name().to_string();
         let driver_id = channel.config.driver_id();
 
@@ -226,9 +254,9 @@ impl Collector {
                             &channel_name,
                             &southward_manager,
                             &metrics_hub,
-                            config,
+                            &config,
                             &semaphore,
-                            &data_tx,
+                            &southward_data_bus,
                             &channel_token,
                         ).await {
                             error!(error=%e, "❌ Failed to collect data for channel [{channel_name}]");
@@ -353,83 +381,169 @@ impl Collector {
     async fn collect_one_group(
         driver: Arc<dyn Driver>,
         group: GroupCall,
-        group_timeout: Duration,
-        semaphore: Arc<Semaphore>,
-        metrics_hub: Arc<NGMetricsHub>,
-        prom: Option<Arc<SouthwardChannelMetricHandles>>,
-        token: CancellationToken,
+        ctx: GroupCollectContext,
     ) -> Result<Vec<NorthwardData>, GroupCollectError> {
         // Make semaphore acquire cancellable (owned permit).
+        let sem = ctx.semaphore.load_full();
         let acquired = tokio::select! {
-            _ = token.cancelled() => {
+            _ = ctx.token.cancelled() => {
                 return Err(GroupCollectError {
                     _err: NGError::Error("Group collection cancelled".to_string()),
                     is_timeout: false,
                 });
             }
-            p = semaphore.acquire_owned() => p.map_err(|_| GroupCollectError {
+            p = sem.acquire_owned() => p.map_err(|_| GroupCollectError {
                 _err: NGError::Error("Semaphore closed".to_string()),
                 is_timeout: false,
             }),
         }?;
         let _permit = acquired;
 
-        // Per-group timeout (NOT per-device) to preserve batching semantics.
-        tokio::select! {
-            _ = token.cancelled() => {
-                Err(GroupCollectError {
-                    _err: NGError::Error("Group collection cancelled".to_string()),
-                    is_timeout: false,
-                })
+        let total_budget = if ctx.total_budget.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            ctx.total_budget
+        };
+
+        let started = Instant::now();
+        let budget_ms = total_budget.as_millis().min(u64::MAX as u128) as u64;
+        let mut policy = ctx.retry_policy;
+        policy.max_elapsed_time_ms = match (policy.max_elapsed_time_ms, Some(budget_ms)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (None, Some(b)) => Some(b),
+            (Some(a), None) => Some(a),
+            (None, None) => None,
+        };
+        let mut retry = RetryController::new(&policy);
+
+        loop {
+            let elapsed = started.elapsed();
+            if elapsed >= total_budget {
+                return Err(GroupCollectError {
+                    _err: NGError::Error("Group collection timeout budget exhausted".to_string()),
+                    is_timeout: true,
+                });
             }
-            result = async {
-                let io_start = Instant::now();
-                let (res, is_timeout) = match timeout(group_timeout, driver.collect_data(&group.items)).await {
-                    Ok(inner) => (inner.map_err(|e| NGError::DriverError(e.to_string())), false),
-                    Err(_) => (Err(NGError::Error("Group collection timeout".to_string())), true),
-                };
+            let remaining = total_budget.saturating_sub(elapsed);
 
-                let elapsed = io_start.elapsed();
-                let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
-                let elapsed_seconds = elapsed.as_secs_f64();
-                let points_read = group
-                    .items
-                    .iter()
-                    .map(|(_dev, pts)| pts.len() as u64)
-                    .sum::<u64>();
-
-                let ok = res.is_ok();
-                if let Some(h) = &prom {
-                    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                    h.record_collect_batch(
-                        group.items.iter().map(|(dev, _pts)| dev.id()),
-                        CollectBatchOutcome {
-                            ok,
-                            is_timeout,
-                            points: points_read,
-                            elapsed_ns,
-                            elapsed_seconds,
-                            now_ms,
-                        },
-                    );
+            // One attempt = one driver call (preserve batching semantics).
+            let io_start = Instant::now();
+            let (res, is_timeout) = tokio::select! {
+                _ = ctx.token.cancelled() => {
+                    return Err(GroupCollectError {
+                        _err: NGError::Error("Group collection cancelled".to_string()),
+                        is_timeout: false,
+                    });
                 }
+                r = timeout(remaining, driver.collect_data(&group.items)) => {
+                    match r {
+                        Ok(inner) => (inner.map_err(|e| NGError::DriverError(e.to_string())), false),
+                        Err(_) => (Err(NGError::Error("Group collection timeout".to_string())), true),
+                    }
+                }
+            };
 
+            let call_elapsed = io_start.elapsed();
+            let elapsed_ns = call_elapsed.as_nanos().min(u64::MAX as u128) as u64;
+            let elapsed_seconds = call_elapsed.as_secs_f64();
+            let points_read = group
+                .items
+                .iter()
+                .map(|(_dev, pts)| pts.len() as u64)
+                .sum::<u64>();
+
+            let ok = res.is_ok();
+            if let Some(h) = &ctx.prom {
+                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                h.record_collect_batch(
+                    group.items.iter().map(|(dev, _pts)| dev.id()),
+                    CollectBatchOutcome {
+                        ok,
+                        is_timeout,
+                        points: points_read,
+                        elapsed_ns,
+                        elapsed_seconds,
+                        now_ms,
+                    },
+                );
+            }
+
+            if let Ok(v) = res {
                 Self::record_collector_cycle(
-                    &metrics_hub,
-                    ok,
+                    &ctx.metrics_hub,
+                    true,
+                    false,
+                    elapsed_ns,
+                    elapsed_seconds,
+                );
+                return Ok(v);
+            }
+
+            let err = match res {
+                Ok(v) => return Ok(v),
+                Err(e) => e,
+            };
+
+            let retryable = is_timeout || matches!(err, NGError::DriverError(_));
+            if !retryable {
+                Self::record_collector_cycle(
+                    &ctx.metrics_hub,
+                    false,
                     is_timeout,
                     elapsed_ns,
                     elapsed_seconds,
                 );
+                return Err(GroupCollectError {
+                    _err: err,
+                    is_timeout,
+                });
+            }
 
-                match res {
-                    Ok(v) => Ok(v),
-                    Err(err) => Err(GroupCollectError {
+            match retry.on_failure() {
+                RetryDecision::RetryAfter(delay) => {
+                    if is_timeout {
+                        ctx.metrics_hub.inc_collector_retries_timeout();
+                    } else {
+                        ctx.metrics_hub.inc_collector_retries_error();
+                    }
+
+                    let elapsed2 = started.elapsed();
+                    if elapsed2 >= total_budget {
+                        return Err(GroupCollectError {
+                            _err: err,
+                            is_timeout: true,
+                        });
+                    }
+                    let remaining2 = total_budget.saturating_sub(elapsed2);
+                    let actual_sleep = std::cmp::min(delay, remaining2);
+                    if actual_sleep.is_zero() {
+                        continue;
+                    }
+
+                    tokio::select! {
+                        _ = ctx.token.cancelled() => {
+                            return Err(GroupCollectError {
+                                _err: NGError::Error("Group collection cancelled".to_string()),
+                                is_timeout: false,
+                            });
+                        }
+                        _ = sleep(actual_sleep) => {}
+                    }
+                }
+                RetryDecision::Exhausted => {
+                    Self::record_collector_cycle(
+                        &ctx.metrics_hub,
+                        false,
+                        is_timeout,
+                        elapsed_ns,
+                        elapsed_seconds,
+                    );
+                    return Err(GroupCollectError {
                         _err: err,
                         is_timeout,
-                    }),
+                    });
                 }
-            } => result,
+            }
         }
     }
 
@@ -441,9 +555,9 @@ impl Collector {
         channel_name: &str,
         southward_manager: &Arc<NGSouthwardManager>,
         metrics_hub: &Arc<NGMetricsHub>,
-        config: CollectorConfig,
-        semaphore: &Arc<Semaphore>,
-        data_tx: &Arc<InstrumentedSender<Arc<NorthwardData>>>,
+        config: &Collector,
+        semaphore: &Arc<ArcSwap<Semaphore>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
         cancellation_token: &CancellationToken,
     ) -> NGResult<()> {
         // Check if cancelled before starting
@@ -492,8 +606,9 @@ impl Collector {
         );
 
         let prom = southward_manager.get_channel_metric_handles(channel_id);
-        let group_timeout = Duration::from_millis(config.collection_timeout_ms);
-        let max_in_flight = config.max_concurrent_collections.max(1);
+        let total_budget = Duration::from_millis(config.collection_timeout_ms());
+        let retry_policy = config.retry_policy();
+        let max_in_flight = config.max_concurrent_collections().max(1);
 
         // Execute groups concurrently without spawning per-device tasks.
         //
@@ -506,22 +621,15 @@ impl Collector {
         let mut stream = futures::stream::iter(groups.into_iter())
             .map(|group| {
                 let driver = Arc::clone(&driver);
-                let semaphore = Arc::clone(semaphore);
-                let metrics_hub = Arc::clone(metrics_hub);
-                let token = cancellation_token.clone();
-                let prom = prom.clone();
-                async move {
-                    Self::collect_one_group(
-                        driver,
-                        group,
-                        group_timeout,
-                        semaphore,
-                        metrics_hub,
-                        prom,
-                        token,
-                    )
-                    .await
-                }
+                let ctx = GroupCollectContext {
+                    total_budget,
+                    retry_policy,
+                    semaphore: Arc::clone(semaphore),
+                    metrics_hub: Arc::clone(metrics_hub),
+                    prom: prom.clone(),
+                    token: cancellation_token.clone(),
+                };
+                async move { Self::collect_one_group(driver, group, ctx).await }
             })
             // Keep at most N futures in-flight per channel tick to limit memory and polling work.
             .buffer_unordered(max_in_flight);
@@ -531,7 +639,7 @@ impl Collector {
                 Ok(group_data) => {
                     successful += 1;
                     if !group_data.is_empty() {
-                        Self::send_data(data_tx, group_data).await;
+                        Self::send_data(southward_data_bus, group_data).await;
                     }
                 }
                 Err(e) => {
@@ -545,8 +653,8 @@ impl Collector {
         }
 
         // Keep approximate semaphore metrics updated (best-effort).
-        let available = semaphore.available_permits() as u64;
-        let total = config.max_concurrent_collections as u64;
+        let available = semaphore.load().available_permits() as u64;
+        let total = config.max_concurrent_collections() as u64;
         let current = total.saturating_sub(available);
         metrics_hub.set_collector_concurrency_permits(current, available);
 
@@ -558,12 +666,10 @@ impl Collector {
 
     /// Send data for improved throughput
     #[inline]
-    async fn send_data(
-        data_tx: &Arc<InstrumentedSender<Arc<NorthwardData>>>,
-        data: Vec<NorthwardData>,
-    ) {
+    async fn send_data(southward_data_bus: &Arc<SouthwardDataBus>, data: Vec<NorthwardData>) {
+        let tx = southward_data_bus.sender();
         for item in data.into_iter() {
-            if let Err(e) = data_tx.send(Arc::new(item)).await {
+            if let Err(e) = tx.send(Arc::new(item)).await {
                 error!(error=%e, "Failed to send item to northward system");
             }
         }
@@ -667,7 +773,8 @@ impl Collector {
     #[inline]
     /// Get semaphore metrics (available permits only)
     pub async fn get_semaphore_metrics(&self) -> (usize, usize) {
-        let available = self.semaphore.available_permits();
-        (available, available)
+        let available = self.semaphore.load().available_permits();
+        let total = self.semaphore_limit.load(Ordering::Relaxed);
+        (total.saturating_sub(available), available)
     }
 }

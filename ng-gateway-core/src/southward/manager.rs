@@ -6,6 +6,7 @@ use crate::{
         monitor::ChannelMonitor,
         observability::ChannelBoundTransportMeter,
         publisher::MpscNorthwardPublisher,
+        SouthwardDataBus,
     },
 };
 use chrono::{DateTime, Utc};
@@ -18,14 +19,13 @@ use futures::{
     stream::{self, StreamExt},
 };
 use ng_gateway_common::metrics::{
-    channel::InstrumentedSender, southward::SouthwardChannelMetricHandles, NGMetricsHub,
-    SouthwardChannelSnapshotParams,
+    southward::SouthwardChannelMetricHandles, NGMetricsHub, SouthwardChannelSnapshotParams,
 };
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
     core::metrics::{ChannelStatsSnapshot, DeviceStatsSnapshot, SouthwardManagerMetricsSnapshot},
     entities::prelude::{ActionModel, ChannelModel, DeviceModel, PointModel},
-    settings::SouthwardSnapshot,
+    settings::Southward,
     SouthwardManager,
 };
 use ng_gateway_sdk::{
@@ -248,13 +248,15 @@ pub struct NGSouthwardManager {
     snapshot_gc: Arc<SnapshotGcRuntime>,
 }
 
+const SNAPSHOT_GC_MAX_WORKERS: usize = 16;
+
 /// Snapshot GC runtime state.
 ///
 /// This is a best-effort background memory control mechanism.
 struct SnapshotGcRuntime {
     started: AtomicUsize, // 0 = not started, 1 = started
     shutdown: CancellationToken,
-    cfg: SouthwardSnapshot,
+    cfg: Arc<Southward>,
 }
 
 /// Best-effort GC for a single device snapshot.
@@ -316,7 +318,7 @@ impl NGSouthwardManager {
     pub fn new(
         driver_registry: DriverRegistry,
         metrics_hub: Arc<NGMetricsHub>,
-        snapshot_gc_cfg: SouthwardSnapshot,
+        snapshot_gc_cfg: Arc<Southward>,
     ) -> Self {
         let index = Arc::new(RuntimeIndex::new());
         let monitor = ChannelMonitor::new(Arc::clone(&index), Arc::clone(&metrics_hub));
@@ -344,10 +346,6 @@ impl NGSouthwardManager {
     /// - This is best-effort: it bounds memory growth but does not guarantee immediate eviction.
     /// - If `ttl_ms == 0`, GC is disabled.
     pub fn start_snapshot_gc(&self) {
-        let ttl_ms = self.snapshot_gc.cfg.device_change_cache_ttl_ms;
-        if ttl_ms == 0 {
-            return;
-        }
         // Idempotent start.
         if self
             .snapshot_gc
@@ -357,19 +355,17 @@ impl NGSouthwardManager {
         {
             return;
         }
-
-        let workers = self.snapshot_gc.cfg.gc_workers.max(1);
-        let max_devices_per_tick = self.snapshot_gc.cfg.max_devices_per_tick.max(1);
-        let interval = Duration::from_millis(self.snapshot_gc.cfg.gc_interval_ms.max(200));
+        let cfg = Arc::clone(&self.snapshot_gc.cfg);
 
         // Worker queues (bounded) to avoid unbounded memory.
-        let mut senders: Vec<mpsc::Sender<i32>> = Vec::with_capacity(workers);
-        for _wid in 0..workers {
+        let mut senders: Vec<mpsc::Sender<i32>> = Vec::with_capacity(SNAPSHOT_GC_MAX_WORKERS);
+        for _wid in 0..SNAPSHOT_GC_MAX_WORKERS {
             let (tx, mut rx) = mpsc::channel::<i32>(1024);
             senders.push(tx);
 
             let device_snapshots = Arc::clone(&self.device_snapshots);
             let shutdown = self.snapshot_gc.shutdown.child_token();
+            let cfg = Arc::clone(&cfg);
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
@@ -380,6 +376,10 @@ impl NGSouthwardManager {
                             let Some(device_id) = maybe_id else {
                                 break;
                             };
+                            let ttl_ms = cfg.device_change_cache_ttl_ms();
+                            if ttl_ms == 0 {
+                                continue;
+                            }
                             let now_ms = snapshot_now_ms();
                             gc_device_snapshot_points(&device_snapshots, device_id, now_ms, ttl_ms);
                         }
@@ -394,17 +394,24 @@ impl NGSouthwardManager {
         // cross-worker contention on the same `device_id`.
         let device_snapshots = Arc::clone(&self.device_snapshots);
         let shutdown = self.snapshot_gc.shutdown.child_token();
+        let cfg = Arc::clone(&cfg);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(interval) => {
+                    _ = tokio::time::sleep(Duration::from_millis(cfg.snapshot_gc_interval_ms().max(200))) => {
+                        let ttl_ms = cfg.device_change_cache_ttl_ms();
+                        if ttl_ms == 0 {
+                            continue;
+                        }
+                        let workers = cfg.snapshot_gc_workers().clamp(1, SNAPSHOT_GC_MAX_WORKERS);
+                        let max_devices_per_tick = cfg.max_devices_per_snapshot_tick().max(1);
                         let mut n = 0usize;
                         for e in device_snapshots.iter() {
                             let device_id = *e.key();
                             // Stable partition: same device_id always goes to same worker.
                             // Best-effort: if queue is full, skip.
-                            let idx = (device_id as u32 as usize) % senders.len();
+                            let idx = (device_id as u32 as usize) % workers;
                             let _ = senders[idx].try_send(device_id);
                             n += 1;
                             if n >= max_devices_per_tick {
@@ -665,7 +672,7 @@ impl NGSouthwardManager {
     pub async fn initialize_topology(
         &self,
         topology: Vec<ChannelInitEntry>,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
     ) -> NGResult<()> {
         let successful_channels = Arc::new(AtomicUsize::new(0));
         let failed_channels = Arc::new(AtomicUsize::new(0));
@@ -676,9 +683,10 @@ impl NGSouthwardManager {
         // Run per-channel concurrently while reusing extracted initializer APIs
         stream::iter(topology)
             .for_each_concurrent(None, |(channel_config, dev_triples)| async {
+                let outbound = Arc::clone(southward_data_bus);
                 // Initialize channel with full topology context and commit
                 match self
-                    .initialize_channel_with_topology(channel_config, &dev_triples, data_tx)
+                    .initialize_channel_with_topology(channel_config, &dev_triples, &outbound)
                     .await
                 {
                     Ok(_) => {
@@ -812,12 +820,7 @@ impl NGSouthwardManager {
     // init_channel_by_id removed: drivers are created during channel instance creation
 
     /// Start a channel by id using its current runtime context
-    pub async fn start_channel(
-        &self,
-        channel_id: i32,
-        _data_tx: &InstrumentedSender<Arc<NorthwardData>>,
-        policy: StartPolicy,
-    ) -> NGResult<()> {
+    pub async fn start_channel(&self, channel_id: i32, policy: StartPolicy) -> NGResult<()> {
         // Driver should already be created at instance creation time
         let driver = match self.snapshot_channel_driver(channel_id) {
             Some(d) => d,
@@ -854,20 +857,22 @@ impl NGSouthwardManager {
     pub async fn create_and_start_channel(
         &self,
         config: &ChannelModel,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
         policy: StartPolicy,
     ) -> NGResult<()> {
         // Prepare instance (driver created but not started) and commit
-        let instance = self.create_channel_instance(config, data_tx).await?;
+        let instance = self
+            .create_channel_instance(config, southward_data_bus)
+            .await?;
         let channel_id = instance.config.id();
         self.index
             .channels
             .insert(instance.config.id(), instance.clone());
 
         // Start according to policy via by-id path
-        match self.start_channel(channel_id, data_tx, policy).await {
+        match self.start_channel(channel_id, policy).await {
             Ok(()) => {
-                self.monitor.spawn(channel_id, data_tx);
+                self.monitor.spawn(channel_id, southward_data_bus);
                 Ok(())
             }
             Err(e) => {
@@ -897,10 +902,10 @@ impl NGSouthwardManager {
         &self,
         config: ChannelModel,
         dev_triples: &[DeviceInitTriple],
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
     ) -> NGResult<()> {
         let instance = self
-            .create_channel_instance_with_topology(&config, dev_triples, data_tx)
+            .create_channel_instance_with_topology(&config, dev_triples, southward_data_bus)
             .await?;
         self.index.channels.insert(instance.config.id(), instance);
         Ok(())
@@ -913,7 +918,7 @@ impl NGSouthwardManager {
     pub async fn create_channel_instance(
         &self,
         config: &ChannelModel,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
     ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id
         let driver_factory = self
@@ -937,8 +942,11 @@ impl NGSouthwardManager {
 
         // Build init context with best-effort preload from current indexes.
         // At gateway boot, devices/points may already be present; at runtime add, they may be empty.
-        let ctx =
-            self.build_channel_runtime_context(Arc::clone(&config), Arc::clone(&prom), data_tx);
+        let ctx = self.build_channel_runtime_context(
+            Arc::clone(&config),
+            Arc::clone(&prom),
+            southward_data_bus,
+        );
 
         // Create driver (Box) and convert to Arc
         let driver = driver_factory
@@ -970,7 +978,7 @@ impl NGSouthwardManager {
         &self,
         config: &ChannelModel,
         dev_triples: &[DeviceInitTriple],
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
     ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id
         let driver_factory = self
@@ -1028,7 +1036,7 @@ impl NGSouthwardManager {
             points_by_device,
             runtime_channel: Arc::clone(&runtime_channel),
             publisher: Arc::new(MpscNorthwardPublisher::new(
-                data_tx.clone(),
+                Arc::clone(southward_data_bus),
                 Arc::clone(&prom),
             )),
             channel_id: runtime_channel.id(),
@@ -1154,7 +1162,7 @@ impl NGSouthwardManager {
         &self,
         runtime_channel: Arc<dyn RuntimeChannel>,
         prom: Arc<SouthwardChannelMetricHandles>,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
     ) -> SouthwardInitContext {
         let channel_id = runtime_channel.id();
         // Collect device ids already bound to this channel in indexes (if any)
@@ -1179,7 +1187,7 @@ impl NGSouthwardManager {
             points_by_device,
             runtime_channel,
             publisher: Arc::new(MpscNorthwardPublisher::new(
-                data_tx.clone(),
+                Arc::clone(southward_data_bus),
                 Arc::clone(&prom),
             )),
             channel_id,
@@ -1233,16 +1241,13 @@ impl NGSouthwardManager {
     }
 
     /// Start all channels by constructing runtime contexts and injecting a high-performance publisher
-    pub async fn start_channels(
-        &self,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
-    ) -> NGResult<()> {
+    pub async fn start_channels(&self, southward_data_bus: &Arc<SouthwardDataBus>) -> NGResult<()> {
         // Collect channel ids first to avoid holding iter_mut guards across await
         let ids = self.get_enabled_channel_ids();
         // Spawn monitors up-front to capture transitions uniformly
-        self.monitor.spawn_all(ids.clone(), data_tx);
+        self.monitor.spawn_all(ids.clone(), southward_data_bus);
         for id in ids.into_iter() {
-            self.start_channel(id, data_tx, StartPolicy::AsyncFireAndForget)
+            self.start_channel(id, StartPolicy::AsyncFireAndForget)
                 .await?;
         }
         // Ensure hub manager snapshot baseline is up-to-date after start.
@@ -1331,9 +1336,11 @@ impl NGSouthwardManager {
     pub async fn replace_channel_instance(
         &self,
         config: &ChannelModel,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
     ) -> NGResult<()> {
-        let instance = self.create_channel_instance(config, data_tx).await?;
+        let instance = self
+            .create_channel_instance(config, southward_data_bus)
+            .await?;
         self.index.channels.insert(instance.config.id(), instance);
         self.rebind_channel_devices(config.id);
         self.refresh_manager_snapshot_from_index().await;
@@ -1345,7 +1352,7 @@ impl NGSouthwardManager {
     pub async fn restart_channel(
         &self,
         config: &ChannelModel,
-        data_tx: &InstrumentedSender<Arc<NorthwardData>>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
         timeout_ms: u64,
     ) -> NGResult<()> {
         let channel_id = config.id;
@@ -1354,7 +1361,7 @@ impl NGSouthwardManager {
         // Create and start synchronously (will insert and spawn monitor)
         self.create_and_start_channel(
             config,
-            data_tx,
+            southward_data_bus,
             StartPolicy::SyncWaitConnected { timeout_ms },
         )
         .await?;

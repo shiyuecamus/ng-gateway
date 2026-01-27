@@ -62,31 +62,22 @@ pub(crate) async fn init_rbac_rules(
     router_prefix: &str,
     perm_checker: &NGPermChecker,
 ) -> NGResult<(), RBACError> {
-    // Page
-    perm_checker
-        .register(
+    let rules = vec![
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/page"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Device, Operation::Read)?)
                 .or(has_scope("device:read")?),
-        )
-        .await?;
-
-    // Detail
-    perm_checker
-        .register(
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/detail/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Device, Operation::Read)?)
                 .or(has_scope("device:read")?),
-        )
-        .await?;
-
-    // Create
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -95,12 +86,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Create,
                 )?)
                 .or(has_scope("device:create")?),
-        )
-        .await?;
-
-    // Update
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -109,12 +96,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Write,
                 )?)
                 .or(has_scope("device:write")?),
-        )
-        .await?;
-
-    // Delete
-    perm_checker
-        .register(
+        ),
+        (
             Method::DELETE,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -123,12 +106,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("device:delete")?),
-        )
-        .await?;
-
-    // Batch delete
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/batch-delete"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -137,12 +116,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("device:delete")?),
-        )
-        .await?;
-
-    // Clear by channel
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/clear"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -151,12 +126,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("device:delete")?),
-        )
-        .await?;
-
-    // Change status
-    perm_checker
-        .register(
+        ),
+        (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}/change-status"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -165,12 +136,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Write,
                 )?)
                 .or(has_scope("device:write")?),
-        )
-        .await?;
-
-    // Import points preview
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/import-point-preview"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -179,12 +146,8 @@ pub(crate) async fn init_rbac_rules(
                     Operation::ReadPoint,
                 )?)
                 .or(has_scope("device:read")?),
-        )
-        .await?;
-
-    // Import points commit
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/import-point-commit"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -193,23 +156,15 @@ pub(crate) async fn init_rbac_rules(
                     Operation::WritePoint,
                 )?)
                 .or(has_scope("device:write")?),
-        )
-        .await?;
-
-    // Import actions preview
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/import-action-preview"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::Device, Operation::Read)?)
                 .or(has_scope("device:read")?),
-        )
-        .await?;
-
-    // Import actions commit
-    perm_checker
-        .register(
+        ),
+        (
             Method::POST,
             format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/import-action-commit"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
@@ -218,8 +173,12 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Write,
                 )?)
                 .or(has_scope("device:write")?),
-        )
-        .await?;
+        ),
+    ];
+
+    for (method, path, rule) in rules {
+        perm_checker.register(method, path, rule).await?;
+    }
 
     info!("Device module RBAC rules initialized successfully");
     Ok(())
