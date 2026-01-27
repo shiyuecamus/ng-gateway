@@ -12,7 +12,9 @@
 ### 0.1 本次要做的运行时配置范围（必须全覆盖）
 
 - **采集引擎**：`collection_timeout_ms`、`max_concurrent_collections`、`retry_attempts`、`retry_delay_ms`、`outbound_queue_capacity`
-- **南向/北向启动同步等待**：`start_timeout_ms`、`start_timeout_ms`
+- **南向/北向启动同步等待**：
+  - `general.southward.start_timeout_ms`
+  - `general.northward.start_timeout_ms`
 - **北向队列容量**：`queue_capacity`
 - **南向点位基线 TTL（变更检测快照 GC）**：`general.southward.snapshot.device_change_cache_ttl_ms`（以及 `gc_interval_ms/gc_workers/max_devices_per_tick`）
 - **日志输出**：
@@ -75,6 +77,8 @@
 
 - **唯一权威**：进程内所有组件读配置只能读 `Settings`
 - **统一写入口**：只有一个地方可以写 `Settings`（避免写散导致一致性问题）
+- **按子域（Sub-domain）单独更新**：运行时配置 API 必须“按子域隔离”，每个 API 只允许更新该子域字段，禁止一次性全量更新 Settings
+  - 子域的目标不是“更多 API”，而是让 UI/后端的 apply 语义更可控：**小范围变更、可解释 impact、更少误伤**
 - **强语义 impact**：每次变更必须返回“如何生效”
   - `hot_apply`
   - `restart_component`（例如 collector/northward/logging pipeline）
@@ -104,14 +108,17 @@
 
 建议的最小 API（示意，强调语义而非具体签名）：
 
-- `NGAppContext::apply_settings_patch(patch) -> ApplyResult`
-  - 在持有 `NGAppContext` 写锁（`instance_mut()`）的情况下修改 `Settings`
-  - 返回 `impact`（hot/restart_component/restart_process）与 `restart_targets`
-- `NGAppContext::persist_settings_to_gateway_toml() -> PersistResult`
-  - 把“当前 Settings（在本次范围内的字段）”回写到 `gateway.toml`
-  - 采用原子写策略（见第 3 节）
-- `NGAppContext::apply_restart_plan(plan)`
-  - 调用 core 内部的 `collector.restart()` / `northward_events_pipeline.restart()` / `logging_pipeline.reload()` 等（能做到组件级就组件级）
+- ✅ **最佳实践（强约束）**：对 web 层只暴露一个“不会被误用”的入口：**一次调用完成 apply + persist +（按 impact）触发生效动作**。
+
+- `NGAppContext::apply_runtime_settings(domain, patch) -> ApplyResult`
+  - `domain` 为强类型枚举（见第 7 节），保证“本次 patch 只能修改该子域字段”
+  - 内部固定顺序（强约束）：
+    - `apply_to_runtime(Settings)`：在持有 `NGAppContext` 写锁（`instance_mut()`）的情况下更新内存 Settings
+    - `persist_to_gateway_toml(domain)`：**只回写该子域字段**（避免误解/审计噪声），采用原子写策略（第 3 节）
+    - `apply_impact(impact)`：按结果触发 `collector.restart()` / `northward_events_pipeline.restart()` / `logging_pipeline.reload()` 等
+  - 返回 `ApplyResult`：包含 `applied/persisted/impact/restart_targets/changed_keys/blocked_by_env` 等（第 7.2 节）
+
+> 说明：把 apply 与 persist 拆成两个 public 方法容易被误用（忘记 persist、或 persist 的 domain 搞错、或 apply/persist 顺序不一致）。因此文档层面明确要求：web handler 只调用 `apply_runtime_settings` 这一种“不可出错”的入口。
 
 > 这仍然不是审计/版本系统，只是把“写入/落盘/生效动作”收口到 `ng-gateway-common`，并让 web 层只做薄薄的 API 适配。
 
@@ -131,21 +138,64 @@
 2) （如果仍支持 env）env 覆盖一切（但这会导致“写回 gateway.toml 的值 != 实际生效值”）
    - 不强制用户避免 env 覆盖，但 **UI 必须提示**：“该字段被 env 覆盖，回写不会改变 effective”
 
-### 3.3 我们是否有能力知道“哪些字段被 env 覆盖”？
+### 3.2 我们是否有能力知道“哪些字段被 env 覆盖”？
 
-有能力，但需要我们显式实现“source 标注”逻辑（`config` crate 不会自动告诉你每个字段来自哪个 source）。
+有能力，但必须用**可推导的规则**实现“source 标注”，避免任何时候出现“手写字符串常量”的魔法值（尤其是 env 变量名、toml key path）。
 
-最佳实践做法（确定、可实现、可解释）：
+本设计给出一个**高质量且可落地**的方法：用强类型 key + 统一推导规则，把“字段路径/Env Key/TOML Key 查询”全部收口。
 
-- **规则**：对每个可运行时编辑的字段，维护一个“对应的 env 变量名”
-  - 你们当前约定：`NG__` 前缀，`__` 分隔（例如 `general.collector.collection_timeout_ms` -> `NG__GENERAL__COLLECTOR__COLLECTION_TIMEOUT_MS`）
-- **检测方式**：只要 `std::env::var_os(ENV_NAME).is_some()`，就认为该字段 **被 env 覆盖（env_overridden=true）**
-  - 即使 env 值恰好与文件相同，也仍应标记为 env_overridden（因为它的“控制权”在 env）
-- **对外输出**：
-  - `GET /system/settings` 返回每个字段的 `source: file | env | default`
-  - `PATCH /system/settings` 返回 `blocked_by_env: [fields...]`（仅用于 UI 解释；不属于审计/版本）
+#### 3.2.1 子域字段的强类型 Key（禁止散落字符串）
 
-这样 UI 的提示就有坚实依据：它不是猜测，而是基于 env 变量是否存在的事实判断。
+- 定义一个强类型枚举 `RuntimeSettingKey`（或按子域拆成多个 enum），每个枚举项代表一个**可运行时编辑字段**。
+- 每个枚举项携带结构化路径：`&'static [&'static str]`（分段路径），例如：
+  - `["general","collector","collection_timeout_ms"]`
+  - `["general","southward","snapshot","gc_workers"]`
+- 这些分段路径来自代码（enum/macro 生成），**不允许**在业务逻辑里出现 `"general.collector.collection_timeout_ms"` 这类字符串拼写。
+
+> 备注：这不是“字符串常量散落”，而是“强类型 key 的唯一真源”。业务逻辑只和 enum 交互，字符串只在 enum 内部集中管理或由规则生成。
+
+#### 3.2.2 Env Key 推导（从路径规则生成，避免手工维护映射表）
+
+你们当前 `config::Environment::with_prefix("NG").separator("__")` 已经固定了规则，因此 env key 可从分段路径**规则推导**：
+
+- `prefix = ENV_PREFIX`（复用 settings 加载处的同一常量，禁止散落 `"NG"`）
+- `separator = ENV_SEPARATOR`（同上，禁止散落 `"__"`）
+- `segments = path_segments.map(|s| s.to_ascii_uppercase())`
+- `env_key = prefix + separator + segments.join(separator)`
+
+这样：
+
+- 不需要为每个字段手写 `NG__GENERAL__...` 的字符串常量
+- 新增字段时只需要新增 enum 项（或 macro 生成），不会漏更新映射表
+
+**检测方式**（控制权判断）保持严格语义：
+
+- 只要 `std::env::var_os(derived_env_key).is_some()` 就认为该字段 `env_overridden=true`
+- 即使 env 值与文件值相同也仍标记 overridden（控制权在 env）
+
+#### 3.2.3 File / Default 判断（用结构化 TOML 查询推导，避免“判断某个 key 字符串存在”）
+
+`config` crate 不会给出每个字段来自 file/default 的精确信息，因此我们采用“读原始 `gateway.toml` + 结构化查询”的可解释规则：
+
+- 读取 `gateway.toml` 为 `toml::Value`（或 serde 的 map 结构）
+- 使用同一份 `RuntimeSettingKey.path_segments()` 逐段向下查询：
+  - 若 toml 中存在该 key path：认为 `source=file`
+  - 否则：认为 `source=default`
+
+这个判断同样没有“魔法字符串 key”，因为查询路径来自强类型 key 的分段数组。
+
+#### 3.2.4 对外输出（按子域）
+
+按子域输出视图（见第 7 节 API）：
+
+- 每个字段返回：
+  - `value`
+  - `source: default | file | env`
+  - `env_overridden: bool`
+  - `effective_writable: bool`（例如 env_overridden=true 则 false）
+- PATCH 返回：
+  - `blocked_by_env: [RuntimeSettingKey...]`（用于 UI 提示，不是审计/版本）
+  - `persisted=false` 时必须显式返回 `persistence_warning`
 
 运行时写入顺序（强约束）：
 
@@ -153,7 +203,7 @@
 2) 再原子回写 `gateway.toml`
 3) 返回 `persisted=true/false`
 
-### 3.2 回写 `gateway.toml` 的原子性与失败语义（必须固定）
+### 3.3 回写 `gateway.toml` 的原子性与失败语义（必须固定）
 
 - `applied=true, persisted=true`：运行中生效 + 重启仍生效
 - `applied=true, persisted=false`：运行中生效，但 UI 必须显式提示“重启会丢失”
@@ -184,7 +234,6 @@ path = "/metrics"
 # UI 指标：建议做成“快照”接口（避免每次 UI 刷新都全量 gather）
 [general.metrics.ui]
 enabled = true
-snapshot_interval_ms = 2000
 
 # 指标粒度开关（越细越好，建议按模块拆）
 [general.metrics.granularity]
@@ -199,9 +248,7 @@ runtime_topology = true
 对应 `settings.rs`：
 
 - 在 `General` 下新增 `metrics: MetricsConfig`
-- 删除/废弃 `CollectorConfig.metrics_interval_ms`
-
-> 说明：Prometheus 是 pull，不需要“采集周期”；UI 快照需要周期刷新，因此 interval 属于 `general.metrics.ui.snapshot_interval_ms`。
+- 删除 `CollectorConfig.metrics_interval_ms`
 
 ### 4.2 新增日志输出配置（logging output）
 
@@ -268,10 +315,7 @@ max_total_size_mb = 2048
 
 #### 5.1.3 `max_concurrent_collections`
 
-推荐默认实现为 `restart_component`，并在 Phase 2 再升级为真正 hot apply：
-
-- **Phase 1（稳妥）**：变更触发 `collector.restart()`，重建 semaphore
-- **Phase 2（高级）**：支持动态调整 semaphore permits（hot apply）
+支持动态调整 semaphore permits（hot apply）
 
 #### 5.1.4 `outbound_queue_capacity`
 
@@ -433,12 +477,7 @@ impact 语义建议：
 - 对“是否采集/记录该指标”类：hot apply（内部写入点前做 if-check；关闭则不更新，降低开销）
 
 ### 6.3 UI metrics 的最佳实践形态（避免 UI 刷新造成高开销）
-
-- UI 不应每次刷新都调用 Prometheus gather（会全量扫指标）
-- 建议提供一个轻量的 UI 快照接口：
-  - 后台按 `snapshot_interval_ms` 更新一个 snapshot（结构化 JSON）
-  - UI 直接读 snapshot
-- 这个快照应受 `general.metrics.ui.enabled` 控制
+- UI层的快照应受 `general.metrics.ui.enabled` 控制
 
 ---
 
@@ -448,29 +487,163 @@ impact 语义建议：
 
 ### 7.1 建议路由（v1）
 
-- `GET /system/settings`：返回当前 Settings 的可展示视图（仅包含本次范围字段）
-- `PATCH /system/settings`：一次性更新采集/南北向等待/北向参数/metrics/logging 输出策略（并落盘）
+- **总原则**：运行时配置 API **按子域单独 apply+persist**，禁止 `PATCH /system/settings` 这种“一次性更新所有”入口。
 
-拆分子域（便于 UI 模块化，但仍在 system.rs 统一注册）：
+建议路由（全部归口在 `system.rs` 注册，但按子域拆分 handler）：
 
-- `GET /system/logging` / `PATCH /system/logging`
-- `GET /system/logging/files`
-- `POST /system/logging/download`
-- `POST /system/logging/cleanup`（一键清理，可 dryRun）
-- `GET /system/metrics` / `PATCH /system/metrics`
+- `GET /system/settings/collector`
+- `PATCH /system/settings/collector`
+- `GET /system/settings/northward`
+- `PATCH /system/settings/northward`
+- `GET /system/settings/southward_snapshot`
+- `PATCH /system/settings/southward_snapshot`
+- `GET /system/settings/logging_output`
+- `PATCH /system/settings/logging_output`
+- `GET /system/settings/logging_cleanup`
+- `PATCH /system/settings/logging_cleanup`
+- `GET /system/settings/metrics`
+- `PATCH /system/settings/metrics`
+
+日志能力（整合并收敛 `v1/logging.rs` 到 `/system/settings`）：
+
+- `GET /system/settings/logging_runtime`
+- `PATCH /system/settings/logging_runtime`
+- `GET /system/settings/logging_files`
+- `POST /system/settings/logging_files/download`
+- `POST /system/settings/logging_files/cleanup` - “一键清理/按策略清理”
+
+说明：
+
+- `PATCH` 必须在一个 API 内完成：**apply 到运行时 + persist 到 `gateway.toml` +（按 impact）触发生效动作**，并返回结果（第 7.2 节）
+- 对 UI 来说：每个模块只关心一个子域，避免“点保存日志却把 metrics 也写回”的不可控副作用
+- **硬切换（你的要求）**：删除现有 `v1/logging.rs` 的 `/logging/*` 路由与实现；日志相关能力统一以 `/system/settings/logging_*` 为唯一入口（并纳入 settings 的 apply+persist 规则与返回模型）
 
 ### 7.2 ApplyResult（闭环所需的最小返回模型）
 
-每次 PATCH 返回：
+每次子域 `PATCH /system/settings/{domain}` 返回：
 
 - `applied: bool`（内存已应用）
 - `persisted: bool`（落盘成功与否）
+- `domain`：子域枚举（强类型，不用字符串）
+- `changed_keys: []`：本次实际变更的字段 key（用于 UI 高亮与审计展示）
+- `blocked_by_env: []`：被 env 覆盖导致拒绝写入的字段 key
+- `persistence_warning?: string`：当 `persisted=false` 时必须返回（UI 直接展示）
 - `impact`：
   - `hot_apply`
   - `restart_component`（列出组件名：collector/northward/logging_pipeline/metrics_snapshot）
   - `restart_process`（尽量不出现，但语义保留）
 - `restart_targets?: []`
 
+> 关键：`domain/changed_keys/blocked_by_env` 必须是强类型枚举序列（或可解析的结构化 key），避免 UI/后端互相用字符串对齐。
+
+### 7.3 UI 详细设计：Preferences / System（按子域单独应用/保存）
+
+对应代码位置：`ng-gateway-ui/packages/effects/layouts/src/widgets/preferences/blocks/system/`
+
+#### 7.3.1 设计目标（你要求的闭环 + 高质量工程）
+
+- **按子域拆块**：每个 block 只负责一个子域的展示/编辑/应用/保存
+- **Apply = 生效 + 持久化**：用户点击“应用/保存”一次请求完成，避免“先 apply 再 save”的双按钮分裂语义
+- **source 可解释**：字段旁显示 `default/file/env`，当 `env_overridden=true` 时禁用输入并提示原因
+- **无魔法值**：
+  - 前端不手写 domain 字符串 / key path 字符串去拼请求
+  - 统一从“子域枚举 + key 枚举（或后端返回的 key）”生成请求与展示
+
+#### 7.3.2 UI Block 划分与 API 映射
+
+- **建议页面信息架构（IA）**：Preferences -> System（系统）页签下，按“分组 + 卡片/折叠块”呈现。
+
+**A. Runtime Tuning（运行时调参）分组**
+
+- **Collector**（采集引擎）：`GET/PATCH /system/settings/collector`
+- **Northward**（北向队列 + start timeout）：`GET/PATCH /system/settings/northward`
+- **Southward Snapshot**（TTL + GC）：`GET/PATCH /system/settings/southward_snapshot`
+- **Metrics**（总开关/Prometheus/UI/粒度开关）：`GET/PATCH /system/settings/metrics`
+
+**B. Logging（日志）分组（最佳实践拆分：至少 2 个子域 + 1 个运维块）**
+
+- **Logging Runtime**（日志级别/override/TTL 等运行时控制）：`GET/PATCH /system/settings/logging_runtime`
+  - 直接替代并删除现有“日志级别旧接口与旧路由”
+- **Logging Output**（输出到文件/滚动/保留/格式/span fields）：`GET/PATCH /system/settings/logging_output`
+- **Logging Files（运维）**：`GET /system/settings/logging_files` + `POST /system/settings/logging_files/download`
+  - 若做清理：`POST /system/settings/logging_files/cleanup`
+
+> 为什么日志要拆多个子域？  
+> - **Runtime vs Output**：日志级别是“极高频且强运维属性”的运行时控制；输出策略（file/rotation/retention/format）是“更重、可能触发 reload”的管道配置。拆开能让 impact 更可控、权限更清晰、UI 更不误操作。  
+> - **Settings vs Ops**：文件列表/下载/清理是运维操作，和设置 patch 的“配置闭环”不同。即使路径在 `/system/settings/...` 下，也应在模型层明确区分为 `ops`（不会写配置，不会触发 persist）。
+
+**C. 前端文件结构规划（和现状对齐，可直接开工）**
+
+当前 `blocks/system` 只有两个文件：
+
+- `logging.vue`：日志级别设置 + 打开下载弹窗
+- `log-download-modal.vue`：实现日志文件列表/下载
+  - 本设计要求硬切换：前端必须改用 `/system/settings/logging_files` + `/system/settings/logging_files/download` + `/system/settings/logging_files/cleanup`，同时删除旧接口与旧路由
+
+按本设计落地后，建议拆成更清晰的 3 个 block（文件名只是建议，重点是职责边界）：
+
+- `logging-runtime.vue`
+  - 替代/迁移自现有 `logging.vue` 的“日志级别/TTL 等运行时控制”
+  - API：`/system/settings/logging_runtime`
+- `logging-files.vue` + `log-download-modal.vue`
+  - 把“文件列表/下载”从 runtime block 拆出来，避免混在同一个卡片里
+  - API：`/system/settings/logging_files` + `/system/settings/logging_files/download` + `/system/settings/logging_files/cleanup`
+- `logging-output.vue`
+  - 新增：文件输出/滚动/保留/格式/span fields（这块当前 UI 还没有，需要新增）
+  - API：`/system/settings/logging_output`
+
+> 现状对齐：当前 `logging.vue` 通过旧的日志级别接口管理 baseline level。本设计要求硬切换：实现 `/system/settings/logging_runtime` 后，前端与后端路由统一迁移到新接口，并删除旧接口与旧路由。
+
+#### 7.3.3 交互流程（每个子域一致）
+
+- 页面进入：`GET /system/settings/{domain}` 拉取 `view`（含每字段 value + source + env_overridden）
+- 用户编辑：仅修改本地 `draft`
+- 点击“应用/保存”：
+  - `PATCH /system/settings/{domain}` 提交 `patch`
+  - UI 根据返回的 `ApplyResult`：
+    - 若 `blocked_by_env` 非空：提示“这些字段被 env 覆盖，未写入”
+    - 若 `persisted=false`：展示 `persistence_warning`（强调“重启会丢”）
+    - 根据 `impact` 展示“已热生效 / 已重启某组件”结果
+  - 之后再次 `GET` 刷新（避免 UI 与实际状态漂移）
+
+#### 7.3.4 前端请求抽象建议（避免字符串拼接）
+
+- 用一个统一的 composable（例如 `useSystemRuntimeSettings(domain)`）：
+  - `domain` 是 TS enum/union（不是字符串任意值）
+  - `get()` / `patch()` 方法只接受结构化 key（由后端返回或共享模型定义）
+- API path 由 `domain -> path` 的**集中映射**生成（集中处可以使用 `as const` + TS 类型推导，避免散落拼接）
+
+补充（针对你强调的“不要魔法值”）：
+
+- 日志级别这类枚举值也不建议在组件里散落硬编码列表（例如 `'INFO'|'ERROR'|...` + `items=[...]`）
+  - 更高质量的做法：后端在 view 中返回 `allowed_values`（或由共享模型生成 TS enum），前端直接渲染该列表
+
+#### 7.3.5 UI 交互细节（页面/分组/状态机，保证“按子域单独应用/保存”体验一致）
+
+- **分组展示**
+  - 每个分组（Runtime Tuning / Logging）使用折叠面板或卡片网格
+  - 每个子域是一个独立 Card/Block，内部包含：
+    - 表单字段（带 `source` badge：default/file/env）
+    - `Reset`（回到最近一次 GET 的值，仅本地）
+    - `Apply/Save`（唯一主按钮；触发 PATCH，一次完成 apply+persist）
+
+- **脏状态（dirty）**
+  - Block 内任一字段与 last_loaded 不一致时显示 `Unsaved changes`
+  - 只允许对“脏的 block”点击 Apply；避免用户误以为全局保存
+
+- **env 覆盖（不可写）**
+  - `env_overridden=true`：字段输入框 disabled，并显示提示（“由环境变量接管，需修改环境变量才能改变 effective”）
+  - PATCH 若仍提交该字段，后端返回 `blocked_by_env`，UI 显示“已忽略/未写入”
+
+- **持久化失败（必须显式提醒）**
+  - `persisted=false`：以红色 Callout 展示 `persistence_warning`（例如“本次仅运行时生效，重启会丢失”）
+  - 同时把 block 标记为“需要运维介入”（便于用户截图/报障）
+
+- **impact 展示**
+  - `hot_apply`：toast + “已立即生效”
+  - `restart_component`：toast + 显示重启的组件列表（来自 `restart_targets`），并提示短暂抖动风险
+
+> 可选增强：提供“Apply All Changed Blocks（逐块应用）”按钮，但实现上必须是**按子域顺序逐个 PATCH**，并汇总每个子域的结果；不要做“一个请求提交所有子域”的全量 PATCH（违背本设计核心约束）。
 ---
 
 ## 8. 生效动作：需要重启哪些“组件/通道”？（闭环矩阵）
@@ -481,10 +654,10 @@ impact 语义建议：
 |---|---|---|---|
 | `collection_timeout_ms` | hot_apply | 影响后续采集 timeout | 无 |
 | `retry_attempts` / `retry_delay_ms` | hot_apply | 影响后续采集重试 | 无 |
-| `max_concurrent_collections` | restart_component | 重建 semaphore（Phase2 可升级 hot） | `collector` |
+| `max_concurrent_collections` | hot_apply | 支持动态调整 semaphore permits | `collector` |
 | `outbound_queue_capacity` | restart_component | 重建 bounded channel/pipeline | `collector`（或 collector->gateway pipeline） |
-| `start_timeout_ms` | hot_apply | 影响后续 channel create/restart | 无 |
-| `start_timeout_ms` | hot_apply | 影响后续 app restart/enable | 无 |
+| `general.southward.start_timeout_ms` | hot_apply | 影响后续 channel create/restart | 无 |
+| `general.northward.start_timeout_ms` | hot_apply | 影响后续 app restart/enable | 无 |
 | `queue_capacity` | restart_component | 重建 northward events channel | `northward_events_pipeline` |
 | `general.southward.snapshot.*` | hot_apply | 影响点位基线 TTL/GC 频率与并发度（内存回收速度与 CPU 开销） | 无 |
 | logging 输出策略（file/rotation/retention/format/span fields） | restart_component | reload tracing output layer | `logging_pipeline` |
@@ -498,7 +671,7 @@ impact 语义建议：
 
 以 `collection_timeout_ms` 为例：
 
-1) UI 修改为 10000，调用 `PATCH /system/settings`
+1) UI（Collector block）修改为 10000，调用 `PATCH /system/settings/collector`
 2) 后端：
    - apply：更新 `Settings.general.collector.collection_timeout_ms`（atomic store）
    - persist：原子回写 `gateway.toml` 成功
@@ -522,7 +695,9 @@ impact 语义建议：
 - **持久化闭环**：
   - 原子回写 `gateway.toml`（同目录 tmp+rename，可选 bak）
   - persist 失败返回 `persisted=false`
-- **新增 `system.rs` 并完成路由注册**（先空实现也行，但框架先立住）
+- **新增 `system.rs` 并完成“按子域”路由注册**（先空实现也行，但框架先立住）
+  - `GET/PATCH /system/settings/{domain}`（collector/northward/southward_snapshot/logging_output/logging_cleanup/metrics）
+  - 禁止 `PATCH /system/settings` 这种全量入口
 
 验收：
 
@@ -532,7 +707,7 @@ impact 语义建议：
 ### Phase 2：Collector 完整语义落地（含 retry）
 
 - 在采集流程中实现第 5.1 节的 retry 语义（attempt/可重试错误/退避/jitter/超时预算/并发不膨胀）
-- 实现 `max_concurrent_collections` 的 restart_component（collector restart）
+- 实现 `max_concurrent_collections` 的 支持动态调整 semaphore permits
 - 实现 `outbound_queue_capacity` 的 pipeline 重建
 
 验收：
