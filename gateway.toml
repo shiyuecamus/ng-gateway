@@ -43,6 +43,24 @@ retry_delay_ms = 1000
 # Outbound queue capacity from collector to gateway (bounded channel)
 outbound_queue_capacity = 10000
 
+# Logging
+[general.logging]
+# Default TTL for channel log level overrides in milliseconds.
+# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_DEFAULT_TTL_MS
+channel_override_default_ttl_ms = 300000
+# Minimum allowed TTL (ms) to avoid abusive rapid toggling.
+# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_MIN_TTL_MS
+channel_override_min_ttl_ms = 10000
+# Maximum allowed TTL (ms) to avoid "permanent debug".
+# Environment override: NG__LOGGING__CHANNEL_OVERRIDE_MAX_TTL_MS
+channel_override_max_ttl_ms = 1800000
+# Override cleanup tick interval in milliseconds.
+# Environment override: NG__LOGGING__OVERRIDE_CLEANUP_INTERVAL_MS
+override_cleanup_interval_ms = 5000
+# Driver->host log ingest queue capacity (bounded, drop-old-keep-new).
+# Environment override: NG__LOGGING__DRIVER_INGEST_QUEUE_CAPACITY
+driver_ingest_queue_capacity = 10000
+
 # Web
 [web]
 # router prefix
