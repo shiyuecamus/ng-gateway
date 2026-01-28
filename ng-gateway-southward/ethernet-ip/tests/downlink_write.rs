@@ -49,7 +49,7 @@ async fn downlink_write_point() -> anyhow::Result<()> {
         .write_point(
             Arc::clone(&device_arc),
             point,
-            value.clone(),
+            &value,
             Some(timeout_ms),
         )
         .await;
@@ -79,7 +79,7 @@ async fn downlink_write_point() -> anyhow::Result<()> {
                     return Err(anyhow::anyhow!(
                         "read-back mismatch for tag '{}': expected {:?}, got {:?}",
                         tags[0].clone(),
-                        value,
+                        &value,
                         v
                     ));
                 }

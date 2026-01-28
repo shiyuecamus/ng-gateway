@@ -132,9 +132,11 @@ impl Driver for S7Driver {
         let mut s7_points = Vec::new();
 
         for (dev_any, points_any) in items.iter() {
-            let dev = dev_any.downcast_ref::<S7Device>().ok_or_else(|| {
-                DriverError::ConfigurationError("RuntimeDevice is not S7Device for S7Driver".into())
-            })?;
+            let dev = dev_any
+                .downcast_ref::<S7Device>()
+                .ok_or(DriverError::ConfigurationError(
+                    "RuntimeDevice is not S7Device for S7Driver".into(),
+                ))?;
 
             buffers
                 .entry(dev.id)
@@ -297,7 +299,7 @@ impl Driver for S7Driver {
         &self,
         _device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         let point = point
@@ -327,7 +329,7 @@ impl Driver for S7Driver {
         let ts = S7TransportSize::try_from(point.address.transport_size).map_err(|_| {
             DriverError::ConfigurationError("Invalid transport size in S7 address".to_string())
         })?;
-        let s7_value = S7Codec::from_value(&value, ts)?;
+        let s7_value = S7Codec::from_value(value, ts)?;
         // `timeout()` runs on the driver runtime via spawn, so the future must be `'static`.
         // Avoid borrowing `point`/`session` across await by moving owned data into `async move`.
         let address = point.address.clone();
@@ -376,7 +378,7 @@ impl Driver for S7Driver {
 
         Ok(WriteResult {
             outcome: WriteOutcome::Applied,
-            applied_value: Some(value),
+            applied_value: Some(value.clone()),
         })
     }
 

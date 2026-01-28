@@ -75,7 +75,7 @@ impl ChannelRuntime {
     ) -> DriverResult<WriteResult> {
         let timeout_ms = timeout.map(|d| d.as_millis() as u64);
         self.driver
-            .write_point(device, point, value, timeout_ms)
+            .write_point(device, point, &value, timeout_ms)
             .await
     }
 }

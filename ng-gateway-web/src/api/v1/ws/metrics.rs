@@ -562,9 +562,7 @@ async fn build_scope_snapshot(
             })
         }
         MetricsScope::Device => {
-            let channel_id = id.ok_or_else(|| {
-                ActixError::from(WebError::BadRequest("Missing channel id".into()))
-            })?;
+            let channel_id = id.ok_or(WebError::BadRequest("Missing channel id".into()))?;
             let rows: Vec<DeviceStatsSnapshot> = southward.get_channel_device_snapshots(channel_id);
             Ok(json!({ "rows": rows }))
         }

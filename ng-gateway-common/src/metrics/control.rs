@@ -173,7 +173,7 @@ pub(crate) struct ControlMetricsHub {
     write_execute_seconds: HistogramVec,
     execute_requests_total: IntCounterVec,
     execute_seconds: HistogramVec,
-    channels: DashMap<(i32, String), Arc<ControlChannelMetricHandles>>,
+    channels: DashMap<(i32, Arc<str>), Arc<ControlChannelMetricHandles>>,
 }
 
 impl ControlMetricsHub {
@@ -282,13 +282,13 @@ impl ControlMetricsHub {
     pub(crate) fn register_channel(
         &self,
         channel_id: i32,
-        driver: String,
+        driver: Arc<str>,
     ) -> NGResult<Arc<ControlChannelMetricHandles>> {
-        match self.channels.entry((channel_id, driver.clone())) {
+        match self.channels.entry((channel_id, Arc::clone(&driver))) {
             Entry::Occupied(e) => Ok(Arc::clone(e.get())),
             Entry::Vacant(v) => {
                 let channel_id_s = channel_id.to_string();
-                let base = [channel_id_s.as_str(), driver.as_str()];
+                let base = [channel_id_s.as_str(), driver.as_ref()];
 
                 let success_labels = [base[0], base[1], ControlResult::Success.as_label()];
                 let fail_labels = [base[0], base[1], ControlResult::Fail.as_label()];
@@ -430,7 +430,8 @@ impl ControlMetricsHub {
     /// - This prevents "zombie" Prometheus series when channels are removed at runtime.
     /// - Removal is best-effort: failures are logged and ignored.
     pub(crate) fn unregister_channel(&self, channel_id: i32, driver: &str) {
-        self.channels.remove(&(channel_id, driver.to_string()));
+        self.channels
+            .remove(&(channel_id, Arc::<str>::from(driver)));
 
         let channel_id_s = channel_id.to_string();
         let base = [channel_id_s.as_str(), driver];
@@ -500,7 +501,7 @@ impl ControlMetricsHub {
         driver: &str,
     ) -> Option<ControlMetricsSnapshot> {
         self.channels
-            .get(&(channel_id, driver.to_string()))
+            .get(&(channel_id, Arc::<str>::from(driver)))
             .map(|h| h.snapshot())
     }
 }

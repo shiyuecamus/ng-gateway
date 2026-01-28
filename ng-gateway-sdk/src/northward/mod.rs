@@ -228,7 +228,7 @@ macro_rules! ng_plugin_factory {
                 // 1. Take ownership of the receiver (once only)
                 let mut rx = {
                     let mut rx_opt = self.rx.lock().unwrap();
-                    rx_opt.take().ok_or_else(|| $crate::NorthwardError::RuntimeError {
+                    rx_opt.take().ok_or($crate::NorthwardError::RuntimeError {
                         reason: "Plugin already started".to_string()
                     })?
                 };

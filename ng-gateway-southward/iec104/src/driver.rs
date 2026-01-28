@@ -942,7 +942,7 @@ impl Driver for Iec104Driver {
         &self,
         device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         let device =
@@ -998,7 +998,7 @@ impl Driver for Iec104Driver {
         let start_ts = Instant::now();
         let fut_res: DriverResult<()> = match cmd_type_id {
             TypeID::C_SC_NA_1 | TypeID::C_SC_TA_1 => {
-                let b: bool = (&value).try_into().map_err(|e: NGValueCastError| {
+                let b: bool = value.try_into().map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!("single command expects bool: {e}"))
                 })?;
                 let mut info = SingleCommandInfo::new(point.ioa, b, false);
@@ -1010,7 +1010,7 @@ impl Driver for Iec104Driver {
                 .await
             }
             TypeID::C_DC_NA_1 | TypeID::C_DC_TA_1 => {
-                let v: u8 = (&value).try_into().map_err(|e: NGValueCastError| {
+                let v: u8 = value.try_into().map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!("double command expects u8: {e}"))
                 })?;
                 let mut info = DoubleCommandInfo::new(point.ioa, v, false);
@@ -1022,7 +1022,7 @@ impl Driver for Iec104Driver {
                 .await
             }
             TypeID::C_RC_NA_1 | TypeID::C_RC_TA_1 => {
-                let v: u8 = (&value).try_into().map_err(|e: NGValueCastError| {
+                let v: u8 = value.try_into().map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!("step command expects u8: {e}"))
                 })?;
                 let mut info = StepCommandInfo::new(point.ioa, v, false);
@@ -1034,7 +1034,7 @@ impl Driver for Iec104Driver {
                 .await
             }
             TypeID::C_SE_NA_1 | TypeID::C_SE_TA_1 => {
-                let v: i16 = (&value).try_into().map_err(|e: NGValueCastError| {
+                let v: i16 = value.try_into().map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!(
                         "set point (normal) expects i16-compatible value: {e}"
                     ))
@@ -1050,7 +1050,7 @@ impl Driver for Iec104Driver {
                 .await
             }
             TypeID::C_SE_NB_1 | TypeID::C_SE_TB_1 => {
-                let v: i16 = (&value).try_into().map_err(|e: NGValueCastError| {
+                let v: i16 = value.try_into().map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!(
                         "set point (scaled) expects i16-compatible value: {e}"
                     ))
@@ -1066,7 +1066,7 @@ impl Driver for Iec104Driver {
                 .await
             }
             TypeID::C_SE_NC_1 | TypeID::C_SE_TC_1 => {
-                let v: f32 = (&value).try_into().map_err(|e: NGValueCastError| {
+                let v: f32 = value.try_into().map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!(
                         "set point (float) expects f32-compatible value: {e}"
                     ))
@@ -1082,7 +1082,7 @@ impl Driver for Iec104Driver {
                 .await
             }
             TypeID::C_BO_NA_1 | TypeID::C_BO_TA_1 => {
-                let v: i32 = (&value).try_into().map_err(|e: NGValueCastError| {
+                let v: i32 = value.try_into().map_err(|e: NGValueCastError| {
                     DriverError::ValidationError(format!(
                         "bits string 32 command expects i32-compatible value: {e}"
                     ))
@@ -1126,7 +1126,7 @@ impl Driver for Iec104Driver {
 
         Ok(WriteResult {
             outcome: WriteOutcome::Applied,
-            applied_value: Some(value),
+            applied_value: Some(value.clone()),
         })
     }
 

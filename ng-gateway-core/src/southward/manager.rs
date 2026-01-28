@@ -184,6 +184,13 @@ pub struct ChannelInstance {
     /// Southward per-channel metric handles (single source of truth in `NGMetricsHub`).
     pub prom: Arc<SouthwardChannelMetricHandles>,
 
+    /// Cached driver label for metrics/logging (low-cardinality).
+    ///
+    /// # Performance
+    /// `Arc<str>` makes clones cheap (no per-call allocation) and allows us to pass
+    /// `&str` to Prometheus label APIs.
+    pub driver_label: Arc<str>,
+
     /// Last health check result
     pub health: Option<DriverHealth>,
 
@@ -936,9 +943,10 @@ impl NGSouthwardManager {
             .map_err(|e| NGError::DriverError(e.to_string()))?;
 
         // Register metrics handles early so transport metering can be bound without lookups.
+        let driver_label: Arc<str> = Arc::<str>::from(config.driver_id().to_string());
         let prom = self
             .metrics_hub
-            .register_southward_channel_metrics(config.id(), config.driver_id().to_string())?;
+            .register_southward_channel_metrics(config.id(), Arc::clone(&driver_label))?;
 
         // Build init context with best-effort preload from current indexes.
         // At gateway boot, devices/points may already be present; at runtime add, they may be empty.
@@ -966,6 +974,7 @@ impl NGSouthwardManager {
             state: connection_state,
             status,
             prom,
+            driver_label,
             health: None,
             created_at: now,
             last_activity: now,
@@ -996,10 +1005,10 @@ impl NGSouthwardManager {
             .map_err(|e| NGError::DriverError(e.to_string()))?;
 
         // Register metrics handles early so transport metering can be bound without lookups.
-        let prom = self.metrics_hub.register_southward_channel_metrics(
-            config.id,
-            runtime_channel.driver_id().to_string(),
-        )?;
+        let driver_label: Arc<str> = Arc::<str>::from(runtime_channel.driver_id().to_string());
+        let prom = self
+            .metrics_hub
+            .register_southward_channel_metrics(config.id, Arc::clone(&driver_label))?;
 
         // Convert devices and points from the provided topology into runtime forms
         // to supply a complete init context without relying on runtime indexes.
@@ -1060,6 +1069,7 @@ impl NGSouthwardManager {
             state: connection_state,
             status,
             prom,
+            driver_label,
             health: None,
             created_at: now,
             last_activity: now,
@@ -1266,7 +1276,7 @@ impl NGSouthwardManager {
             .index
             .channels
             .get(&channel_id)
-            .map(|instance| instance.config.driver_id().to_string());
+            .map(|instance| Arc::clone(&instance.driver_label));
 
         // Stop driver if channel exists.
         //
@@ -1532,11 +1542,11 @@ impl NGSouthwardManager {
     /// # Notes
     /// This is used by control-plane metrics to keep label cardinality bounded.
     #[inline]
-    pub fn snapshot_channel_driver_id(&self, channel_id: i32) -> Option<String> {
+    pub fn snapshot_channel_driver_label(&self, channel_id: i32) -> Option<Arc<str>> {
         self.index
             .channels
             .get(&channel_id)
-            .map(|c| c.config.driver_id().to_string())
+            .map(|c| Arc::clone(&c.driver_label))
     }
 
     #[inline]

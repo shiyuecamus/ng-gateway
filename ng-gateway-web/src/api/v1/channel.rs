@@ -489,9 +489,9 @@ async fn build_channel_log_level_view(id: i32) -> Result<ChannelLogLevelView, We
         .await?
         .ok_or(WebError::NotFound(EntityType::Channel.to_string()))?;
 
-    let rt = log_control::global().ok_or_else(|| {
-        WebError::InternalError("Log control runtime is not initialized".to_string())
-    })?;
+    let rt = log_control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
     let overrides = rt.overrides();
     let effective = overrides.effective_channel_level(id);
     let lease = overrides.active_scope_lease(LogOverrideScope::Channel(id));
@@ -558,9 +558,9 @@ pub async fn clear_channel_log_level(
         .await?
         .ok_or(WebError::NotFound(EntityType::Channel.to_string()))?;
 
-    let rt = log_control::global().ok_or_else(|| {
-        WebError::InternalError("Log control runtime is not initialized".to_string())
-    })?;
+    let rt = log_control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
     rt.overrides().clear_scope(LogOverrideScope::Channel(id));
 
     Ok(WebResponse::ok(build_channel_log_level_view(id).await?))

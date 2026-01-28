@@ -463,7 +463,7 @@ pub(crate) struct SouthwardMetricsHub {
     channel_collect_cycle_seconds: HistogramVec,
     channel_point_read_total: IntCounterVec,
     channel_io_latency_seconds: HistogramVec,
-    channels: DashMap<(i32, String), Arc<SouthwardChannelMetricHandles>>,
+    channels: DashMap<(i32, Arc<str>), Arc<SouthwardChannelMetricHandles>>,
 }
 
 impl SouthwardMetricsHub {
@@ -842,7 +842,7 @@ impl SouthwardMetricsHub {
         driver: &str,
     ) -> ChannelMetricsSnapshot {
         self.channels
-            .get(&(channel_id, driver.to_string()))
+            .get(&(channel_id, Arc::<str>::from(driver)))
             .map(|h| h.snapshot_metrics())
             .unwrap_or_default()
     }
@@ -851,13 +851,13 @@ impl SouthwardMetricsHub {
     pub(crate) fn register_channel(
         &self,
         channel_id: i32,
-        driver: String,
+        driver: Arc<str>,
     ) -> NGResult<Arc<SouthwardChannelMetricHandles>> {
-        match self.channels.entry((channel_id, driver.clone())) {
+        match self.channels.entry((channel_id, Arc::clone(&driver))) {
             Entry::Occupied(e) => Ok(Arc::clone(e.get())),
             Entry::Vacant(v) => {
                 let channel_id_s = channel_id.to_string();
-                let labels = [channel_id_s.as_str(), driver.as_str()];
+                let labels = [channel_id_s.as_str(), driver.as_ref()];
 
                 let connected = self
                     .channel_connected
@@ -1073,7 +1073,8 @@ impl SouthwardMetricsHub {
     /// - This prevents "zombie" Prometheus series when channels are removed at runtime.
     /// - Removal is best-effort: failures are logged and ignored.
     pub(crate) fn unregister_channel(&self, channel_id: i32, driver: &str) {
-        self.channels.remove(&(channel_id, driver.to_string()));
+        self.channels
+            .remove(&(channel_id, Arc::<str>::from(driver)));
 
         let channel_id_s = channel_id.to_string();
         let base = [channel_id_s.as_str(), driver];

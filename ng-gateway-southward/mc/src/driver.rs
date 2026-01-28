@@ -264,9 +264,11 @@ impl Driver for McDriver {
         let mut point_device_ids = Vec::new();
 
         for (dev_any, points_any) in items.iter() {
-            let dev = dev_any.downcast_ref::<McDevice>().ok_or_else(|| {
-                DriverError::ConfigurationError("RuntimeDevice is not McDevice for McDriver".into())
-            })?;
+            let dev = dev_any
+                .downcast_ref::<McDevice>()
+                .ok_or(DriverError::ConfigurationError(
+                    "RuntimeDevice is not McDevice for McDriver".into(),
+                ))?;
 
             buffers
                 .entry(dev.id)
@@ -424,7 +426,7 @@ impl Driver for McDriver {
                 continue;
             }
             let point = &mc_points[item.index];
-            let Some(value) = item.value else {
+            let Some(wire_value) = item.value else {
                 continue;
             };
 
@@ -434,7 +436,7 @@ impl Driver for McDriver {
             let wire_dt = point.wire_data_type();
             let logical_dt = point.logical_data_type();
             let value = match ValueCodec::wire_to_logical_value(
-                value,
+                &wire_value,
                 wire_dt,
                 logical_dt,
                 &point.transform,
@@ -634,7 +636,7 @@ impl Driver for McDriver {
         &self,
         device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         let _device = device
@@ -712,7 +714,7 @@ impl Driver for McDriver {
         };
 
         let dt = value.data_type();
-        let data_bytes: Vec<u8> = (&value).try_into().map_err(|e: NGValueCastError| {
+        let data_bytes: Vec<u8> = value.try_into().map_err(|e: NGValueCastError| {
             DriverError::ValidationError(format!("Expected numeric value, got {:?}: {e}", dt))
         })?;
 
@@ -783,7 +785,7 @@ impl Driver for McDriver {
 
         Ok(WriteResult {
             outcome: WriteOutcome::Applied,
-            applied_value: Some(value),
+            applied_value: Some(value.clone()),
         })
     }
 

@@ -151,9 +151,11 @@ impl Driver for EthernetIpDriver {
         let mut points = Vec::new();
 
         for (dev_any, points_any) in items.iter() {
-            let dev = dev_any.downcast_ref::<EthernetIpDevice>().ok_or_else(|| {
-                DriverError::ConfigurationError("RuntimeDevice is not EthernetIpDevice".to_string())
-            })?;
+            let dev = dev_any.downcast_ref::<EthernetIpDevice>().ok_or(
+                DriverError::ConfigurationError(
+                    "RuntimeDevice is not EthernetIpDevice".to_string(),
+                ),
+            )?;
 
             buffers
                 .entry(dev.id)
@@ -351,7 +353,7 @@ impl Driver for EthernetIpDriver {
         &self,
         _device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         // Validation removed for brevity, assuming similar to execute_action
@@ -365,7 +367,7 @@ impl Driver for EthernetIpDriver {
         let client_opt = self.shared.client.load_full();
         let client_mutex = client_opt.ok_or(DriverError::ServiceUnavailable)?;
 
-        let plc_value = EthernetIpCodec::to_plc_value(&value, point.wire_data_type())?;
+        let plc_value = EthernetIpCodec::to_plc_value(value, point.wire_data_type())?;
         let timeout_dur = StdDuration::from_millis(timeout_ms.unwrap_or(self.inner.config.timeout));
 
         let op_res = timeout(timeout_dur, async {
@@ -377,7 +379,7 @@ impl Driver for EthernetIpDriver {
         match op_res {
             Ok(Ok(_)) => Ok(WriteResult {
                 outcome: WriteOutcome::Applied,
-                applied_value: Some(value),
+                applied_value: Some(value.clone()),
             }),
             Ok(Err(e)) => Err(DriverError::ExecutionError(e.to_string())),
             Err(_) => Err(DriverError::Timeout(timeout_dur)),

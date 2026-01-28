@@ -249,11 +249,11 @@ impl ModbusDriver {
         let mut modbus_points = Vec::new();
 
         for (dev, points_any) in items.iter() {
-            let md = dev.downcast_ref::<ModbusDevice>().ok_or_else(|| {
-                DriverError::ConfigurationError(
+            let md = dev
+                .downcast_ref::<ModbusDevice>()
+                .ok_or(DriverError::ConfigurationError(
                     "RuntimeDevice is not ModbusDevice for ModbusDriver".to_string(),
-                )
-            })?;
+                ))?;
             if md.slave_id != slave_id {
                 return Err(DriverError::ConfigurationError(format!(
                     "collect_data items contain mixed slaveId: expected={}, got={} (device_id={}, device_name={})",
@@ -539,11 +539,12 @@ impl Driver for ModbusDriver {
         let (device, _) = items.first().ok_or(DriverError::ValidationError(
             "collect_data called with empty items".to_string(),
         ))?;
-        let device = device.downcast_ref::<ModbusDevice>().ok_or_else(|| {
-            DriverError::ConfigurationError(
-                "RuntimeDevice is not ModbusDevice for ModbusDriver".to_string(),
-            )
-        })?;
+        let device =
+            device
+                .downcast_ref::<ModbusDevice>()
+                .ok_or(DriverError::ConfigurationError(
+                    "RuntimeDevice is not ModbusDevice for ModbusDriver".to_string(),
+                ))?;
         self.collect_group_with_slave(device.slave_id, items).await
     }
 
@@ -662,7 +663,7 @@ impl Driver for ModbusDriver {
         &self,
         device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         let device =
@@ -732,7 +733,7 @@ impl Driver for ModbusDriver {
                     )));
                 }
                 let target_len = Some(point.quantity.max(1) as usize);
-                let coils = ModbusCodec::encode_coils(&value, target_len)?;
+                let coils = ModbusCodec::encode_coils(value, target_len)?;
 
                 match write_fc {
                     ModbusFunctionCode::WriteSingleCoil => {
@@ -769,7 +770,7 @@ impl Driver for ModbusDriver {
             ModbusFunctionCode::WriteSingleRegister
             | ModbusFunctionCode::WriteMultipleRegisters => {
                 let mut regs = ModbusCodec::encode_registers_from_value(
-                    &value,
+                    value,
                     point.wire_data_type(),
                     self.inner.config.byte_order,
                     self.inner.config.word_order,
@@ -829,7 +830,7 @@ impl Driver for ModbusDriver {
 
         Ok(WriteResult {
             outcome: WriteOutcome::Applied,
-            applied_value: Some(value),
+            applied_value: Some(value.clone()),
         })
     }
 

@@ -375,7 +375,7 @@ macro_rules! ng_driver_factory {
                                                         _ = cancel.cancelled() => {
                                                             Err($crate::DriverError::ExecutionError("Driver cancelled".to_string()))
                                                         }
-                                                        r = inner.write_point(device, point, value, timeout_ms) => r,
+                                                        r = inner.write_point(device, point, &value, timeout_ms) => r,
                                                     };
                                                     let _ = reply.send(res);
                                                 }.instrument(span));
@@ -477,11 +477,11 @@ macro_rules! ng_driver_factory {
                 &self,
                 device: std::sync::Arc<dyn $crate::RuntimeDevice>,
                 point: std::sync::Arc<dyn $crate::RuntimePoint>,
-                value: $crate::NGValue,
+                value: &$crate::NGValue,
                 timeout_ms: Option<u64>,
             ) -> $crate::DriverResult<$crate::WriteResult> {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                let msg = DriverMessage::Write { device, point, value, timeout_ms, reply: reply_tx };
+                let msg = DriverMessage::Write { device, point, value: value.clone(), timeout_ms, reply: reply_tx };
 
                 self.tx.send(msg).await.map_err(|_| $crate::DriverError::ExecutionError("Driver runtime closed".to_string()))?;
 
@@ -815,7 +815,7 @@ pub trait Driver: DowncastSync + Send + Sync {
         &self,
         device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult>;
 

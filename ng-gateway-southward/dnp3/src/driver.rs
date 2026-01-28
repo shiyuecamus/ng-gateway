@@ -355,7 +355,7 @@ impl Driver for Dnp3Driver {
         &self,
         _device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         let point = point
@@ -425,8 +425,8 @@ impl Driver for Dnp3Driver {
 
         let mut builder = CommandBuilder::new();
         match command_type {
-            Dnp3CommandType::CROB => build_crob_command(&mut builder, &param, &value)?,
-            Dnp3CommandType::AnalogOutputCommand => build_ao_command(&mut builder, &param, &value)?,
+            Dnp3CommandType::CROB => build_crob_command(&mut builder, &param, value)?,
+            Dnp3CommandType::AnalogOutputCommand => build_ao_command(&mut builder, &param, value)?,
             _ => unreachable!(),
         };
 
@@ -451,7 +451,7 @@ impl Driver for Dnp3Driver {
 
         Ok(WriteResult {
             outcome: WriteOutcome::Applied,
-            applied_value: Some(value),
+            applied_value: Some(value.clone()),
         })
     }
 

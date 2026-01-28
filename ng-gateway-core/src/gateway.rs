@@ -1143,8 +1143,8 @@ impl ActionRuntimeCmd for NGGateway {
             .unwrap_or_default();
         let control_driver = self
             .southward_manager
-            .snapshot_channel_driver_id(channel_id)
-            .unwrap_or("unknown".to_string());
+            .snapshot_channel_driver_label(channel_id)
+            .unwrap_or(Arc::<str>::from("unknown"));
         let control = self
             .metrics_hub
             .register_control_channel_metrics(channel_id, control_driver)
@@ -1862,7 +1862,7 @@ impl NGGateway {
         // Convert logical -> wire value before acquiring the channel write lock.
         // Strong failure policy: never write incorrect values to devices.
         let wire_value = match ValueCodec::logical_to_wire_value(
-            value.clone(),
+            &value,
             expected_dt,
             point.wire_data_type(),
             point.transform(),
@@ -1902,10 +1902,10 @@ impl NGGateway {
         let sem = write_serializers.semaphore_for(meta.channel_id);
         let start = Instant::now();
         let control_driver = southward_manager
-            .snapshot_channel_driver_id(meta.channel_id)
-            .unwrap_or("unknown".to_string());
+            .snapshot_channel_driver_label(meta.channel_id)
+            .unwrap_or(Arc::<str>::from("unknown"));
         let control = metrics_hub
-            .register_control_channel_metrics(meta.channel_id, control_driver.clone())
+            .register_control_channel_metrics(meta.channel_id, Arc::clone(&control_driver))
             .ok();
         let permit = match timeout_ms {
             Some(ms) => {
@@ -2007,7 +2007,7 @@ impl NGGateway {
         let prom = southward_manager.get_channel_metric_handles(channel_id);
         let io_start = Instant::now();
         let write_res = driver
-            .write_point(device_cfg, point, wire_value, remaining_timeout_ms)
+            .write_point(device_cfg, point, &wire_value, remaining_timeout_ms)
             .await;
         if let Some(h) = &prom {
             let elapsed = io_start.elapsed();
@@ -2270,7 +2270,7 @@ async fn execute_action_direct(
         .into_iter()
         .map(|(p, v)| {
             let wire_v = ValueCodec::logical_to_wire_value(
-                v,
+                &v,
                 p.logical_data_type(),
                 p.wire_data_type(),
                 p.transform(),
@@ -2283,8 +2283,8 @@ async fn execute_action_direct(
     // Execute
     let prom = southward_manager.get_channel_metric_handles(device.config.channel_id());
     let control_driver = southward_manager
-        .snapshot_channel_driver_id(device.config.channel_id())
-        .unwrap_or("unknown".to_string());
+        .snapshot_channel_driver_label(device.config.channel_id())
+        .unwrap_or(Arc::<str>::from("unknown"));
     let control = metrics_hub
         .register_control_channel_metrics(device.config.channel_id(), control_driver)
         .ok();

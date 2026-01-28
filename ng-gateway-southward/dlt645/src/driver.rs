@@ -795,7 +795,7 @@ impl Driver for Dl645Driver {
         &self,
         device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         let device = device
@@ -840,7 +840,7 @@ impl Driver for Dl645Driver {
         self.handle_write_data(
             device.security_params()?,
             &param,
-            &value,
+            value,
             address,
             version,
             timeout,
@@ -849,7 +849,7 @@ impl Driver for Dl645Driver {
 
         Ok(WriteResult {
             outcome: WriteOutcome::Applied,
-            applied_value: Some(value),
+            applied_value: Some(value.clone()),
         })
     }
 

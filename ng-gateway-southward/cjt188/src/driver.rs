@@ -410,7 +410,7 @@ impl Driver for Cjt188Driver {
         &self,
         _device: Arc<dyn RuntimeDevice>,
         _point: Arc<dyn RuntimePoint>,
-        _value: NGValue,
+        _value: &NGValue,
         _timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         Err(DriverError::ConfigurationError(

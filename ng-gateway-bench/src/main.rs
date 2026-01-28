@@ -127,8 +127,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let id = cli
             .scenario
-            .ok_or_else(|| anyhow!("missing --scenario (1..=7) or set --all-scenarios"))?;
-        vec![Scenario::from_id(id).ok_or_else(|| anyhow!("invalid scenario id: {}", id))?]
+            .ok_or(anyhow!("missing --scenario (1..=7) or set --all-scenarios"))?;
+        vec![Scenario::from_id(id).ok_or(anyhow!("invalid scenario id: {}", id))?]
     };
 
     // Run all requested scenarios sequentially (stable + avoids cross-scenario interference).
@@ -350,12 +350,12 @@ async fn run_downlink_phase(
     // Use first channel and first device for downlink tests.
     let ch = channels
         .first()
-        .ok_or_else(|| anyhow!("no channels available for downlink"))?;
+        .ok_or(anyhow!("no channels available for downlink"))?;
     let device = ch
         .devices
         .first()
         .cloned()
-        .ok_or_else(|| anyhow!("no devices available for downlink"))?;
+        .ok_or(anyhow!("no devices available for downlink"))?;
 
     let points: Vec<_> = ch
         .downlink_points

@@ -17,7 +17,7 @@ impl ValueCodec {
 
     #[inline]
     pub fn logical_to_wire_value(
-        value: NGValue,
+        value: &NGValue,
         logical_dt: DataType,
         wire_dt: DataType,
         t: &Transform,
@@ -40,7 +40,7 @@ impl ValueCodec {
         }
 
         // Numeric inverse mapping: requires a safe `f64` pipeline.
-        let y = Self::numeric_value_to_f64_strict(&value, logical_dt)?;
+        let y = Self::numeric_value_to_f64_strict(value, logical_dt)?;
         let x = Self::inverse_transform_f64_strict(y, t)?;
         Self::box_f64_to_wire_strict(x, wire_dt)
     }
@@ -59,7 +59,7 @@ impl ValueCodec {
     /// exactly. To avoid silent corruption, we reject such cases.
     #[inline]
     pub fn wire_to_logical_value(
-        value: NGValue,
+        value: &NGValue,
         wire_dt: DataType,
         logical_dt: DataType,
         t: &Transform,
@@ -87,12 +87,12 @@ impl ValueCodec {
                     wire_dt, logical_dt
                 )));
             }
-            return Ok(value);
+            return Ok(value.clone());
         }
 
         // Numeric fast path: keep integer precision when transform is identity.
         if t.is_identity_numeric() && wire_dt == logical_dt {
-            return Ok(value);
+            return Ok(value.clone());
         }
 
         // Enforce 2^53 safety when a numeric transform is configured.
@@ -118,25 +118,25 @@ impl ValueCodec {
         }
 
         let out = match value {
-            NGValue::Boolean(b) => Self::coerce_bool_to_value(b, logical_dt, t),
-            NGValue::Int8(v) => Self::coerce_i64_to_value(v as i64, logical_dt, t),
-            NGValue::UInt8(v) => Self::coerce_u64_to_value(v as u64, logical_dt, t),
-            NGValue::Int16(v) => Self::coerce_i64_to_value(v as i64, logical_dt, t),
-            NGValue::UInt16(v) => Self::coerce_u64_to_value(v as u64, logical_dt, t),
-            NGValue::Int32(v) => Self::coerce_i64_to_value(v as i64, logical_dt, t),
-            NGValue::UInt32(v) => Self::coerce_u64_to_value(v as u64, logical_dt, t),
-            NGValue::Int64(v) => Self::coerce_i64_to_value(v, logical_dt, t),
-            NGValue::UInt64(v) => Self::coerce_u64_to_value(v, logical_dt, t),
-            NGValue::Float32(v) => Self::coerce_f64_to_value(v as f64, logical_dt, t),
-            NGValue::Float64(v) => Self::coerce_f64_to_value(v, logical_dt, t),
+            NGValue::Boolean(b) => Self::coerce_bool_to_value(*b, logical_dt, t),
+            NGValue::Int8(v) => Self::coerce_i64_to_value(*v as i64, logical_dt, t),
+            NGValue::UInt8(v) => Self::coerce_u64_to_value(*v as u64, logical_dt, t),
+            NGValue::Int16(v) => Self::coerce_i64_to_value(*v as i64, logical_dt, t),
+            NGValue::UInt16(v) => Self::coerce_u64_to_value(*v as u64, logical_dt, t),
+            NGValue::Int32(v) => Self::coerce_i64_to_value(*v as i64, logical_dt, t),
+            NGValue::UInt32(v) => Self::coerce_u64_to_value(*v as u64, logical_dt, t),
+            NGValue::Int64(v) => Self::coerce_i64_to_value(*v, logical_dt, t),
+            NGValue::UInt64(v) => Self::coerce_u64_to_value(*v, logical_dt, t),
+            NGValue::Float32(v) => Self::coerce_f64_to_value(*v as f64, logical_dt, t),
+            NGValue::Float64(v) => Self::coerce_f64_to_value(*v, logical_dt, t),
             // Timestamp is treated as epoch-ms numeric in the SDK model.
-            NGValue::Timestamp(ms) => Self::coerce_i64_to_value(ms, logical_dt, t),
+            NGValue::Timestamp(ms) => Self::coerce_i64_to_value(*ms, logical_dt, t),
             // Numeric-like wire encodings (compatibility):
             // - String: parse to f64 (supports hex "0x..." and decimals via SDK cast policy)
             // - Binary: interpret as BE f32/f64 via SDK cast policy
             //
             // Then reuse the unified numeric coerce pipeline so rounding/scale rules remain consistent.
-            NGValue::String(_) | NGValue::Binary(_) => f64::try_from(&value)
+            NGValue::String(_) | NGValue::Binary(_) => f64::try_from(value)
                 .ok()
                 .and_then(|n| Self::coerce_f64_to_value(n, logical_dt, t)),
         };
@@ -150,7 +150,7 @@ impl ValueCodec {
 
     #[inline]
     fn non_numeric_logical_to_wire(
-        value: NGValue,
+        value: &NGValue,
         logical_dt: DataType,
         wire_dt: DataType,
         t: &Transform,
@@ -167,17 +167,17 @@ impl ValueCodec {
                 logical_dt, wire_dt
             )));
         }
-        Ok(value)
+        Ok(value.clone())
     }
 
     #[inline]
     fn numeric_identity_logical_to_wire(
-        value: NGValue,
+        value: &NGValue,
         logical_dt: DataType,
         wire_dt: DataType,
     ) -> DriverResult<NGValue> {
         if logical_dt == wire_dt {
-            return Ok(value);
+            return Ok(value.clone());
         }
         let cast_err = |e: crate::NGValueCastError| {
             DriverError::ValidationError(format!(
@@ -185,16 +185,16 @@ impl ValueCodec {
             ))
         };
         match wire_dt {
-            DataType::Int8 => Ok(NGValue::Int8(i8::try_from(&value).map_err(cast_err)?)),
-            DataType::UInt8 => Ok(NGValue::UInt8(u8::try_from(&value).map_err(cast_err)?)),
-            DataType::Int16 => Ok(NGValue::Int16(i16::try_from(&value).map_err(cast_err)?)),
-            DataType::UInt16 => Ok(NGValue::UInt16(u16::try_from(&value).map_err(cast_err)?)),
-            DataType::Int32 => Ok(NGValue::Int32(i32::try_from(&value).map_err(cast_err)?)),
-            DataType::UInt32 => Ok(NGValue::UInt32(u32::try_from(&value).map_err(cast_err)?)),
-            DataType::Int64 => Ok(NGValue::Int64(i64::try_from(&value).map_err(cast_err)?)),
-            DataType::UInt64 => Ok(NGValue::UInt64(u64::try_from(&value).map_err(cast_err)?)),
-            DataType::Float32 => Ok(NGValue::Float32(f32::try_from(&value).map_err(cast_err)?)),
-            DataType::Float64 => Ok(NGValue::Float64(f64::try_from(&value).map_err(cast_err)?)),
+            DataType::Int8 => Ok(NGValue::Int8(i8::try_from(value).map_err(cast_err)?)),
+            DataType::UInt8 => Ok(NGValue::UInt8(u8::try_from(value).map_err(cast_err)?)),
+            DataType::Int16 => Ok(NGValue::Int16(i16::try_from(value).map_err(cast_err)?)),
+            DataType::UInt16 => Ok(NGValue::UInt16(u16::try_from(value).map_err(cast_err)?)),
+            DataType::Int32 => Ok(NGValue::Int32(i32::try_from(value).map_err(cast_err)?)),
+            DataType::UInt32 => Ok(NGValue::UInt32(u32::try_from(value).map_err(cast_err)?)),
+            DataType::Int64 => Ok(NGValue::Int64(i64::try_from(value).map_err(cast_err)?)),
+            DataType::UInt64 => Ok(NGValue::UInt64(u64::try_from(value).map_err(cast_err)?)),
+            DataType::Float32 => Ok(NGValue::Float32(f32::try_from(value).map_err(cast_err)?)),
+            DataType::Float64 => Ok(NGValue::Float64(f64::try_from(value).map_err(cast_err)?)),
             _ => Err(DriverError::ConfigurationError(format!(
                 "unsupported wire numeric data type: {wire_dt:?}",
             ))),

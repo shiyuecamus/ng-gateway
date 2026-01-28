@@ -426,11 +426,12 @@ impl Driver for OpcUaDriver {
 
         // Merge readable points across business devices into one OPC UA Read call.
         for (dev_any, points_any) in items.iter() {
-            let dev = dev_any.downcast_ref::<OpcUaDevice>().ok_or_else(|| {
-                DriverError::ConfigurationError(
-                    "RuntimeDevice is not OpcUaDevice for OpcUaDriver".to_string(),
-                )
-            })?;
+            let dev =
+                dev_any
+                    .downcast_ref::<OpcUaDevice>()
+                    .ok_or(DriverError::ConfigurationError(
+                        "RuntimeDevice is not OpcUaDevice for OpcUaDriver".to_string(),
+                    ))?;
 
             buffers
                 .entry(dev.id)
@@ -677,7 +678,7 @@ impl Driver for OpcUaDriver {
         &self,
         _device: Arc<dyn RuntimeDevice>,
         point: Arc<dyn RuntimePoint>,
-        value: NGValue,
+        value: &NGValue,
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult> {
         let point = point
@@ -704,7 +705,7 @@ impl Driver for OpcUaDriver {
                     point.key, point.node_id
                 )))?;
         let wire_dt = point.wire_data_type();
-        let variant = OpcUaCodec::value_to_variant(&value, wire_dt).ok_or(
+        let variant = OpcUaCodec::value_to_variant(value, wire_dt).ok_or(
             DriverError::ValidationError(format!(
             "OPC UA value conversion failed for point '{}': expected={:?}, actual={:?}, value={:?}",
             point.key,
@@ -769,7 +770,7 @@ impl Driver for OpcUaDriver {
 
         Ok(WriteResult {
             outcome: WriteOutcome::Applied,
-            applied_value: Some(value),
+            applied_value: Some(value.clone()),
         })
     }
 

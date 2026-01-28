@@ -316,7 +316,7 @@ async fn http_request(
 
     let host = url
         .host_str()
-        .ok_or_else(|| WebError::BadRequest("Missing URL host".to_string()))?
+        .ok_or(WebError::BadRequest("Missing URL host".to_string()))?
         .to_string();
     let port = url.port_or_known_default();
     let resolved = resolve_and_validate_host(&host, port).await?;

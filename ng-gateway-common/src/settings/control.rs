@@ -838,9 +838,9 @@ pub fn apply_logging_control_settings(
         });
     }
 
-    let rt = log_control::global().ok_or_else(|| {
-        NGError::from("Log control runtime is not initialized (cannot apply logging_control)")
-    })?;
+    let rt = log_control::global().ok_or(NGError::from(
+        "Log control runtime is not initialized (cannot apply logging_control)",
+    ))?;
 
     let cur = rt.settings();
     let mut next = cur;

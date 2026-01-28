@@ -246,7 +246,7 @@ impl NGMetricsHub {
     pub fn register_southward_channel_metrics(
         &self,
         channel_id: i32,
-        driver: String,
+        driver: Arc<str>,
     ) -> NGResult<Arc<SouthwardChannelMetricHandles>> {
         self.southward.register_channel(channel_id, driver)
     }
@@ -266,7 +266,7 @@ impl NGMetricsHub {
     pub fn register_control_channel_metrics(
         &self,
         channel_id: i32,
-        driver: String,
+        driver: Arc<str>,
     ) -> NGResult<Arc<ControlChannelMetricHandles>> {
         self.control.register_channel(channel_id, driver)
     }

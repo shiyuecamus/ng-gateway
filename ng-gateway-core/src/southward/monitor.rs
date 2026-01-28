@@ -44,8 +44,8 @@ impl ChannelMonitor {
             Some(chan) => chan.config.name().to_string(),
             None => return,
         };
-        let monitor_driver_id = match self.index.channels.get(&channel_id) {
-            Some(chan) => chan.config.driver_id().to_string(),
+        let monitor_driver_id: Arc<str> = match self.index.channels.get(&channel_id) {
+            Some(chan) => Arc::clone(&chan.driver_label),
             None => return,
         };
         let monitor_outbound = Arc::clone(southward_data_bus);
@@ -54,7 +54,7 @@ impl ChannelMonitor {
         let monitor_metrics_hub = Arc::clone(&self.metrics_hub);
         let prom = match self
             .metrics_hub
-            .register_southward_channel_metrics(channel_id, monitor_driver_id.clone())
+            .register_southward_channel_metrics(channel_id, Arc::clone(&monitor_driver_id))
         {
             Ok(h) => h,
             Err(_) => return,
@@ -66,7 +66,7 @@ impl ChannelMonitor {
         let tokens_cleanup = Arc::clone(&self.tokens);
         // Bind a per-channel span so all monitor logs can be attributed to `channel_id`.
         let channel_name_for_span = monitor_channel_name.clone();
-        let driver_id_for_span = monitor_driver_id.clone();
+        let driver_id_for_span = Arc::clone(&monitor_driver_id);
         let span = tracing::info_span!(
             "southward-channel-monitor",
             channel_id = channel_id,
