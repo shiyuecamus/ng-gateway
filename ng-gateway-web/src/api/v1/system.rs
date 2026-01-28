@@ -16,8 +16,9 @@ use ng_gateway_models::{
     domain::prelude::{
         ApplySystemSettingsResult, CleanupLogFilesRequest, CleanupLogFilesResponse,
         CollectorSettingsView, DownloadLogFilesRequest, GlobalLogLevelView, LogFileInfo,
-        LogFilesListResponse, LogLevel, LoggingCleanupSettingsView, LoggingOutputSettingsView,
-        NorthwardSettingsView, PatchCollectorSettingsRequest, PatchLoggingCleanupSettingsRequest,
+        LogFilesListResponse, LogLevel, LoggingCleanupSettingsView, LoggingControlSettingsView,
+        LoggingOutputSettingsView, NorthwardSettingsView, PatchCollectorSettingsRequest,
+        PatchLoggingCleanupSettingsRequest, PatchLoggingControlSettingsRequest,
         PatchLoggingOutputSettingsRequest, PatchNorthwardSettingsRequest,
         PatchSouthwardSettingsRequest, SetGlobalLogLevelRequest, SouthwardSettingsView,
         SystemSettingsOverviewView, TtlRange,
@@ -27,12 +28,24 @@ use ng_gateway_models::{
     PermChecker,
 };
 use ng_gateway_utils::{log_files, zip_stream};
+use once_cell::sync::Lazy;
 use std::{collections::HashSet, io, path::PathBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tracing::instrument;
 
 pub(super) const ROUTER_PREFIX: &str = "/system";
+
+/// Serialize system settings PATCH operations without blocking unrelated requests.
+///
+/// # Why this exists
+/// Previously, PATCH handlers used the global `NGAppContext` write lock to serialize apply+persist.
+/// If a PATCH performs blocking I/O (e.g. config file persistence), the write lock can stall *all*
+/// other API requests that need a read lock, causing the UI to appear “fully stuck”.
+///
+/// This mutex keeps the "only one PATCH at a time" guarantee while allowing other APIs to keep
+/// serving (they only need a read lock on the global context).
+static SYSTEM_SETTINGS_PATCH_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub(crate) fn configure_routes(cfg: &mut ServiceConfig) {
     cfg.service(
@@ -46,6 +59,14 @@ pub(crate) fn configure_routes(cfg: &mut ServiceConfig) {
             .route("/southward", web::patch().to(patch_southward_settings))
             .route("/logging_runtime", web::get().to(get_logging_runtime))
             .route("/logging_runtime", web::patch().to(patch_logging_runtime))
+            .route(
+                "/logging_control",
+                web::get().to(get_logging_control_settings),
+            )
+            .route(
+                "/logging_control",
+                web::patch().to(patch_logging_control_settings),
+            )
             .route(
                 "/logging_output",
                 web::get().to(get_logging_output_settings),
@@ -73,50 +94,13 @@ pub(crate) fn configure_routes(cfg: &mut ServiceConfig) {
     );
 }
 
-#[instrument(name = "get-system-settings-overview", skip_all)]
-pub async fn get_system_settings_overview() -> WebResult<WebResponse<SystemSettingsOverviewView>> {
-    let ctx = NGAppContext::instance().await;
-    let settings = ctx.settings()?;
-
-    let collector = settings_control::build_collector_view(settings)?;
-    let northward = settings_control::build_northward_view(settings)?;
-    let southward = settings_control::build_southward_view(settings)?;
-    let logging_output = settings_control::build_logging_output_view(settings)?;
-    let logging_cleanup = settings_control::build_logging_cleanup_view(settings)?;
-
-    let baseline = LogLevel::from(ctx.log_level());
-    let rt = control::global().ok_or(WebError::InternalError(
-        "Log control runtime is not initialized".to_string(),
-    ))?;
-    let effective = rt.overrides().effective_global_level();
-    let s = rt.settings();
-    let logging_runtime = GlobalLogLevelView {
-        baseline,
-        effective,
-        channel_override_ttl: TtlRange {
-            min_ms: s.channel_override_min_ttl_ms,
-            max_ms: s.channel_override_max_ttl_ms,
-            default_ms: s.channel_override_default_ttl_ms,
-        },
-    };
-
-    Ok(WebResponse::ok(SystemSettingsOverviewView {
-        collector,
-        northward,
-        southward,
-        logging_runtime,
-        logging_output,
-        logging_cleanup,
-    }))
-}
-
 #[inline]
 #[instrument(name = "init-system-settings-rbac", skip(router_prefix, perm_checker))]
 pub(crate) async fn init_rbac_rules(
     router_prefix: &str,
     perm_checker: &NGPermChecker,
 ) -> NGResult<(), RBACError> {
-    let rules: [(Method, String, Box<dyn PermRule>); 18] = [
+    let rules: [(Method, String, Box<dyn PermRule>); 20] = [
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/settings/collector"),
@@ -155,6 +139,16 @@ pub(crate) async fn init_rbac_rules(
         (
             Method::PATCH,
             format!("{router_prefix}{ROUTER_PREFIX}/settings/logging_runtime"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?.or(has_scope("system:settings")?),
+        ),
+        (
+            Method::GET,
+            format!("{router_prefix}{ROUTER_PREFIX}/settings/logging_control"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?.or(has_scope("system:settings")?),
+        ),
+        (
+            Method::PATCH,
+            format!("{router_prefix}{ROUTER_PREFIX}/settings/logging_control"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?.or(has_scope("system:settings")?),
         ),
         (
@@ -216,6 +210,48 @@ pub(crate) async fn init_rbac_rules(
     Ok(())
 }
 
+#[instrument(name = "get-system-settings-overview", skip_all)]
+pub async fn get_system_settings_overview() -> WebResult<WebResponse<SystemSettingsOverviewView>> {
+    let ctx = NGAppContext::instance().await;
+    let settings = ctx.settings()?;
+
+    let collector = settings_control::build_collector_view(settings)?;
+    let northward = settings_control::build_northward_view(settings)?;
+    let southward = settings_control::build_southward_view(settings)?;
+    let logging_output = settings_control::build_logging_output_view(settings)?;
+    let logging_cleanup = settings_control::build_logging_cleanup_view(settings)?;
+
+    let baseline = LogLevel::from(ctx.log_level());
+    let rt = control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
+    let effective = rt.overrides().effective_global_level();
+    let s = rt.settings();
+    let logging_runtime = GlobalLogLevelView {
+        baseline,
+        effective,
+        channel_override_ttl: TtlRange {
+            min_ms: s.channel_override_min_ttl_ms,
+            max_ms: s.channel_override_max_ttl_ms,
+            default_ms: s.channel_override_default_ttl_ms,
+        },
+    };
+    let logging_control =
+        settings_control::build_logging_control_view(settings, s).map_err(|e| {
+            WebError::InternalError(format!("Failed to build logging_control view: {e}"))
+        })?;
+
+    Ok(WebResponse::ok(SystemSettingsOverviewView {
+        collector,
+        northward,
+        southward,
+        logging_runtime,
+        logging_control,
+        logging_output,
+        logging_cleanup,
+    }))
+}
+
 #[instrument(name = "not-implemented", skip_all)]
 async fn not_implemented() -> WebResult<WebResponse<()>> {
     Err(WebError::BadRequest("not implemented".to_string()))
@@ -231,13 +267,15 @@ pub async fn get_collector_settings() -> WebResult<WebResponse<CollectorSettings
 
 #[instrument(name = "patch-collector-settings", skip_all)]
 pub async fn patch_collector_settings(
-    req: web::Json<PatchCollectorSettingsRequest>,
+    req: Json<PatchCollectorSettingsRequest>,
 ) -> WebResult<WebResponse<ApplySystemSettingsResult>> {
     let req = req.into_inner();
 
-    // Serialize apply + persist by holding the global context write lock.
+    // Serialize apply + persist without blocking unrelated requests.
+    let _patch_guard = SYSTEM_SETTINGS_PATCH_LOCK.lock().await;
+
     let (gateway, max_concurrency, outbound_capacity, mut result) = {
-        let ctx = NGAppContext::instance_mut().await;
+        let ctx = NGAppContext::instance().await;
         let gateway = ctx.gateway()?;
         let settings = ctx.settings()?;
         let result = settings_control::apply_collector_settings(settings, req)
@@ -284,11 +322,12 @@ pub async fn get_southward_settings() -> WebResult<WebResponse<SouthwardSettings
 
 #[instrument(name = "patch-northward-settings", skip_all)]
 pub async fn patch_northward_settings(
-    req: web::Json<PatchNorthwardSettingsRequest>,
+    req: Json<PatchNorthwardSettingsRequest>,
 ) -> WebResult<WebResponse<ApplySystemSettingsResult>> {
     let req = req.into_inner();
+    let _patch_guard = SYSTEM_SETTINGS_PATCH_LOCK.lock().await;
     let (gateway, queue_capacity, mut result) = {
-        let ctx = NGAppContext::instance_mut().await;
+        let ctx = NGAppContext::instance().await;
         let gateway = ctx.gateway()?;
         let settings = ctx.settings()?;
         let result = settings_control::apply_northward_settings(settings, req)
@@ -318,7 +357,8 @@ pub async fn patch_southward_settings(
 ) -> WebResult<WebResponse<ApplySystemSettingsResult>> {
     let req = req.into_inner();
     let result = {
-        let ctx = NGAppContext::instance_mut().await;
+        let _patch_guard = SYSTEM_SETTINGS_PATCH_LOCK.lock().await;
+        let ctx = NGAppContext::instance().await;
         let settings = ctx.settings()?;
         settings_control::apply_southward_settings(settings, req)
             .map_err(|e| WebError::InternalError(e.to_string()))?
@@ -358,6 +398,32 @@ pub async fn patch_logging_runtime(
     get_logging_runtime().await
 }
 
+#[instrument(name = "get-logging-control-settings", skip_all)]
+pub async fn get_logging_control_settings() -> WebResult<WebResponse<LoggingControlSettingsView>> {
+    let ctx = NGAppContext::instance().await;
+    let settings = ctx.settings()?;
+    let rt = control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
+    let s = rt.settings();
+    let view = settings_control::build_logging_control_view(settings, s)
+        .map_err(|e| WebError::InternalError(e.to_string()))?;
+    Ok(WebResponse::ok(view))
+}
+
+#[instrument(name = "patch-logging-control-settings", skip_all)]
+pub async fn patch_logging_control_settings(
+    req: Json<PatchLoggingControlSettingsRequest>,
+) -> WebResult<WebResponse<ApplySystemSettingsResult>> {
+    let req = req.into_inner();
+    let _patch_guard = SYSTEM_SETTINGS_PATCH_LOCK.lock().await;
+    let ctx = NGAppContext::instance().await;
+    let settings = ctx.settings()?;
+    let result = settings_control::apply_logging_control_settings(settings, req)
+        .map_err(|e| WebError::InternalError(e.to_string()))?;
+    Ok(WebResponse::ok(result))
+}
+
 #[instrument(name = "get-logging-output-settings", skip_all)]
 pub async fn get_logging_output_settings() -> WebResult<WebResponse<LoggingOutputSettingsView>> {
     let ctx = NGAppContext::instance().await;
@@ -373,7 +439,8 @@ pub async fn patch_logging_output_settings(
     let req = req.into_inner();
 
     let (output, mut result) = {
-        let ctx = NGAppContext::instance_mut().await;
+        let _patch_guard = SYSTEM_SETTINGS_PATCH_LOCK.lock().await;
+        let ctx = NGAppContext::instance().await;
         let settings = ctx.settings()?;
         let result = settings_control::apply_logging_output_settings(settings, req)
             .map_err(|e| WebError::InternalError(e.to_string()))?;
@@ -405,7 +472,8 @@ pub async fn patch_logging_cleanup_settings(
     let req = req.into_inner();
 
     let result = {
-        let ctx = NGAppContext::instance_mut().await;
+        let _patch_guard = SYSTEM_SETTINGS_PATCH_LOCK.lock().await;
+        let ctx = NGAppContext::instance().await;
         let settings = ctx.settings()?;
         settings_control::apply_logging_cleanup_settings(settings, req)
             .map_err(|e| WebError::InternalError(e.to_string()))?

@@ -22,18 +22,22 @@ pub struct RetryPolicy {
     /// - `Some(n)`: retry at most `n` times
     /// - `None`: unlimited retries (use with caution)
     #[serde(default = "RetryPolicy::default_max_attempts")]
+    #[serde(alias = "max_attempts")]
     pub max_attempts: Option<u32>,
 
     /// Initial retry interval in milliseconds
     #[serde(default = "RetryPolicy::default_initial_interval_ms")]
+    #[serde(alias = "initial_interval_ms")]
     pub initial_interval_ms: u64,
 
     /// Maximum retry interval cap in milliseconds
     #[serde(default = "RetryPolicy::default_max_interval_ms")]
+    #[serde(alias = "max_interval_ms")]
     pub max_interval_ms: u64,
 
     /// Randomization factor in range [0.0, 1.0]. Example: 0.2 means ±20% jitter
     #[serde(default = "RetryPolicy::default_randomization_factor")]
+    #[serde(alias = "randomization_factor")]
     pub randomization_factor: f64,
 
     /// Multiplicative factor for each retry step. Typically 2.0 for exponential backoff
@@ -44,6 +48,7 @@ pub struct RetryPolicy {
     ///
     /// Note: If both max_attempts and max_elapsed_time are set, whichever is reached first stops retries
     #[serde(default = "RetryPolicy::default_max_elapsed_time_ms")]
+    #[serde(alias = "max_elapsed_time_ms")]
     pub max_elapsed_time_ms: Option<u64>,
 }
 

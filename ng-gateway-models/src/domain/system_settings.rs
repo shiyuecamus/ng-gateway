@@ -190,6 +190,7 @@ pub enum SystemSettingsDomain {
     Collector,
     Northward,
     Southward,
+    LoggingControl,
     LoggingOutput,
     LoggingCleanup,
     Metrics,
@@ -236,6 +237,11 @@ pub enum RuntimeSettingKey {
     GeneralCollectorRetryPolicyMaxElapsedTimeMs,
     GeneralCollectorOutboundQueueCapacity,
     GeneralNorthwardQueueCapacity,
+    LoggingControlChannelOverrideDefaultTtlMs,
+    LoggingControlChannelOverrideMinTtlMs,
+    LoggingControlChannelOverrideMaxTtlMs,
+    LoggingControlOverrideCleanupIntervalMs,
+    LoggingControlDriverIngestQueueCapacity,
     LoggingOutputFormat,
     LoggingOutputIncludeSpanFields,
     LoggingOutputFileEnabled,
@@ -296,8 +302,89 @@ pub struct SystemSettingsOverviewView {
     pub northward: NorthwardSettingsView,
     pub southward: SouthwardSettingsView,
     pub logging_runtime: GlobalLogLevelView,
+    pub logging_control: LoggingControlSettingsView,
     pub logging_output: LoggingOutputSettingsView,
     pub logging_cleanup: LoggingCleanupSettingsView,
+}
+
+/// Logging control settings view (override TTL policy).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoggingControlSettingsView {
+    pub channel_override_default_ttl_ms: SettingField<u64>,
+    pub channel_override_min_ttl_ms: SettingField<u64>,
+    pub channel_override_max_ttl_ms: SettingField<u64>,
+    /// Cleanup tick interval in milliseconds for expiring override leases.
+    pub override_cleanup_interval_ms: SettingField<u64>,
+    /// Driver->host ingest queue capacity for driver logs (bounded, drop-old-keep-new).
+    pub driver_ingest_queue_capacity: SettingField<u64>,
+}
+
+/// Logging control settings patch (partial update).
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_logging_control_patch"))]
+#[serde(rename_all = "camelCase")]
+pub struct PatchLoggingControlSettingsRequest {
+    #[serde(default)]
+    #[validate(range(min = 1))]
+    pub channel_override_default_ttl_ms: Option<u64>,
+    #[serde(default)]
+    #[validate(range(min = 1))]
+    pub channel_override_min_ttl_ms: Option<u64>,
+    #[serde(default)]
+    #[validate(range(min = 1))]
+    pub channel_override_max_ttl_ms: Option<u64>,
+    /// Cleanup tick interval in milliseconds for expiring override leases.
+    ///
+    /// Recommended range: [200, 300_000].
+    #[serde(default)]
+    #[validate(range(min = 200, max = 300_000))]
+    pub override_cleanup_interval_ms: Option<u64>,
+    /// Driver->host ingest queue capacity for driver logs (bounded, drop-old-keep-new).
+    ///
+    /// Recommended range: [1, 1_000_000].
+    #[serde(default)]
+    #[validate(range(min = 1, max = 1_000_000))]
+    pub driver_ingest_queue_capacity: Option<u64>,
+}
+
+/// Cross-field validation for logging control patch requests.
+///
+/// # Why schema-level validation
+/// Some constraints are relational (min/max/default) and cannot be expressed as a single-field
+/// `#[validate(range(...))]`. This runs automatically when used with `actix_web_validator::Json`.
+///
+/// # Semantics for partial updates
+/// This validator only checks relations among fields that are present in the request payload.
+/// It does **not** (and should not) require callers to always provide all three TTL fields.
+#[inline]
+fn validate_logging_control_patch(
+    v: &PatchLoggingControlSettingsRequest,
+) -> Result<(), ValidationError> {
+    // TTL relationship checks (best-effort for partial patches).
+    if let (Some(min), Some(max)) = (v.channel_override_min_ttl_ms, v.channel_override_max_ttl_ms) {
+        if max < min {
+            return Err(ValidationError::new("ttl_range_invalid"));
+        }
+    }
+    if let (Some(default_ttl), Some(min)) = (
+        v.channel_override_default_ttl_ms,
+        v.channel_override_min_ttl_ms,
+    ) {
+        if default_ttl < min {
+            return Err(ValidationError::new("ttl_default_below_min"));
+        }
+    }
+    if let (Some(default_ttl), Some(max)) = (
+        v.channel_override_default_ttl_ms,
+        v.channel_override_max_ttl_ms,
+    ) {
+        if default_ttl > max {
+            return Err(ValidationError::new("ttl_default_above_max"));
+        }
+    }
+
+    Ok(())
 }
 
 /// Collector settings view.
@@ -323,16 +410,20 @@ pub struct RetryPolicySettingsView {
 }
 
 /// Collector settings patch (partial update).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchCollectorSettingsRequest {
     #[serde(default)]
+    #[validate(range(min = 1))]
     pub collection_timeout_ms: Option<u64>,
     #[serde(default)]
+    #[validate(range(min = 1))]
     pub max_concurrent_collections: Option<u64>,
     #[serde(default)]
+    #[validate(nested)]
     pub retry_policy: Option<PatchRetryPolicyRequest>,
     #[serde(default)]
+    #[validate(range(min = 1))]
     pub outbound_queue_capacity: Option<u64>,
 }
 
@@ -345,12 +436,14 @@ pub struct NorthwardSettingsView {
 }
 
 /// Northward settings patch (partial update).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchNorthwardSettingsRequest {
     #[serde(default)]
+    #[validate(range(min = 1))]
     pub queue_capacity: Option<u64>,
     #[serde(default)]
+    #[validate(range(min = 1, max = 300_000))]
     pub start_timeout_ms: Option<u64>,
 }
 
@@ -391,23 +484,54 @@ pub struct PatchSouthwardSettingsRequest {
 }
 
 /// Patch request for retry policy (partial update).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_retry_policy_patch_request"))]
 #[serde(rename_all = "camelCase")]
 pub struct PatchRetryPolicyRequest {
     /// Set to `null` to mean unlimited retries.
     #[serde(default)]
     pub max_attempts: Option<Option<u32>>,
     #[serde(default)]
+    #[validate(range(min = 1))]
     pub initial_interval_ms: Option<u64>,
     #[serde(default)]
+    #[validate(range(min = 1))]
     pub max_interval_ms: Option<u64>,
     #[serde(default)]
+    #[validate(range(min = 0.0, max = 1.0))]
     pub randomization_factor: Option<f64>,
     #[serde(default)]
+    #[validate(range(min = 1.0))]
     pub multiplier: Option<f64>,
     /// Set to `null` to remove policy elapsed-time limit (collector still enforces its own budget).
     #[serde(default)]
     pub max_elapsed_time_ms: Option<Option<u64>>,
+}
+
+/// Cross-field validation for retry policy patch request.
+///
+/// # Semantics for partial updates
+/// Only validates relations among fields that are present in this request payload.
+#[inline]
+fn validate_retry_policy_patch_request(v: &PatchRetryPolicyRequest) -> Result<(), ValidationError> {
+    if let (Some(initial), Some(max)) = (v.initial_interval_ms, v.max_interval_ms) {
+        if max < initial {
+            return Err(ValidationError::new("max_interval_lt_initial_interval"));
+        }
+    }
+    // `max_attempts`: allow null (unlimited), but if set to a number it must be > 0.
+    if let Some(Some(attempts)) = v.max_attempts {
+        if attempts == 0 {
+            return Err(ValidationError::new("max_attempts_must_be_gt_0"));
+        }
+    }
+    // `max_elapsed_time_ms`: allow null (no limit), but if set to a number it must be > 0.
+    if let Some(Some(ms)) = v.max_elapsed_time_ms {
+        if ms == 0 {
+            return Err(ValidationError::new("max_elapsed_time_ms_must_be_gt_0"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

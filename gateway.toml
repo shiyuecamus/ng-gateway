@@ -45,9 +45,6 @@ start_timeout_ms = 2000
 collection_timeout_ms = 30000
 # Maximum concurrent collections per channel
 max_concurrent_collections = 200
-# Optional maximum total elapsed time in milliseconds (omit for no policy limit;
-# collector still enforces its own per-group budget)
-# max_elapsed_time_ms = 5000
 # Outbound queue capacity from collector to gateway (bounded channel)
 outbound_queue_capacity = 10000
 # Retry policy for failed collections (unified with SDK retry semantics)
@@ -64,13 +61,27 @@ max_interval_ms = 30000
 randomization_factor = 0.2
 # Multiplicative factor for each retry step (>= 1.0)
 multiplier = 2.0
+max_elapsed_time_ms = 5000
 
 # Logging (top-level)
 [logging.control]
+# Default TTL for channel overrides in milliseconds.
 channel_override_default_ttl_ms = 300000
+# Minimum allowed TTL for channel overrides in milliseconds.
 channel_override_min_ttl_ms = 10000
+# Maximum allowed TTL for channel overrides in milliseconds.
 channel_override_max_ttl_ms = 1800000
+# Background cleanup interval (ms) for expiring override leases.
+#
+# Notes:
+# - Effective interval is clamped to >= 200ms by runtime.
+# - Too small increases background overhead; too large delays expiry effects.
 override_cleanup_interval_ms = 5000
+# Driver->host ingest queue capacity for driver logs (bounded, drop-old-keep-new).
+#
+# Notes:
+# - This is a bounded queue used at the FFI boundary; if it fills up, oldest items are dropped
+#   to ensure new logs can still enter.
 driver_ingest_queue_capacity = 10000
 
 [logging.output]

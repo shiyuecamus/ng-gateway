@@ -1,14 +1,15 @@
+use crate::log::control::{self as log_control, LogControlSettings};
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::constants::{DEFAULT_CONFIG_FILE_NAME, ENV_PREFIX, ENV_SEPARATOR};
 use ng_gateway_models::domain::prelude::{
     ApplySystemSettingsResult, CollectorSettingsView, LoggingCleanupSettingsView,
-    LoggingFileOutputSettingsView, LoggingFileRetentionSettingsView,
+    LoggingControlSettingsView, LoggingFileOutputSettingsView, LoggingFileRetentionSettingsView,
     LoggingFileRotationSettingsView, LoggingOutputFormat, LoggingOutputSettingsView,
     LoggingRotationMode, LoggingTimeRotation, NorthwardSettingsView, PatchCollectorSettingsRequest,
-    PatchLoggingCleanupSettingsRequest, PatchLoggingOutputSettingsRequest,
-    PatchNorthwardSettingsRequest, PatchRetryPolicyRequest, PatchSouthwardSettingsRequest,
-    RetryPolicySettingsView, RuntimeSettingKey, SettingField, SettingValueSource,
-    SouthwardSettingsView, SystemSettingsDomain, SystemSettingsImpact,
+    PatchLoggingCleanupSettingsRequest, PatchLoggingControlSettingsRequest,
+    PatchLoggingOutputSettingsRequest, PatchNorthwardSettingsRequest, PatchRetryPolicyRequest,
+    PatchSouthwardSettingsRequest, RetryPolicySettingsView, RuntimeSettingKey, SettingField,
+    SettingValueSource, SouthwardSettingsView, SystemSettingsDomain, SystemSettingsImpact,
 };
 use ng_gateway_models::settings::Settings;
 use ng_gateway_sdk::RetryPolicy;
@@ -56,6 +57,21 @@ fn key_path_segments(key: RuntimeSettingKey) -> &'static [&'static str] {
         }
         RuntimeSettingKey::GeneralNorthwardQueueCapacity => {
             &["general", "northward", "queue_capacity"]
+        }
+        RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs => {
+            &["logging", "control", "channel_override_default_ttl_ms"]
+        }
+        RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs => {
+            &["logging", "control", "channel_override_min_ttl_ms"]
+        }
+        RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs => {
+            &["logging", "control", "channel_override_max_ttl_ms"]
+        }
+        RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs => {
+            &["logging", "control", "override_cleanup_interval_ms"]
+        }
+        RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity => {
+            &["logging", "control", "driver_ingest_queue_capacity"]
         }
         RuntimeSettingKey::LoggingOutputFormat => &["logging", "output", "format"],
         RuntimeSettingKey::LoggingOutputIncludeSpanFields => {
@@ -721,6 +737,235 @@ pub fn build_logging_cleanup_view(settings: &Settings) -> NGResult<LoggingCleanu
     })
 }
 
+/// Build logging control settings view (override TTL policy).
+///
+/// # Data source
+/// - Effective values come from the log-control runtime (hot-applied).
+/// - `source/envOverridden/envKey` are derived from env vars + gateway.toml.
+pub fn build_logging_control_view(
+    settings: &Settings,
+    current: LogControlSettings,
+) -> NGResult<LoggingControlSettingsView> {
+    let doc = read_gateway_toml_doc(settings.config_path())?;
+    Ok(LoggingControlSettingsView {
+        channel_override_default_ttl_ms: setting_field_u64(
+            &doc,
+            RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs,
+            current.channel_override_default_ttl_ms,
+        ),
+        channel_override_min_ttl_ms: setting_field_u64(
+            &doc,
+            RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs,
+            current.channel_override_min_ttl_ms,
+        ),
+        channel_override_max_ttl_ms: setting_field_u64(
+            &doc,
+            RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs,
+            current.channel_override_max_ttl_ms,
+        ),
+        override_cleanup_interval_ms: setting_field_u64(
+            &doc,
+            RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs,
+            current.override_cleanup_interval_ms,
+        ),
+        driver_ingest_queue_capacity: setting_field_u64(
+            &doc,
+            RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity,
+            current.driver_ingest_queue_capacity as u64,
+        ),
+    })
+}
+
+/// Apply + persist logging control settings (override TTL policy).
+///
+/// # Semantics
+/// - Hot-applies to the log-control runtime immediately
+/// - Persists changed keys to `gateway.toml`
+pub fn apply_logging_control_settings(
+    settings: &Settings,
+    mut req: PatchLoggingControlSettingsRequest,
+) -> NGResult<ApplySystemSettingsResult> {
+    // Filter out env-controlled fields.
+    let mut blocked_by_env = Vec::new();
+    if req.channel_override_default_ttl_ms.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs)
+    {
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs);
+        req.channel_override_default_ttl_ms = None;
+    }
+    if req.channel_override_min_ttl_ms.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs)
+    {
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs);
+        req.channel_override_min_ttl_ms = None;
+    }
+    if req.channel_override_max_ttl_ms.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs)
+    {
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs);
+        req.channel_override_max_ttl_ms = None;
+    }
+    if req.override_cleanup_interval_ms.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs)
+    {
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs);
+        req.override_cleanup_interval_ms = None;
+    }
+    if req.driver_ingest_queue_capacity.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity)
+    {
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity);
+        req.driver_ingest_queue_capacity = None;
+    }
+
+    // No-op fast path.
+    if req.channel_override_default_ttl_ms.is_none()
+        && req.channel_override_min_ttl_ms.is_none()
+        && req.channel_override_max_ttl_ms.is_none()
+        && req.override_cleanup_interval_ms.is_none()
+        && req.driver_ingest_queue_capacity.is_none()
+    {
+        return Ok(ApplySystemSettingsResult {
+            applied: true,
+            persisted: true,
+            domain: SystemSettingsDomain::LoggingControl,
+            changed_keys: Vec::new(),
+            blocked_by_env,
+            persistence_warning: None,
+            runtime_warning: None,
+            impact: SystemSettingsImpact::HotApply,
+            restart_targets: Vec::new(),
+        });
+    }
+
+    let rt = log_control::global().ok_or_else(|| {
+        NGError::from("Log control runtime is not initialized (cannot apply logging_control)")
+    })?;
+
+    let cur = rt.settings();
+    let mut next = cur;
+
+    if let Some(v) = req.channel_override_default_ttl_ms {
+        next.channel_override_default_ttl_ms = v;
+    }
+    if let Some(v) = req.channel_override_min_ttl_ms {
+        next.channel_override_min_ttl_ms = v;
+    }
+    if let Some(v) = req.channel_override_max_ttl_ms {
+        next.channel_override_max_ttl_ms = v;
+    }
+    if let Some(v) = req.override_cleanup_interval_ms {
+        next.override_cleanup_interval_ms = v;
+    }
+    if let Some(v) = req.driver_ingest_queue_capacity {
+        // Avoid usize overflow on 32-bit targets (defensive).
+        next.driver_ingest_queue_capacity = (v.min(usize::MAX as u64)) as usize;
+    }
+
+    // Cross-field validation (keep policy coherent).
+    if next.channel_override_max_ttl_ms < next.channel_override_min_ttl_ms {
+        return Err(NGError::from(
+            "channel_override_max_ttl_ms must be >= channel_override_min_ttl_ms",
+        ));
+    }
+    if next.channel_override_default_ttl_ms < next.channel_override_min_ttl_ms
+        || next.channel_override_default_ttl_ms > next.channel_override_max_ttl_ms
+    {
+        return Err(NGError::from(
+            "channel_override_default_ttl_ms must be within [min, max]",
+        ));
+    }
+
+    // Apply to runtime.
+    rt.apply_settings(next);
+
+    // Track changed keys.
+    let mut changed_keys: Vec<RuntimeSettingKey> = Vec::new();
+    if cur.channel_override_default_ttl_ms != next.channel_override_default_ttl_ms {
+        changed_keys.push(RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs);
+    }
+    if cur.channel_override_min_ttl_ms != next.channel_override_min_ttl_ms {
+        changed_keys.push(RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs);
+    }
+    if cur.channel_override_max_ttl_ms != next.channel_override_max_ttl_ms {
+        changed_keys.push(RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs);
+    }
+    if cur.override_cleanup_interval_ms != next.override_cleanup_interval_ms {
+        changed_keys.push(RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs);
+    }
+    if cur.driver_ingest_queue_capacity != next.driver_ingest_queue_capacity {
+        changed_keys.push(RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity);
+    }
+
+    // Persist changed keys only.
+    let mut persisted = true;
+    let mut persistence_warning = None;
+    if !changed_keys.is_empty() {
+        let mut doc = read_gateway_toml_doc(settings.config_path())?;
+        for key in &changed_keys {
+            match key {
+                RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs => {
+                    toml_set_int(
+                        &mut doc,
+                        key_path_segments(*key),
+                        next.channel_override_default_ttl_ms.min(i64::MAX as u64) as i64,
+                    );
+                }
+                RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs => {
+                    toml_set_int(
+                        &mut doc,
+                        key_path_segments(*key),
+                        next.channel_override_min_ttl_ms.min(i64::MAX as u64) as i64,
+                    );
+                }
+                RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs => {
+                    toml_set_int(
+                        &mut doc,
+                        key_path_segments(*key),
+                        next.channel_override_max_ttl_ms.min(i64::MAX as u64) as i64,
+                    );
+                }
+                RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs => {
+                    toml_set_int(
+                        &mut doc,
+                        key_path_segments(*key),
+                        next.override_cleanup_interval_ms.min(i64::MAX as u64) as i64,
+                    );
+                }
+                RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity => {
+                    toml_set_int(
+                        &mut doc,
+                        key_path_segments(*key),
+                        (next.driver_ingest_queue_capacity as u64).min(i64::MAX as u64) as i64,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let out = doc.to_string();
+        if let Err(e) = atomic_rewrite(settings.config_path(), &out) {
+            persisted = false;
+            persistence_warning = Some(format!(
+                "Runtime applied, but failed to persist to {} (restart will lose changes): {e}",
+                settings.config_path().display()
+            ));
+        }
+    }
+
+    Ok(ApplySystemSettingsResult {
+        applied: true,
+        persisted,
+        domain: SystemSettingsDomain::LoggingControl,
+        changed_keys,
+        blocked_by_env,
+        persistence_warning,
+        runtime_warning: None,
+        impact: SystemSettingsImpact::HotApply,
+        restart_targets: Vec::new(),
+    })
+}
+
 /// Apply + persist logging output settings.
 pub fn apply_logging_output_settings(
     settings: &Settings,
@@ -967,20 +1212,6 @@ pub fn apply_northward_settings(
     settings: &Settings,
     mut req: PatchNorthwardSettingsRequest,
 ) -> NGResult<ApplySystemSettingsResult> {
-    if let Some(v) = req.queue_capacity {
-        if v == 0 {
-            return Err(NGError::from("queue_capacity must be > 0"));
-        }
-    }
-    if let Some(v) = req.start_timeout_ms {
-        if v == 0 {
-            return Err(NGError::from("start_timeout_ms must be > 0"));
-        }
-        if v > 300_000 {
-            return Err(NGError::from("start_timeout_ms must be <= 300000"));
-        }
-    }
-
     // Filter out env-controlled fields.
     let mut blocked_by_env = Vec::new();
     if req.queue_capacity.is_some()
@@ -1195,22 +1426,6 @@ pub fn apply_collector_settings(
     settings: &Settings,
     mut req: PatchCollectorSettingsRequest,
 ) -> NGResult<ApplySystemSettingsResult> {
-    // Basic validation (best practice, avoid foot-guns).
-    if let Some(v) = req.collection_timeout_ms {
-        if v == 0 {
-            return Err(NGError::from("collection_timeout_ms must be > 0"));
-        }
-    }
-    if let Some(v) = req.max_concurrent_collections {
-        if v == 0 {
-            return Err(NGError::from("max_concurrent_collections must be > 0"));
-        }
-    }
-    if let Some(v) = req.outbound_queue_capacity {
-        if v == 0 {
-            return Err(NGError::from("outbound_queue_capacity must be > 0"));
-        }
-    }
     if let Some(rp) = &req.retry_policy {
         let cur = settings.general.collector.retry_policy();
         let next = apply_retry_policy_patch(cur, rp);

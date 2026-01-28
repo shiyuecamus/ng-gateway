@@ -73,7 +73,6 @@ struct HostIngestItem {
 }
 
 struct HostBridge {
-    queue_capacity: usize,
     queue: Mutex<VecDeque<HostIngestItem>>,
     notify: Notify,
     started: AtomicBool,
@@ -81,11 +80,23 @@ struct HostBridge {
 
 static HOST_BRIDGE: OnceCell<Arc<HostBridge>> = OnceCell::new();
 
-fn host_bridge(queue_capacity: usize) -> Arc<HostBridge> {
+/// Resolve current driver ingest queue capacity from runtime settings.
+///
+/// # Semantics
+/// - If log-control runtime is not initialized, falls back to a safe default.
+/// - Always returns a value >= 1.
+#[inline]
+fn current_queue_capacity() -> usize {
+    control::global()
+        .map(|rt| rt.settings().driver_ingest_queue_capacity)
+        .unwrap_or(10_000)
+        .max(1)
+}
+
+fn host_bridge() -> Arc<HostBridge> {
     HOST_BRIDGE
         .get_or_init(|| {
             Arc::new(HostBridge {
-                queue_capacity: queue_capacity.max(1),
                 queue: Mutex::new(VecDeque::new()),
                 notify: Notify::new(),
                 started: AtomicBool::new(false),
@@ -99,10 +110,7 @@ fn host_bridge(queue_capacity: usize) -> Arc<HostBridge> {
 /// # Important
 /// Must be called from within a Tokio runtime context.
 pub fn ensure_ingest_started() {
-    let queue_cap = control::global()
-        .map(|rt| rt.settings().driver_ingest_queue_capacity)
-        .unwrap_or(10_000);
-    let bridge = host_bridge(queue_cap);
+    let bridge = host_bridge();
     if bridge.started.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -112,10 +120,7 @@ pub fn ensure_ingest_started() {
 
 /// Create a host log sink handle for a specific driver.
 pub fn create_sink(driver_id: i32, driver_type: String) -> HostLogSinkHandle {
-    let queue_cap = control::global()
-        .map(|rt| rt.settings().driver_ingest_queue_capacity)
-        .unwrap_or(10_000);
-    let _ = host_bridge(queue_cap);
+    let _ = host_bridge();
     HostLogSinkHandle {
         ctx: Box::new(HostSinkContext {
             driver_id,
@@ -144,16 +149,14 @@ fn host_enqueue(user_data: *mut c_void, ptr: *const u8, len: usize) {
     let mut payload = Vec::with_capacity(len.min(1024 * 1024));
     payload.extend_from_slice(bytes);
 
-    let queue_cap = control::global()
-        .map(|rt| rt.settings().driver_ingest_queue_capacity)
-        .unwrap_or(10_000);
-    let bridge = host_bridge(queue_cap);
+    let cap = current_queue_capacity();
+    let bridge = host_bridge();
     let mut q = bridge.queue.lock().unwrap_or_else(|e| e.into_inner());
     q.push_back(HostIngestItem {
         ctx: ctx.clone(),
         bytes: payload,
     });
-    while q.len() > bridge.queue_capacity {
+    while q.len() > cap {
         q.pop_front();
     }
     drop(q);

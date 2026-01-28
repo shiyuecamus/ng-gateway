@@ -163,7 +163,7 @@ gateway:
           maxIntervalMs: 30000
           randomizationFactor: 0.2
           multiplier: 2.0
-          # maxElapsedTimeMs: 0   # 0/omit => unlimited
+          maxElapsedTimeMs: 5000
         outboundQueueCapacity: 10000
     
     # Logging configuration (top-level)

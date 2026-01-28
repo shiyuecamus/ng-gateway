@@ -44,6 +44,10 @@ ng-gateway-helm-offline-*.zip
 ui-dist.zip
 dist/
 
+# Backup files
+*.bak
+
 # By default, don't ignore .github directory!
 !.github/
 !.github/**
+ 
