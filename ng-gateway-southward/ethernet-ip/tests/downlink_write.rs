@@ -46,12 +46,7 @@ async fn downlink_write_point() -> anyhow::Result<()> {
     // We write through the point API to simulate UI write-point / RPC write workflows.
     let point = Arc::clone(&runtime_points[0]);
     let wr = driver
-        .write_point(
-            Arc::clone(&device_arc),
-            point,
-            &value,
-            Some(timeout_ms),
-        )
+        .write_point(Arc::clone(&device_arc), point, &value, Some(timeout_ms))
         .await;
 
     match wr {
