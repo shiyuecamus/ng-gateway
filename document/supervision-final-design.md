@@ -23,7 +23,13 @@
 
 - `SupervisorLoop<P>` 对 `P` 静态分发（monomorphization）
 
-因此最终版采用：**Factory 仍返回 `Box<dyn Driver/Plugin>`，但实际返回的是 `SupervisedDriver<T>` / `SupervisedPlugin<T>`（SDK 内置 wrapper）**，wrapper 内部持有 `T` 与 `SupervisorLoop<T::Protocol>`。
+因此最终版采用两条“硬边界”同时成立的方案：
+
+- **跨 ABI 边界只暴露 object-safe 的 `dyn Driver/dyn Plugin`**（host 唯一依赖的动态接口）
+- **但 `Driver/Plugin` 本身必须是 SDK “sealed” 的 host-facing API（外部 crate 禁止自行实现）**
+
+也就是说：driver/plugin 作者不再实现 `Driver/Plugin` trait；他们实现的是 `SouthwardComponent/NorthwardComponent + Connector/Session/Handle`。  
+`ng_driver_factory! / ng_plugin_factory!` 是唯一构建入口：**导出元信息 + 构建 `SupervisedDriver<T>` / `SupervisedPlugin<T>` 并返回 `Box<dyn Driver/Plugin>`**，从根上消灭“自己起 supervisor / 自己拼 wiring / 自己发状态”的分叉实现。
 
 ### 0.3 “连接成功后的动作（总召/订阅）”属于统一的 Session Init 阶段
 
@@ -116,7 +122,7 @@ OPCUA/IEC104/MQTT 等在连接成功后通常需要：
 
 - **是什么**：动态加载边界的“构造器”，负责从 init context 创建实例。
 - **最终版职责**：
-  - `create_driver/create_plugin`：构造实现者类型 `T`，并立即用 SDK wrapper 包装：返回 `Box<dyn Driver/Plugin>`
+  - `create_driver/create_plugin`：构造实现者类型 `T: *Component`，并立即用 SDK wrapper 包装：返回 `Box<dyn Driver/Plugin>`
   - runtime model 转换（channel/device/point/action/config schemas）仍由 factory 提供
 - **明确不做**：
   - 不暴露 `Connector/Session/Handle`（associated types 不跨 ABI）
@@ -155,7 +161,7 @@ OPCUA/IEC104/MQTT 等在连接成功后通常需要：
 
 ### 1.3.9 `SupervisorLoop`（生命周期治理内核）
 
-- **是什么**：在一个任务里实现统一状态机：Connecting → Initializing → Connected → (Reconnecting)* → Failed/Disconnected。
+- **是什么**：在一个任务里实现统一状态机：Connecting → Initializing → Connected → (Reconnecting)\* → Failed/Disconnected。
 - **职责**：
   - 协作取消（connect/init/run/backoff 都可取消）
   - 退避/预算（RetryController）
@@ -419,198 +425,320 @@ impl<C: Connector> SupervisorLoop<C> {
 
 ## 5. 终极接入：SDK Wrapper 托管一切（Driver/Plugin 作者只写 traits）
 
-这一节回答你最关心的：**DriverFactory/PluginFactory 应该如何设计**，才能让接入零样板且保持极致性能。
+这一节会被完全重写：**最终版的接入不是“实现 Driver/Plugin + 自己起 supervisor + Factory 里包一层 runtime wrapper”，而是“只实现 Component/Connector/Session；Driver/Plugin 被 SDK sealed；Factory + 宏是唯一入口且负责闭环 wiring”。**
 
-### 5.1 Southward：`SupervisedDriver<T>`（SDK wrapper 实现 `dyn Driver`）
+### 5.1 最终形态：`Driver/Plugin` 是 SDK sealed 的 host-facing API（外部 crate 禁止实现）
 
-#### 5.1.1 驱动作者要实现的最小接口（最终版）
+最终版要解决的不是“有没有抽象”，而是“抽象是否能强制闭环”。因此必须把 `Driver/Plugin` 设计成 **外部无法实现** 的接口：  
+这样才能从机制上保证所有实例都经过 `Supervised*` 托管层，彻底消灭绕过 supervision 的实现分叉。
 
-驱动作者不再直接实现 `ng-gateway-sdk::Driver`（object-safe），而是实现：
+语义上：
 
-- `SouthwardComponent`：提供 `Connector`（协议生命周期）+ data-plane（collect/write/execute/health）方法
+- `dyn Driver/dyn Plugin`：**只**是 host 调用入口（跨动态加载边界存在）
+- driver/plugin crate：实现的是 `*Component + Connector/Session/Handle`（静态分发、极致性能）
+- SDK：提供 `SupervisedDriver<T>` / `SupervisedPlugin<T>`（唯一实现 `Driver/Plugin` 的类型）
 
-```rust
-pub trait SouthwardComponent: Send + Sync + 'static {
-  type Connector: Connector;
+### 5.2 外部实现者只写三类东西（完全静态分发）
 
-  // identity（用于 span/metrics labels）
-  fn channel_id(&self) -> i32;
-  fn driver_kind(&self) -> &'static str;
+#### 5.2.1 `SouthwardComponent` / `NorthwardComponent`（业务实现体）
 
-  // build connector（捕获 cfg/依赖，不做 I/O）
-  fn build_connector(&self) -> Self::Connector;
+实现者只关心“协议与业务”，不关心状态机与 wiring。
 
-  // data-plane：SDK 负责提供 handle（已是 Arc<Handle>），你只做业务
-  async fn collect(&self, handle: Arc<<<Self::Connector as Connector>::Session as Session>::Handle>, items: &[CollectItem])
-    -> DriverResult<Vec<NorthwardData>>;
+- **必须提供 identity**：`driver_kind/plugin_kind` 为 `&'static str`（零分配、低基数 labels）
+- **必须提供 connector 构建**：捕获 cfg/依赖，但不做 I/O
+- **data-plane 方法必须只做业务**：不得自己维护重连 loop / publish state / retry budget
 
-  async fn write_point(&self, handle: Arc<<<Self::Connector as Connector>::Session as Session>::Handle>, device: Arc<dyn RuntimeDevice>, point: Arc<dyn RuntimePoint>, value: &NGValue, timeout_ms: Option<u64>)
-    -> DriverResult<WriteResult>;
+#### 5.2.2 `Connector`（一次建连如何创建 Session）
 
-  async fn execute_action(&self, handle: Arc<<<Self::Connector as Connector>::Session as Session>::Handle>, device: Arc<dyn RuntimeDevice>, action: Arc<dyn RuntimeAction>, parameters: Vec<(Arc<dyn RuntimeParameter>, NGValue)>)
-    -> DriverResult<ExecuteResult>;
+`Connector` 决定 connect 阶段的细节与错误分类（Connect/Init/Run 三阶段）。
 
-  async fn health_check(&self) -> DriverResult<DriverHealth>;
-}
-```
+#### 5.2.3 `Session`（一次连接周期的运行时对象）
 
-#### 5.1.2 SDK wrapper 的职责（完全统一）
+`Session` 必须显式拆出 `init()`：
 
-`SupervisedDriver<T>` 实现 `ng-gateway-sdk::Driver`，并统一：
+- `connect()` 只负责拿到“可初始化的 session”
+- `init()` 做订阅/总召/预热/恢复，**成功后才允许 Ready**
+- `run()` 驱动直到断开/失败/取消
+- `handle()` 提供热路径句柄（由 wrapper 通过 `ArcSwapOption` 发布/清空）
 
-- `start()`：创建 span、state watch、handle cell、retry policy、observer，并启动 SupervisorLoop（SDK spawn）
-- `stop()`：cancel + join（或 best-effort）
-- `subscribe_connection_state()`：返回统一 state（必要时桥接到 `SouthwardConnectionState`）
-- `collect/write/execute`：统一热读 handle；NotConnected 统一错误；并发护栏可在 wrapper 内统一（in-flight semaphore）
+### 5.3 `SupervisedDriver<T>` / `SupervisedPlugin<T>` 的职责（唯一闭环托管层）
 
-> 关键：driver 作者再也不写 supervisor 启动；也不会在每个协议里重复 watch/ArcSwap/retry/span 细节。
+`Supervised*` 必须同时完成三件事，缺一不可：
 
-### 5.2 Northward：`SupervisedPlugin<T>`（SDK wrapper 实现 `dyn Plugin`）
+- **生命周期闭环**：统一状态机 + Connect/Init/Run 分阶段失败分类 + budget/backoff 决策一致
+- **性能闭环**：热路径只做一次间接调用（`dyn Driver/Plugin`），内部对 `T` 完全单态化；句柄热读无锁（`ArcSwapOption`）
+- **可观测闭环**：所有阶段耗时/失败/退避/预算都通过 `Observer` 结构化上报；禁止在热路径拼字符串/高频打日志
 
-同理，plugin 作者实现：
+关键实现约束（最终版强制）：
 
-```rust
-pub trait NorthwardComponent: Send + Sync + 'static {
-  type Connector: Connector;
+- **`cdylib` 现实约束：tokio/tracing 很难与 host 可靠共享**  
+  只要 host 与 `cdylib` 各自静态链接了一份 tokio（实际工程里极常见），tokio 的 TLS / 全局状态会在两个库里“分裂”，导致插件侧 `Handle::current()` 等基于 TLS 的能力无法看到 host runtime。  
+  tracing 也类似：插件侧如果走 `tracing_subscriber::try_init()`，那是“初始化插件自己的 subscriber”，并不会天然汇入 host。  
+  **因此最终版必须保留“插件内 runtime + host 日志桥接”这一层**：`NG_RUNTIME`、`RuntimeAwareDriver/RuntimeAwarePlugin`、`ng_driver_set_log_sink/ng_driver_set_max_level`（以及 northward 的 `ng_*_init_tracing`）。
+- **runtime 的最佳实践**：每个 `cdylib` 只允许存在 **一个** runtime（`static Lazy<Runtime>`），并被该库内所有实例共享；禁止每个 channel/app 实例各自新建 runtime（那会造成线程/计时器/IO driver 膨胀）。
+- **spawn 统一入口**：由 supervision 层统一 spawn，并强制 `.instrument(span)`；但是“spawn 到哪个 runtime”取决于部署形态：  
+  - builtin（静态链接进 host 的驱动/插件）：跑在 host runtime  
+  - `cdylib`（动态加载）：跑在该 `cdylib` 的 `NG_RUNTIME`
+- **Handle 发布规则**：只有 `init()` 成功后才 publish handle；任何断连/失败立刻清空 handle
 
-  fn app_id(&self) -> i32;
-  fn plugin_kind(&self) -> &'static str;
-  fn build_connector(&self) -> Self::Connector;
+### 5.4 “性能闭环”到底闭在哪里（从观测到调参）
 
-  // data-plane：对外发送（publish）等
-  async fn process_data(&self, handle: Arc<<<Self::Connector as Connector>::Session as Session>::Handle>, data: Arc<NorthwardData>)
-    -> NorthwardResult<()>;
+最终版把“性能治理”视为 supervision 的一部分，而不是分散在各处的经验写法：
 
-  // 业务事件：例如 platform->gateway 的 command/rpc/writepoint
-  fn events_tx(&self) -> &tokio::sync::mpsc::Sender<NorthwardEvent>;
+- **观测输出（由 `Supervised*` 产生）**
+  - phase 迁移（Connecting/Initializing/Connected/Reconnecting/Failed/Disconnected）
+  - 失败分阶段（Connect/Init/Run）+ kind（Retryable/Fatal/Stop）+ code/summary（低分配）
+  - 退避与预算（backoff 秒数、剩余预算、耗尽点）
+  - 阶段耗时（connect/init/run 的 wall time）
+- **闭环输入（由 host 注入到 init context / runtime model）**
+  - `RetryPolicyByStage`（按 connect/init/run 分阶段策略）
+  - `collect_max_inflight` / buffer 容量 / drop policy（由配置与观测共同决定）
+  - 采集周期与分组策略（collector 基于观测的 latency/timeout/失败率做策略优化）
 
-  async fn health_check(&self) -> NorthwardResult<Duration>;
-}
-```
-
-SDK wrapper `SupervisedPlugin<T>` 统一托管 supervisor，`Plugin::start/stop/subscribe_connection_state/process_data` 都标准化。
-
-### 5.3 Session Init 如何覆盖 OPCUA/IEC104/MQTT 的“连接后动作”
-
-最终版对实现者的要求非常清晰：
-
-- 把“总召/订阅”等动作写在 `Session::init()`
-- 只有 init 成功后，Supervisor 才：
-  - 发布 handle（ArcSwap）
-  - 将 state 置为 Connected（Ready）
-
-示例映射：
-
-- **OPCUA client**
-  - `connect()`：建立 session + 创建底层 eventloop
-  - `init()`：create subscription + create monitored items +（可选）browse/read 预热
-  - `run()`：驱动 publish loop / reconnect detection
-- **IEC104**
-  - `connect()`：TCP connect + start data transfer handshake
-  - `init()`：发送总召 GI / 对时 / 初始化遥测映射
-  - `run()`：驱动接收/处理 APCI/ASDU，直到断开
-- **MQTT**
-  - `connect()`：CONNECT/CONNACK 完成，得到 client
-  - `init()`：SUBSCRIBE topics（必须在 Ready 前完成，否则上层误判 connected）
-  - `run()`：poll event loop，处理消息与 keepalive
-
-### 5.4 Server-mode（northward OPCUA Server）也按同一模型实现
-
-- `connect()`：bind/listen/start server
-- `init()`：加载 address space / 注册 handlers / 恢复持久化状态（如有）
-- `run()`：accept/serve loop
-
-`Connected` 的语义解释为 **Serving/Running**（不是“连上远端”）。
+最终版要求：这些闭环输入都必须能通过 runtime model 热更新（hot-apply），并由 `apply_runtime_delta` 进入 `Supervised*` 的 control-plane，而不是各协议自己开“小配置通道”。
 
 ---
 
-## 6. Factory 设计（最终版）：Factory 只负责“构建组件实现”，SDK 宏负责 wrap
+## 6. Factory 与 `ng_*_factory!` 宏（最终版）：唯一构建入口 + 零样板 + 零额外层
 
-### 6.1 新原则
+> 本章是你问的核心：最终的 `ng_driver_factory! / ng_plugin_factory! / DriverFactory / PluginFactory` 应该怎么设计，才能同时满足“极致性能 + 强语义 + 闭环”。
 
-- Factory 保持 object-safe，用于跨 ABI 动态加载
-- Factory 不暴露 `Connector/Session`（不跨 ABI 暴露 associated types）
-- Factory 返回的 `dyn Driver/Plugin` 由 SDK 自动 wrap 成 supervised wrapper
+### 6.1 最终版三条硬规则
 
-### 6.2 SouthwardFactory（最终版）
+- **硬规则 A：外部 crate 不允许实现 `Driver/Plugin`**  
+  `Driver/Plugin` 是 SDK sealed 的 host-facing API；外部只能实现 `*Component/Connector/Session`。
+- **硬规则 B：Factory 是“构造 + 低频转换”，不承载运行时语义**  
+  Factory 只负责：创建 supervised 实例、提供 schema、做 runtime model 转换；不维护 supervisor，不自建 runtime，不引入 actor/mpsc 层。
+- **硬规则 C：宏是唯一导出点**  
+  `ng_driver_factory! / ng_plugin_factory!` 负责导出所有动态加载需要的符号（版本/元信息/schema bytes/create_factory），并生成最终的 factory 实现（避免人为写错）。
 
-建议把原 `DriverFactory` 拆成两层概念（最终版推荐）：
+### 6.2 `DriverFactory` / `PluginFactory` 的最终语义（对 host 的最小稳定面）
 
-- `DriverFactory`：跨 ABI，负责创建 “driver component 实现” 与 runtime model 转换
-- `SupervisedDriver::from_component(...)`：SDK 内统一 wrap
-
-伪代码：
+最终版将 Factory 定义为“host 侧需要的一切，但仅限低频路径”：
 
 ```rust
-pub trait DriverFactory: DowncastSync + Send + Sync {
-  fn create_component(&self, ctx: SouthwardInitContext) -> DriverResult<Box<dyn SouthwardComponentDyn>>;
-  fn convert_runtime_channel(&self, channel: ChannelModel) -> DriverResult<Arc<dyn RuntimeChannel>>;
-  fn convert_runtime_device(&self, device: DeviceModel) -> DriverResult<Arc<dyn RuntimeDevice>>;
-  fn convert_runtime_point(&self, point: PointModel) -> DriverResult<Arc<dyn RuntimePoint>>;
-  fn convert_runtime_action(&self, action: ActionModel) -> DriverResult<Arc<dyn RuntimeAction>>;
+pub trait DriverFactory: Send + Sync {
+    /// Create a new channel-scoped driver instance (no I/O; I/O belongs in start()).
+    fn create_driver(&self, ctx: SouthwardInitContext) -> DriverResult<Box<dyn Driver>>;
+
+    /// Low-frequency model conversions (import/apply-delta paths).
+    fn convert_runtime_channel(&self, channel: ChannelModel) -> DriverResult<Arc<dyn RuntimeChannel>>;
+    fn convert_runtime_device(&self, device: DeviceModel) -> DriverResult<Arc<dyn RuntimeDevice>>;
+    fn convert_runtime_point(&self, point: PointModel) -> DriverResult<Arc<dyn RuntimePoint>>;
+    fn convert_runtime_action(&self, action: ActionModel) -> DriverResult<Arc<dyn RuntimeAction>>;
+}
+
+pub trait PluginFactory: Send + Sync {
+    /// Create a new app-scoped plugin instance (no I/O; I/O belongs in start()).
+    fn create_plugin(&self, ctx: NorthwardInitContext) -> NorthwardResult<Box<dyn Plugin>>;
+
+    /// Low-frequency config conversion (import/apply-config paths).
+    fn convert_plugin_config(&self, config: serde_json::Value) -> NorthwardResult<Arc<dyn PluginConfig>>;
 }
 ```
 
-这里出现 `SouthwardComponentDyn` 是一个 **object-safe shim**，它内部持有真正的 `T: SouthwardComponent`，但对外仍可由 wrapper 使用并保持静态分发？  
-最终版不建议走这个方向（会引入虚调用），更优方案是：
+**关键点**：
 
-- **Factory 直接返回 `Box<dyn Driver>`，但 Driver 的具体类型就是 `SupervisedDriver<T>`**  
-- `T` 是具体类型，存在于 driver crate 内；Factory 的构造函数里写死 `T`，因此不会丢失单态化
+- `create_*` 返回的一定是 `Supervised*<T>`（因为外部无法实现 `Driver/Plugin`，只能由宏生成的 factory 返回）
+- 这些 trait 只服务低频路径：实例化/导入/热更新；热路径完全走 `Supervised*` 的句柄快路径
 
-也就是说：保持你们现有模式（`create_driver -> Box<dyn Driver>`），但通过宏统一 wrap：
+### 6.3 `ng_driver_factory!` / `ng_plugin_factory!` 的最终职责与生成物
 
-```rust
-fn create_driver(&self, ctx: SouthwardInitContext) -> DriverResult<Box<dyn Driver>> {
-  let impl_ = MyDriverImpl::new(ctx)?;
-  Ok(Box::new(SupervisedDriver::new(impl_)))
-}
-```
+最终版宏要做两件事：**生成导出符号** 与 **生成 factory 实现**。
 
-为了彻底消灭样板，SDK 提供宏：
+#### 6.3.1 宏输入（最终版建议形态）
 
-- `ng_supervised_driver_factory!(factory = MyFactory, driver_impl = MyDriverImpl, ...)`
+driver crate 侧只需要提供：
 
-宏负责：
+- `type Component = MyDriver;`（实现 `SouthwardComponent`）
+- `fn metadata() -> DriverSchemas`
+- （可选）自定义转换器（如果不写，使用 SDK 提供的默认转换策略/模板）
 
-- 生成 RuntimeAwareFactory（你们已经有）
-- 在 `create_driver()` 内自动 `SupervisedDriver::new(MyDriverImpl::new(ctx)?)`
-
-### 6.3 NorthwardFactory（最终版）
-
-同理：
+然后一行宏完成所有导出与工厂实现：
 
 ```rust
-fn create_plugin(&self, ctx: NorthwardInitContext) -> NorthwardResult<Box<dyn Plugin>> {
-  let impl_ = MyPluginImpl::new(ctx)?;
-  Ok(Box::new(SupervisedPlugin::new(impl_)))
-}
+ng_driver_factory!(
+    name = "Modbus",
+    description = "Modbus protocol driver",
+    driver_type = "modbus",
+    component = MyDriver,
+    metadata_fn = metadata
+);
 ```
 
-并提供宏：
+plugin 侧同理：
 
-- `ng_supervised_plugin_factory!(factory = MyFactory, plugin_impl = MyPluginImpl, ...)`
+```rust
+ng_plugin_factory!(
+    name = "Kafka",
+    description = "Kafka northbound adapter",
+    plugin_type = "kafka",
+    component = MyPlugin,
+    metadata_fn = metadata
+);
+```
+
+#### 6.3.2 宏生成的导出符号（最终版最小集）
+
+保持你们 loader 现有的“探测 + gating”能力，并把 `cdylib` 必需的“运行时/日志桥接”明确收敛为标准符号集（**强制约定，禁止各库各写各的**）：
+
+- `ng_*_api_version()`：API 版本
+- `ng_*_sdk_version()` / `ng_*_version()`：版本信息
+- `ng_*_type()` / `ng_*_name()` / `ng_*_description()`：元信息
+- `ng_*_metadata_json_ptr(out_ptr, out_len)`：静态 bytes（零分配跨边界）
+- `create_*_factory() -> *mut dyn *Factory`：返回宏生成的 factory
+- （driver 额外）`ng_driver_set_log_sink(...) / ng_driver_set_max_level(...)`：日志桥（由 host 控制）
+- `ng_*_init_tracing(debug: bool)`：初始化插件侧 tracing（仅用于“插件侧日志产出”，真正的日志汇聚由 log sink bridge 完成）
+- `NG_RUNTIME`（doc-hidden 静态）：每个 `cdylib` 一个 tokio runtime，库内共享
+
+**明确保留并“重新定义语义”（最终版最佳实践）**：
+
+- `NG_RUNTIME`：不是“各自为政的 runtime”，而是 **cdylib 的执行载体**（解决 tokio TLS 分裂问题）。库内所有工作（supervisor loop、协议 eventloop、actor 消费）必须跑在这里。
+- `RuntimeAwareDriver/RuntimeAwarePlugin`：不是“业务层 actor”，而是 **ABI runtime adapter**：把 host 的 `dyn Driver/Plugin` 调用转发到 `NG_RUNTIME` 上执行，并提供：
+  - 取消（CancellationToken）
+  - backpressure（bounded queue / try_send）
+  - 并发护栏（Semaphore / max_inflight）
+  - 可观测字段注入（channel_id/app_id 等）
+
+> 性能说明：在 `cdylib` 形态下，host 与插件之间不可避免存在一次“跨 runtime 调度”。最终版的目标不是消灭它（做不到），而是让这次调度成为**唯一且可控**的开销，并把所有生命周期治理与观测闭环全部统一到 SDK。
+
+### 6.4 host 侧如何与 supervision 闭环对接（必选 wiring）
+
+最终版要求 host 在创建 `*InitContext` 时就把闭环输入注入进去：
+
+- `observer: Arc<dyn Observer>`：**已绑定低基数 labels**（southward: `channel_id + driver_kind`；northward: `app_id + plugin_kind`）
+- `retry_policy: RetryPolicyByStage`：来自 runtime model / app config
+- `runtime_handle/spawn`（如需）：用于极少数必须在 host runtime 上执行的辅助任务（但 supervision 主循环必须由 SDK wrapper spawn）
+
+`Supervised*` 在 `create_*` 时绑定这些输入，在 `start()` 时启动 SupervisorLoop。  
+这样从“创建 → 运行 → 观测 → 热更新调参”的闭环就不再散落在 driver/plugin 作者的代码里，而是由 SDK 强制一致实现。
 
 ---
 
 ## 7. Retry/Budget（统一、可配置、默认最优）
 
-最终版要求：SDK 提供两套默认策略（可覆盖）：
+本章是你提出的“深度剖析 + 去重”的关键点：**计划里的 Retry 设计与现有代码确实存在重复**，而且现网已经在大量使用。
 
-- `RetryPolicy::default_for_southward()`
-- `RetryPolicy::default_for_northward()`
+### 7.0 现状代码剖析（必须先统一认知）
 
-原因：
+#### 7.0.1 SDK 已经有统一实现（不是“待设计”）
 
-- southward 往往是现场设备/工业网，短抖动多，适合更快探测与较长预算
-- northward 往往是云端平台/消息系统，抖动与限流语义不同，适合更保守 backoff
+现有实现就在 `ng-gateway-sdk/src/retry.rs`，并已被全局复用（southward drivers / northward plugins / core collector / 系统设置 hot-apply）：
 
-预算模型建议：Token Bucket（可平滑恢复），并强制 jitter（避免集群同步重连）。
+- `RetryPolicy`（配置模型）：指数退避参数 + `max_attempts`（次数预算）+ `max_elapsed_time_ms`（时间预算）
+- `RetryController`（控制器）：内部持有 `backoff::ExponentialBackoff`，并用 `retries_used` 叠加实现次数预算
+- `RetryDecision::{RetryAfter, Exhausted}`（决策结果）
+
+也就是说：**文档里再设计一套 `RetryPolicy/RetryController/Budget` 会直接重复现有代码**，并造成“语义漂移”（计划说一套、代码跑另一套）。
+
+#### 7.0.2 Retry 配置来源：你的判断是对的（来自 channel / init context）
+
+- **Southward**：实际使用的是 `ChannelModel.connection_policy.backoff`（`ng-gateway-sdk/src/southward/model.rs` 的 `ConnectionPolicy.backoff: RetryPolicy`）。现网 supervisor 代码也已经这样写：`RetryController::new(&channel.connection_policy.backoff)`（见各 driver 的 `*/src/supervisor.rs`）。
+- **Northward**：`NorthwardInitContext.retry_policy: RetryPolicy`（`ng-gateway-sdk/src/northward/mod.rs`），各插件 supervisor 直接用它构造 `RetryController`。
+- **Core Collector**：也使用同一套 `RetryPolicy/RetryController`（见 `ng-gateway-core/src/collector.rs`）。
+
+#### 7.0.3 现状痛点（决定“最佳实践”应该怎么改）
+
+现状最大的问题不是“有没有 Retry”，而是：
+
+- **状态语义不一致**：不同 supervisor 对 `Failed` / `Reconnecting` 的发送时机不一致，有的耗尽预算后直接 return，有的会额外发送 `Failed("retry budget exhausted")`。
+- **错误载荷成本偏高**：当前 `SouthwardConnectionState::Failed(String)` / `NorthwardConnectionState::Failed(String)` 让监控端（`ChannelMonitor` / `AppActor`）每次 `.clone()` 都会复制字符串；在抖动场景会放大 GC/alloc 压力。
+- **缺失“阶段语义”**：目前没有把失败明确归类为 Connect/Init/Run（也缺 `Initializing`），导致 UI/告警/运维无法精准定位“连上了但订阅失败/总召失败”这一类问题。
+- **成功语义分散**：业务里到处手写 `retry.reset()` 的触发点（例如“是否 seen_active 决定 reset”），长期维护会导致同类协议行为不一致。
+
+因此，最终版的“最佳实践”应该是：**以现有 `retry.rs` 为唯一基线做升级**，而不是新造一套。
+
+### 7.1 策略来源（重要：默认仅兜底）
+
+最终版的原则是：**策略来源必须来自 runtime model / init context**。
+
+- **Southward**：`RuntimeChannel::connection_policy().backoff`（见 `ConnectionPolicy.backoff`）
+- **Northward**：`NorthwardInitContext.retry_policy`
+
+SDK `SupervisedDriver/SupervisedPlugin` 在构造时会把上述策略固化在组件实例里，并在 `start()` 时用于创建 retry controller。
+
+### 7.2 最佳实践升级：把 “Retry” 提升为可观测、可解释、可预测的“连接预算”
+
+> 允许破坏式重构，因此这里给出“最终形态”，不考虑迁就旧 enum/旧字符串错误。
+
+#### 7.2.1 结构化预算（推荐替换 `Failed(String)` 语义）
+
+- **目标**：让 retry/backoff/失败原因可以被统一观测（metrics/log/ui），并避免在 watch clone 中复制大字符串。
+- **建议**：把连接状态从 `*ConnectionState::Failed(String)` 升级为结构化 payload（内部字段用 `Arc`/`Copy`，clone 成本恒定）。
+
+设计建议（示意）：
+
+- `FailurePhase = Connect | Init | Run`
+- `FailureKind = Retryable | Fatal | Stop`
+- `FailureReport { phase, kind, summary: Arc<str>, code: Option<Arc<str>> }`
+- `ConnectionState { phase, attempt, backoff, last_failure: Option<Arc<FailureReport>>, ... }`
+
+并把 “budget exhausted” 变成一等原因：`FailureKind::Fatal + code="budget_exhausted"`（或单独枚举）。
+
+#### 7.2.2 RetryController 最佳实践 API（收敛 reset/成功点）
+
+现有 `RetryController` 只有 `reset()` 与 `on_failure()`；为了让各协议不再“各写各的成功点”，建议升级为：
+
+- `on_success()`：明确表达“连接达到 Ready（Connected）或稳定运行达到阈值”时的成功语义（内部 reset backoff + 清 budget 计数）
+- `on_failure()`：仍返回 `RetryDecision`，但需同时返回“当前 attempt/backoff snapshot”，用于统一状态发布与 observer
+
+这样 `SupervisorLoop` 可以严格做到：
+
+- `Connected(Ready)` 之后，任何断开都走同一条 `on_failure()` 路径
+- connect/init/run 三阶段错误都能带上 stage 分类，发布一致的 state
+
+#### 7.2.3 分阶段策略（connect/init/run 可用不同窗口）
+
+工业协议里“连不上”和“跑着跑着断”经常需要不同策略：
+
+- **Connect**：短窗口、快速失败（避免占用线程/句柄），例如 `initial=200ms, max=5s, max_elapsed=30s`
+- **Init**：中窗口（例如订阅/总召可能依赖设备慢响应）
+- **Run**：长窗口但需要抑制风暴（例如 `max_interval=60s` + jitter）
+
+最终版建议把 `RetryPolicy` 扩展为：
+
+- `RetryPolicy`（默认/通用）
+- `RetryPolicyByStage { connect: Option<RetryPolicy>, init: Option<RetryPolicy>, run: Option<RetryPolicy> }`
+
+并由 `RuntimeChannel.connection_policy` / `NorthwardInitContext` 提供。
 
 ---
 
 ## 8. Observer/指标/日志（统一命名与低开销）
 
-### 8.1 Observer（统一扩展点）
+本章是第二个“深度剖析”的关键点：**你文档里提的 Observer 不是从 0 开始**，现网已经存在“观察者模式”的落地形态，只是它分散在不同层（supervisor / core monitor / app actor）。
+
+### 8.0 现状代码剖析：当前 Observer 在哪里？
+
+#### 8.0.1 Southward：`ChannelMonitor` 就是“Observer”
+
+`ng-gateway-core/src/southward/monitor.rs` 的 `ChannelMonitor` 做了典型 Observer 工作：
+
+- 订阅 `Driver::subscribe_connection_state()`（watch）
+- 去重 state 变化（`last_state`）
+- 更新 Prometheus（connected gauge / reconnect count / connect_failed / disconnect）
+- 在 `Connected`/`Disconnected|Failed` 迁移时发 `DeviceConnected/DeviceDisconnected` northward 事件
+
+#### 8.0.2 Northward：`AppActor` 同时扮演“Observer + 数据面调度者”
+
+`ng-gateway-core/src/northward/actor.rs` 中：
+
+- `AppActor::spawn_connection_monitor()` 订阅插件连接态并更新指标、flush buffer
+- 同时 `send_data()` 与 worker loop 也会读取连接态决定是否丢弃/缓冲
+
+也就是说：**Observer 的副作用（metrics/log/event/buffer flush）目前主要在 core 层实现**，并没有一个统一的“监督事件总线”把所有连接生命周期信息结构化输出。
+
+#### 8.0.3 Supervisor 层的重复工作（需要被收口）
+
+各协议/插件 `*/src/supervisor.rs` 里又各自：
+
+- 自己决定什么时候发 `Connecting/Reconnecting/Failed`
+- 自己拼接错误字符串（会分配）
+- 自己打日志（不统一、容易风暴）
+
+这就是文档中 Observer 设计必须解决的“重复点”。
+
+### 8.1 Observer（最终版统一扩展点：监督事件，而不是散落的日志/指标）
 
 SupervisorLoop 内只发事件，不直接写 prometheus；由 Observer 负责：
 
@@ -635,6 +763,55 @@ SupervisorLoop 内只发事件，不直接写 prometheus；由 Observer 负责�
 
 > 不允许把 endpoint/topic 之类高基数放 label。
 
+### 8.3 Observer 注入与组合（metrics/logging/tracing）——落地方案（强制）
+
+你要求 southward/northward 的连接治理统一到 SDK `supervision`，那么 **观测面也必须统一**：状态变化、失败分类、退避、预算耗尽全部从同一条 Observer 管道产出，禁止每个协议/插件各自打点、各自打日志。
+
+#### 8.3.1 设计目标（性能优先）
+
+- **热路径零分配**：Observer 回调不得 `format!/to_string`，不得持锁；只允许读取/累加/记录
+- **最少 clone**：载荷只允许 cheap clone（`Arc/Copy`）；禁止复制大对象
+- **可完全关闭**：关闭时为 NoopObserver（零额外开销）
+- **统一命名与低基数 labels**：严格遵守 8.2（`channel_id/app_id + kind`）
+
+#### 8.3.2 注入点与生命周期（必须收口）
+
+- **唯一构建入口**：由 host（core）侧统一构建 `ObserverFactory`
+- **每个实例绑定 labels**：在启动 `SupervisedDriver/SupervisedPlugin` 时，factory 生成一个“已绑定 labels”的 Observer：
+  - southward labels：`channel_id` + `driver_kind`
+  - northward labels：`app_id` + `plugin_kind`
+- wrapper 把 Observer 传入 `SupervisorLoop`，并保证：
+  - Observer 仅在“状态迁移/失败路径”被调用（禁止进入 data-plane 热路径）
+
+> 说明：Observer 允许 `Box<dyn Observer>`（可插拔边缘），但 **禁止**把 dyn 调用放进 collect/write/process_data 等热路径。
+
+#### 8.3.3 组合策略（后续实现方向，按需落地）
+
+- **MetricsObserver**
+  - 写入 Prometheus：`supervisor_phase / supervisor_failure_total / supervisor_backoff_seconds / supervisor_budget_exhausted_total ...`
+- **LoggingObserver**
+  - 仅在 phase 变化 / failure 发生时打结构化日志（包含 channel_id/app_id），严禁高频刷屏
+- **TracingObserver（可选）**
+  - 把 connect/init/run 生命周期纳入 tracing span（严格继承 channel/app span）
+  - 默认关闭（避免无谓开销），但设计必须预留注入点
+- **CompositeObserver**
+  - `CompositeObserver(Vec<Box<dyn Observer>>)`：按开关装配（空 vec 即 Noop）
+
+### 8.4 最佳实践：把 core 现有的 monitor/actor 变成“Observer 的实现”，而不是“状态机的实现者”
+
+最终版的结构应该是：
+
+- **状态机/退避/预算/句柄发布**：只在 SDK 的 `SupervisorLoop` 内实现（唯一实现）
+- **指标/日志/事件/缓冲刷新**：只作为 Observer（订阅监督事件）实现（可在 core 内）
+
+这样可以做到：
+
+- southward/northward 所有协议不再各写 supervisor.rs
+- core 不再需要在多个地方猜测状态语义（只消费结构化事件）
+- 观测面不会因为协议差异而“行为不一致”
+
+> 这也是你要求的“最佳实践极致质量”：**把 side effects 与 state machine 严格分离**。
+
 ---
 
 ## 9. 强制工程规范（CI 级别，防止回退）
@@ -654,36 +831,202 @@ SupervisorLoop 内只发事件，不直接写 prometheus；由 Observer 负责�
 
 connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必须清句柄。
 
+### 9.4 零拷贝 / 最少 clone（强制，热路径红线）
+
+**目标**：supervision 内核与 data-plane 热路径做到“零额外分配、最少 clone”，任何不可避免的 clone 必须是 **cheap clone（Arc/Copy）**。
+
+**硬规则（CI/Code Review 必须挡住）**
+
+- **禁止热路径 `String`/`Vec` 构造与 `to_string()`**：错误信息、失败原因、日志字段必须预先结构化或用 `Arc<str>` 保存；只允许在“失败路径/最终落库/最终展示”做一次性转换。
+- **失败报告使用 `Arc<FailureReport>` + `Arc<str>`**：避免在 retry/backoff 循环中重复复制大字符串。
+- **Handle 必须可 lock-free 热读**：只允许 `HandleCell(ArcSwapOption)` + `Arc<Handle>`，禁止在 collect/write/process_data 中出现锁。
+- **watch 广播的 clone 必须 cheap**：
+  - `ConnectionState` 允许 clone（watch 必须发送 owned 值），但其内部字段必须尽量用 `Copy`/`Arc`（例如 `last_failure: Option<Arc<FailureReport>>`）
+  - 禁止在 `publish()` 内做任何格式化与分配
+- **span/log 字段不得引入高频分配**：`driver_kind/plugin_kind` 等常量必须为 `&'static str` 或 `Arc<str>` 缓存；禁止每次重连/每条消息拼接字符串。
+
+**落地检查清单（每次迁移必须自检）**
+
+- [ ] collect/write/process_data 热路径无 `String::from`/`format!`/`to_string`
+- [ ] 重连循环内无 `Vec` 扩容/clone 大对象（只允许 clone `Arc`）
+- [ ] `ConnectionState` 的 `last_failure`/`code` 等字段均为 `Arc`，并且只在失败发生点构造一次
+- [ ] 指标 label 不包含高基数（endpoint/topic/device_id 等），且 label 值为预分配/静态值
+
+### 9.5 主动 Reconnect 统一机制（必须统一，禁止各协议自造）
+
+很多驱动/插件需要“**主动触发**重连”（例如：协议栈检测到不可恢复状态、心跳失败、server 强制重连、上游下发 reset 指令）。
+
+**目标**：把“主动重连”变成 supervision 的一等公民事件，统一治理（状态/退避/预算/观测），并保持零额外开销。
+
+**统一方案（Phase 2/3 要落地）**
+
+- SupervisorLoop 持有一个 **bounded control-plane 信号通道**（建议 `mpsc::Sender<ReconnectRequest>`，容量=1，`try_send`，可“覆盖旧请求/丢弃重复”）
+- `Ctx`/`Handle` 暴露一个 `request_reconnect(reason)` 的轻量入口：
+  - handle 侧只有一个 `Sender` 的 clone（cheap）
+  - data-plane 在需要时 `try_send`，禁止 await（避免把热路径变成慢路径）
+- SupervisorLoop 在 `Connected/Run` 阶段 `select!`：
+  - `Session::run()` 正常退出 → 按 `RunOutcome` 决策
+  - 收到 `ReconnectRequest` → 视为 **可重试断开**：
+    - 清 handle
+    - publish `Reconnecting`（可带 backoff=0 或策略最小值）
+    - 进入统一 backoff/budget/retry 决策
+
+**约束**
+
+- 禁止 driver/plugin 自己实现 reconnect loop（仍受 9.1 约束）
+- 主动重连也必须走 budget：预算耗尽进入 Failed，不允许无限自救
+
 ---
 
 ## 10. 落地计划（破坏式重构版，按“先建骨架再迁移”）
 
-### Phase 1：SDK 内核落地（不迁移协议）
+### Phase 0：对齐现状与目标（先把“重复点”清零）
+
+> 这是你要求“避免遗漏细节”的关键阶段：先把“计划 vs 现状代码”对齐，才能防止落地时出现两套并行实现。
+
+- **清点现存 supervision 实现点（必须全量列举）**
+  - southward：所有 `ng-gateway-southward/*/src/supervisor.rs`
+  - northward：所有 `ng-gateway-northward/*/src/supervisor.rs`
+  - core：`ChannelMonitor`（southward）与 `AppActor`（northward）中的 monitor/flush 逻辑
+- **统一 Retry 的单一事实来源**
+  - 明确 `ng-gateway-sdk/src/retry.rs` 是唯一实现
+  - 文档删除/合并“再造一套 retry 模块”的计划点（见本次更新）
+- **定义“最终状态模型”并冻结语义**
+  - 引入 `Initializing` 与 Connect/Init/Run 失败阶段
+  - 冻结 `budget exhausted` 的对外语义（必须可观测、可解释）
+
+### Phase 0.5：确认 `cdylib` 运行时现实并冻结 ABI 契约（必须先做，否则后面会返工）
+
+> 这是你这次指出的关键点：**`cdylib` 无法可靠共享 host 的 tokio/tracing 上下文**。最终版要把这块从“实现细节”升级为“架构契约”，并统一到宏导出符号里。
+
+- **A. 冻结“ABI 必须符号集”**（host loader 与宏必须一致）
+  - driver：`ng_driver_api_version/ng_driver_sdk_version/ng_driver_version/ng_driver_type/ng_driver_name/ng_driver_description/ng_driver_metadata_json_ptr/create_driver_factory/ng_driver_set_log_sink/ng_driver_set_max_level/ng_driver_get_max_level/ng_driver_init_tracing`
+  - plugin：`ng_plugin_api_version/ng_plugin_sdk_version/ng_plugin_version/ng_plugin_type/ng_plugin_name/ng_plugin_description/ng_plugin_metadata_json_ptr/create_plugin_factory/ng_plugin_init_tracing`
+- **B. 冻结 host 调用顺序（严禁随意调整）**
+  - driver：`dlopen -> (optional) ng_driver_set_log_sink -> ng_driver_init_tracing -> probe symbols/metadata -> create_driver_factory`
+  - plugin：`dlopen -> ng_plugin_init_tracing -> probe symbols/metadata -> create_plugin_factory`
+- **C. 冻结 `NG_RUNTIME` 策略**
+  - 每个 `cdylib` 一个 `static Lazy<Runtime>`（multi-thread）
+  - thread_name：包含 `driver_type/plugin_type`（便于观测与排障）
+  - 禁止：每实例 runtime、每调用 spawn 新 runtime、以及任何形式的“在 host runtime 上运行插件 tokio 逻辑但依赖 Handle::current()”
+- **D. 验证性实验（必须写成可重复测试/工具）**
+  - 写一个最小 `cdylib` driver/plugin：在 trait 方法里调用 `tokio::spawn` 与 `Handle::current()`，验证：
+    - 在 host runtime 线程上直接调用时，插件侧 `Handle::current()` 是否可靠
+    - 在 `NG_RUNTIME` 内执行时必然可靠
+  - 结论写入文档（本章）并作为“禁止回退”的依据
+
+### Phase 1：SDK supervision 内核落地（以现有 retry 为基线）
 
 - 新增 `ng-gateway-sdk::supervision` 模块：
   - `state.rs`：`ConnectionState/Phase/FailureReport`
   - `connector.rs`：`Connector/Session/Ctx/RunOutcome`
-  - `retry.rs`：`RetryPolicy/RetryController/Budget`
+  - `retry.rs`：**复用并迁移**现有 `ng-gateway-sdk/src/retry.rs`（允许破坏式移动文件/调整 API），并扩展 stage-aware 语义
   - `handle.rs`：`HandleCell`
   - `loop.rs`：`SupervisorLoop<C>`
-  - `observer.rs`：Observer + 默认实现（metrics/tracing）
+  - `observer.rs`：Observer trait + Noop（先落地接口，不做 host 注入）
   - `wrapper_southward.rs`：`SupervisedDriver<T>`
   - `wrapper_northward.rs`：`SupervisedPlugin<T>`
-  - `macros.rs`：`ng_supervised_driver_factory!` / `ng_supervised_plugin_factory!`
+  - `abi_runtime.rs`：**`cdylib` ABI runtime adapter**（`NG_RUNTIME` + `RuntimeAwareDriver/RuntimeAwarePlugin` 的最终形态）
+  - `macros.rs`：重写并收敛 `ng_driver_factory!` / `ng_plugin_factory!`（必须生成 ABI adapter + supervised wrapper）
 
 **验收标准**
 
-- 单测：retry determinism（jitter=none）、budget 耗尽边界、状态机迁移合法性
+- 单测：retry determinism（jitter=none）、budget 耗尽边界、状态机迁移合法性（含 Connect/Init/Run 分阶段）
 - fake connector/session 组件测试：脚本驱动 connect/init/run 的各种结果，验证 state/backoff/failed
+- `cdylib` 形态集成测试（必须真实 dlopen）：
+  - host 可加载/探测/创建 factory
+  - `start/stop` 可用，且 supervisor loop 跑在 `NG_RUNTIME`（可用 thread_name 断言）
+  - 日志桥接可用：插件侧 `tracing` 输出能进入 host ingest
+
+### Phase 1.5：Observer 注入落地（对应 8.3，必须先做）
+
+把 8.3 从“设计”变为“工程可用”：让 host 能为每个 channel/app 注入 observer，统一 metrics/logging。
+
+**落地内容**
+
+- 在 host（core）侧新增 `ObserverFactory`（或等价构建入口）：
+  - 输入：`channel_id/app_id` + `driver_kind/plugin_kind`
+  - 输出：`Box<dyn Observer>`（通常是 CompositeObserver）
+- SDK wrapper（`SupervisedDriver/SupervisedPlugin`）支持从 host 注入 observer：
+  - 默认仍为 Noop（便于测试/离线运行）
+  - 生产环境由 core 注入 MetricsObserver/LoggingObserver
+- 提供 `CompositeObserver`（可空，空即 Noop）
+- **禁止**各协议/插件自行打 `supervisor_*` 指标（统一收口）
+
+**验收标准**
+
+- 任意一个被监督的组件，在状态迁移/失败时会触发 observer（且不影响 data-plane 热路径）
+- 指标命名与 labels 满足 8.2，且无高基数 label
+
+### Phase 1.6：统一 state enum（破坏式替换 `SouthwardConnectionState/NorthwardConnectionState`）
+
+> 这是“最佳实践必须做”的破坏式变更：不再用 `Failed(String)` 做状态载荷。
+
+- 在 SDK 中引入统一 `ConnectionState`（含 `Initializing`、阶段化失败、budget snapshot）
+- southward/northward 对外接口统一返回 `watch::Receiver<ConnectionState>`
+- core 的 `ChannelMonitor` / `AppActor` 只消费统一 state（不再分两套枚举）
+- UI/REST/WS 的状态展示统一映射（避免“南北两套状态解释不一致”）
+- **破坏式推进方法（强制执行）**
+  - **先删除** SDK 内的 `SouthwardConnectionState` / `NorthwardConnectionState` 类型定义与所有 `pub use` 导出（包括 SDK 根 `lib.rs` 的 re-export）
+  - **允许编译错误爆炸式暴露**：core/models/ui/docs 中所有残留引用会一次性显性化，便于统一收敛与对齐语义（比“边改边兼容”更可靠）
+  - UI 同理：先从 `ng-gateway-ui/packages/types` 删除 `SouthwardConnectionState/NorthwardConnectionState` 的 TS 常量/类型，让 TS error 暴露所有使用点
+
+**验收标准**
+
+- 同一套 UI/告警规则同时适用于 southward 与 northward
+- 任何失败都能明确告诉运维：失败阶段（Connect/Init/Run）+ kind（Retryable/Fatal/Stop）+ 是否预算耗尽
 
 ### Phase 2：Southward 迁移（全量，删掉各协议 supervisor.rs）
 
 顺序建议：OPCUA → IEC104 → S7 → MC → 其余（modbus/dnp3/…）
 
-每个协议迁移必须做：
+#### Phase 2.0 迁移模板（每个协议必须严格按清单执行）
+
+> 目的：把“协议差异”压缩到 `Connector/Session/Handle` 三件套，所有生命周期/退避/观测/句柄发布由 `SupervisorLoop` 统一完成。
+
+- **A. 现状剖析（只读）**
+  - 列出该协议当前 `supervisor.rs` 的状态迁移图（Connecting → Connected → ...）
+  - 标注“Ready 的真实定义”（例如 OPCUA：subscription/monitored items 完成；IEC104：总召成功；S7：握手 + 读写通道可用）
+  - 标注当前 retry reset 点（何时 `retry.reset()`，成功判定是什么）
+  - 标注主动重连触发点（心跳失败/库内回调/错误码）
+- **B. 定义 Handle（data-plane 快路径句柄）**
+  - 目标：`Handle` 必须是 `Arc` 可持有、可跨 task 使用、可 lock-free 热读
+  - 把现有各协议的 `ArcSwapOption<Session/Client>` 迁移为 SDK `HandleCell<Handle>`
+  - 协议内不再持有全局 `ArcSwapOption`（避免“双重句柄发布点”）
+- **C. 实现 `Connector::connect()`（只做建连，不做 Ready）**
+  - 仅建立 TCP/TLS/Session/认证等“最小可运行连接”
+  - 禁止在 connect 阶段做 subscribe/总召等后置动作
+  - 为 connect 阶段定义错误分类（可重试/不可恢复/停止）
+- **D. 实现 `Session::init()`（定义 Ready）**
+  - 把订阅/总召/对时/预热等全部移入 init
+  - init 成功后才允许发布 handle 并进入 `Connected(Ready)`
+  - init 失败必须发布 `FailurePhase::Init`，并按 budget/backoff 统一决策
+- **E. 实现 `Session::run()`（运行直到断开/取消/失败）**
+  - 将现有 event loop 驱动逻辑迁移到 run
+  - run 必须协作取消（select cancel token），退出时由 supervisor 统一清 handle
+  - 将“连接丢失/库内重连通知”等映射到 `RunOutcome`
+- **F. 主动重连（9.5）统一接入**
+  - 从 handle 暴露 `request_reconnect(reason)`（`try_send`，禁止 await）
+  - 在 run 阶段统一 select 处理 `ReconnectRequest`
+- **G. 删除旧 supervisor.rs 并收敛观测**
+  - 删除协议内 reconnect loop / backoff / watch state 发送
+  - 协议内只保留：错误分类、必要的业务日志（低频）、以及 data-plane 逻辑
+- **H. 测试与基准（必须补齐）**
+  - 单测：connect/init/run 三阶段分别失败 → state 与 budget 行为一致
+  - 单测：budget exhausted → 进入 `Failed(code=budget_exhausted)` 且不再重连
+  - 压测：Connected 热路径 collect/write 无额外锁与分配（至少相对旧实现不退化）
+
+#### Phase 2.1 每个协议迁移必须做（执行项）
 
 - 把“连接成功后动作”移入 `Session::init()`（订阅/总召/对时等）
 - data-plane 逻辑使用 wrapper 注入的 `Arc<Handle>`，热读无锁
+- **实现 9.5 主动 Reconnect（Southward 侧必须落地）**：
+  - `SupervisorLoop` 引入 bounded `ReconnectRequest` control-plane 通道
+  - `Ctx/Handle` 提供 `request_reconnect(reason)`（`try_send`，禁止 await）
+  - run 阶段 `select!` 统一处理主动重连（清 handle → Reconnecting → backoff/budget）
+- **统一 connect_timeout/read_timeout/write_timeout 的语义与注入点**
+  - southward 的 `ConnectionPolicy.connect_timeout_ms/read_timeout_ms/write_timeout_ms` 必须进入 `Connector/Session`（不再由各协议自己私有配置）
+  - 任何 I/O 超时都必须能被归类为 `FailurePhase::*` 并被 observer 记录
 
 **验收标准**
 
@@ -695,10 +1038,31 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 
 顺序建议：Kafka/Pulsar/MQTT/Thingsboard（任选一个先做模板）→ 全量推广
 
-迁移要点：
+#### Phase 3.0 先解决“northward 的现实复杂度”（否则会迁移到一半卡死）
+
+现状 northward 有两类典型形态：
+
+- **单连接单循环**（最容易）：MQTT/ThingsBoard（通常一个 client + uplink/downlink 都在同一会话）
+- **多子系统/多循环**（必须明确语义）：Kafka/Pulsar（producer 与 consumer 分离，且 consumer 有独立重试策略）
+
+最终版最佳实践建议：
+
+- `ConnectionState` 表达 **“对外可用性（Ready）”**，默认以 uplink 为准（能发数据才算 Connected）
+- downlink 作为可选子系统：
+  - 用独立 observer 事件与指标记录其健康（不污染主连接态）
+  - 必要时在 `ConnectionState` 里挂 `subsystems: SmallVec<[SubsystemState; N]>`（可选项，取决于你们 UI/告警需求）
+
+#### Phase 3.1 迁移要点（执行项）
 
 - MQTT subscribe 放入 `Session::init()`，成功后才 Ready
 - consumer loop / downlink loop 在 `Session::run()` 内统一管理，禁止无界 spawn
+- **复用 9.5 主动 Reconnect（Northward 侧完成落地）**：
+  - 任何“主动断开/主动刷新连接”只能调用 `request_reconnect`
+  - 统一 budget 语义：预算耗尽进入 Failed
+- **把 AppActor 的热路径连接检查从 watch clone 改成 atomic 快读**
+  - 现状 `AppActor::send_data()` 与 worker loop 每次都 `plugin.subscribe_connection_state().borrow().clone()`，将来统一改为：
+    - monitor 任务更新一个 `AtomicBool connected`
+    - data-path 只读 atomic（零分配、零 clone）
 
 **验收标准**
 
@@ -707,8 +1071,87 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 
 ### Phase 4：统一 Web/API/metrics 展示
 
-- southward/northward 的连接状态统一映射到同一 `ConnectionState`（或可兼容旧结构但展示一致）
+#### Phase 4.1 状态与错误展示（UI/REST/WS）
+
+- southward/northward 统一展示 `ConnectionState`
+- UI 必须展示：
+  - phase（Connecting/Initializing/Connected/Reconnecting/Failed/Disconnected）
+  - attempt 与 backoff（便于判断是否“卡在退避/卡在初始化”）
+  - last_failure（phase/kind/summary/code）
+  - budget（是否耗尽/剩余提示）
+
+#### Phase 4.1.1 UI 侧改动清单（尽量细：按文件/模块列出）
+
+> 你要求“可以先删代码让错误暴露”：UI 这里也同理。先删旧类型/旧渲染分支，让 TS 报错把所有使用点一次性暴露出来，然后逐一对齐到新结构。
+
+**A. 先删（让错误暴露）**
+
+- `ng-gateway-ui/packages/types/src/channel.ts`
+  - 删除 `SouthwardConnectionState` 常量与相关联合类型
+  - 将 `ChannelInfo.connectionState` 从 `string`/旧枚举 **改为新结构化类型**（见 B）
+- `ng-gateway-ui/packages/types/src/app.ts`
+  - 删除 `NorthwardConnectionState` 常量与相关联合类型
+  - 将 `AppInfo.connectionState` 改为新结构化类型
+
+**B. 引入统一结构化类型（UI types 层）**
+
+- 新增（建议）`ng-gateway-ui/packages/types/src/connection.ts`（或放在 `base.ts` 中，但推荐单独文件）
+  - `ConnectionPhase = "Disconnected" | "Connecting" | "Initializing" | "Connected" | "Reconnecting" | "Failed"`
+  - `FailurePhase = "Connect" | "Init" | "Run"`
+  - `FailureKind = "Retryable" | "Fatal" | "Stop"`
+  - `ConnectionState`（与后端对齐的 view model）：
+    - `phase: ConnectionPhase`
+    - `attempt: number`
+    - `backoffMs?: number`
+    - `lastFailure?: { phase: FailurePhase; kind: FailureKind; summary: string; code?: string }`
+    - `budget?: { exhausted: boolean; remainingHint?: number }`
+    - （可选）`sinceMs?: number` / `updatedAtMs?: number`（按后端最终 API 选择）
+- 在 `ChannelInfo` / `AppInfo` 中统一：
+  - `connectionState?: ConnectionState | null`（最终版建议不再允许 `string` 兜底；破坏式让错误暴露）
+
+**C. UI 渲染与交互（表格/组件）**
+
+- `ng-gateway-ui/apps/web-antd/src/adapter/vxe-table.ts`
+  - 重写 `CellConnectionState`：
+    - 从 `row.connectionState` 读取 `ConnectionState.phase` 而不是字符串
+    - 新增 `Initializing` 的颜色/文案（例如 processing/info）
+    - 建议加 Tooltip：展示 attempt/backoff/lastFailure.summary（运维可读）
+    - 删除“默认把 unknown string lowerCase 映射翻译”的兜底逻辑（破坏式收敛）
+- `ng-gateway-ui/apps/web-antd/src/views/southward/channel/modules/schemas/table-columns.ts`
+  - `field: 'connectionState'` 可保持不变（只要后端字段名不变）
+  - 若后端改名（例如 `connection`），此处同步修改字段名
+- `ng-gateway-ui/apps/web-antd/src/views/northward/app/modules/schemas/table-columns.ts`
+  - 同上
+
+**D. i18n（新增/调整文案）**
+
+- `ng-gateway-ui/packages/locales/src/langs/zh-CN/ui.json`
+- `ng-gateway-ui/packages/locales/src/langs/en-US/ui.json`
+  - `connectionState` 下新增：
+    - `initializing`
+  - 若加入 tooltip/结构化字段展示，新增：
+    - `connectionState.attempt`
+    - `connectionState.backoff`
+    - `connectionState.lastFailure`
+    - `connectionState.failurePhase.connect/init/run`
+    - `connectionState.failureKind.retryable/fatal/stop`
+    - `connectionState.budgetExhausted`（或等价）
+
+**E. REST/WS 数据契约（UI 依赖后端）**
+
+- 如果 channel/app 列表 API 当前返回 `connectionState: "Connected"`（字符串）
+  - 最终版必须改为返回结构化 `connectionState: { phase, attempt, ... }`
+  - UI types 与渲染按新结构对齐
+  - **推进策略**：先改后端结构并删除旧字段/旧字符串，让前端直接报错，然后集中修复 UI
+
+#### Phase 4.2 指标与告警（Prometheus）
+
 - metrics 统一以 `supervisor_*` 命名汇总
+- 告警规则建议（示例）：
+  - `phase=Failed` 持续 X 分钟
+  - `failure_total{kind="fatal"}` 突增
+  - `budget_exhausted_total` 非 0（必须人工介入/配置修复）
+  - `backoff_seconds` P95 长期过高（怀疑网络/端点不稳定）
 
 ---
 
@@ -732,4 +1175,3 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 - **connect()**：只做“建立连接/认证/握手”，不要做订阅/总召（放 init）
 - **init()**：必须完成“Ready 的定义”（OPCUA 订阅、IEC104 总召、MQTT 订阅）
 - **run()**：驱动 event loop，负责维持连接直到断开；退出原因用 `RunOutcome` 表达
-
