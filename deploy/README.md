@@ -115,7 +115,7 @@ docker run -d \
   -v gateway-data:/app/data \
   -v gateway-drivers:/app/drivers/custom \
   -v gateway-plugins:/app/plugins/custom \
-  ng-gateway:v1.2.3
+  ng-gateway:latest
 ```
 
 2) 检查容器状态与日志：
@@ -159,7 +159,7 @@ docker run -d \
   -v gateway-data:/app/data \
   -v gateway-drivers:/app/drivers/custom \
   -v gateway-plugins:/app/plugins/custom \
-  ng-gateway:v1.2.3
+  ng-gateway:latest
 ```
 
 ### 访问

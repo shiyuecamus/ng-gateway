@@ -7,6 +7,7 @@ metadata:
     {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
 data:
 {{- $config := .Values.gateway.config -}}
+{{- $runtimeEnvEnabled := default false .Values.gateway.runtimeEnv.enabled -}}
   {{- if $config.logLevel }}
   RUST_LOG: {{ $config.logLevel | quote }}
   {{- end }}
@@ -14,9 +15,6 @@ data:
   TZ: {{ $config.timezone | quote }}
   {{- end }}
   {{- if $config.general }}
-  {{- if $config.general.name }}
-  NG__GENERAL__NAME: {{ $config.general.name | quote }}
-  {{- end }}
   {{- if $config.general.caCertPath }}
   NG__GENERAL__CA_CERT_PATH: {{ $config.general.caCertPath | quote }}
   {{- end }}
@@ -27,8 +25,9 @@ data:
   NG__GENERAL__CA_KEY_PATH: {{ $config.general.caKeyPath | quote }}
   {{- end }}
   {{- if $config.general.southward }}
-  {{- if $config.general.southward.driverSyncStartTimeout }}
-  NG__GENERAL__SOUTHWARD__START_TIMEOUT_MS: {{ $config.general.southward.driverSyncStartTimeout | quote }}
+  {{- if $runtimeEnvEnabled }}
+  {{- if $config.general.southward.startTimeoutMs }}
+  NG__GENERAL__SOUTHWARD__START_TIMEOUT_MS: {{ $config.general.southward.startTimeoutMs | quote }}
   {{- end }}
   {{- if hasKey $config.general.southward "deviceChangeCacheTtlMs" }}
   NG__GENERAL__SOUTHWARD__DEVICE_CHANGE_CACHE_TTL_MS: {{ $config.general.southward.deviceChangeCacheTtlMs | quote }}
@@ -43,15 +42,19 @@ data:
   NG__GENERAL__SOUTHWARD__MAX_DEVICES_PER_SNAPSHOT_TICK: {{ $config.general.southward.maxDevicesPerSnapshotTick | quote }}
   {{- end }}
   {{- end }}
+  {{- end }}
   {{- if $config.general.northward }}
+  {{- if $runtimeEnvEnabled }}
   {{- if $config.general.northward.queueCapacity }}
   NG__GENERAL__NORTHWARD__QUEUE_CAPACITY: {{ $config.general.northward.queueCapacity | quote }}
   {{- end }}
-  {{- if $config.general.northward.appSyncStartTimeout }}
-  NG__GENERAL__NORTHWARD__START_TIMEOUT_MS: {{ $config.general.northward.appSyncStartTimeout | quote }}
+  {{- if $config.general.northward.startTimeoutMs }}
+  NG__GENERAL__NORTHWARD__START_TIMEOUT_MS: {{ $config.general.northward.startTimeoutMs | quote }}
+  {{- end }}
   {{- end }}
   {{- end }}
   {{- if $config.general.collector }}
+  {{- if $runtimeEnvEnabled }}
   {{- if $config.general.collector.collectionTimeout }}
   NG__GENERAL__COLLECTOR__COLLECTION_TIMEOUT_MS: {{ $config.general.collector.collectionTimeout | quote }}
   {{- end }}
@@ -82,8 +85,10 @@ data:
   NG__GENERAL__COLLECTOR__OUTBOUND_QUEUE_CAPACITY: {{ $config.general.collector.outboundQueueCapacity | quote }}
   {{- end }}
   {{- end }}
+  {{- end }}
   {{- if $config.logging }}
   {{- if $config.logging.control }}
+  {{- if $runtimeEnvEnabled }}
   {{- if hasKey $config.logging.control "channelOverrideDefaultTtlMs" }}
   NG__LOGGING__CONTROL__CHANNEL_OVERRIDE_DEFAULT_TTL_MS: {{ $config.logging.control.channelOverrideDefaultTtlMs | quote }}
   {{- end }}
@@ -100,7 +105,9 @@ data:
   NG__LOGGING__CONTROL__DRIVER_INGEST_QUEUE_CAPACITY: {{ $config.logging.control.driverIngestQueueCapacity | quote }}
   {{- end }}
   {{- end }}
+  {{- end }}
   {{- if $config.logging.output }}
+  {{- if $runtimeEnvEnabled }}
   {{- if hasKey $config.logging.output "format" }}
   NG__LOGGING__OUTPUT__FORMAT: {{ $config.logging.output.format | quote }}
   {{- end }}
@@ -138,12 +145,15 @@ data:
   {{- end }}
   {{- end }}
   {{- end }}
+  {{- end }}
   {{- if $config.logging.cleanup }}
+  {{- if $runtimeEnvEnabled }}
   {{- if hasKey $config.logging.cleanup "enabled" }}
   NG__LOGGING__CLEANUP__ENABLED: {{ $config.logging.cleanup.enabled | quote }}
   {{- end }}
   {{- if hasKey $config.logging.cleanup "intervalMs" }}
   NG__LOGGING__CLEANUP__INTERVAL_MS: {{ $config.logging.cleanup.intervalMs | quote }}
+  {{- end }}
   {{- end }}
   {{- end }}
   {{- end }}

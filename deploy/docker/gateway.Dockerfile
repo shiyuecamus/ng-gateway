@@ -192,6 +192,8 @@ RUN mkdir -p /app/pki/own /app/pki/private
 # Copy binary from builder
 COPY --from=builder --chmod=755 /app/target/release/ng-gateway-bin ./ng-gateway-bin
 
+COPY gateway.toml /app/gateway.toml
+
 # Copy all deployed drivers
 COPY --from=builder /app/drivers/builtin/ /app/drivers/builtin/
 

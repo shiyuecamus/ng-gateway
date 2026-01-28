@@ -268,7 +268,6 @@ impl LogOverrideManager {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                tracing::info!("cleanup_expired");
                 let ms = this.cleanup_interval_ms.load(Ordering::Relaxed).max(200);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 this.cleanup_expired();

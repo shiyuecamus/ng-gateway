@@ -16,6 +16,17 @@ global:
 # Gateway service configuration
 gateway:
   enabled: true
+  # Runtime-editable settings env injection.
+  #
+  # When enabled, the Helm chart will inject a set of `NG__...` environment variables that
+  # correspond to gateway runtime-editable settings (System Settings / runtime tuning).
+  #
+  # NOTE:
+  # - The gateway backend marks those fields as `env_overridden` when the env var exists.
+  # - If `enabled=true`, UI must treat those fields as read-only.
+  # - Keep this disabled by default to let UI own runtime tuning.
+  runtimeEnv:
+    enabled: false
   # Image configuration
   image:
     registry: ""
@@ -134,7 +145,7 @@ gateway:
       # Southward communication configuration
       southward:
         # milliseconds
-        driverSyncStartTimeout: 2000
+        startTimeoutMs: 2000
         # Device snapshot TTL GC (point-level baseline eviction).
         #
         # Point baseline TTL in milliseconds. 0 disables eviction.
@@ -150,7 +161,7 @@ gateway:
       northward:
         queueCapacity: 10000
         # milliseconds
-        appSyncStartTimeout: 2000
+        startTimeoutMs: 2000
       
       # Collector configuration
       collector:
@@ -199,13 +210,6 @@ gateway:
       port: 5678
       # 0 = use CPU count, >0 = exact number, <0 = CPU count / abs(workers)
       workers: 0
-      
-      # Web UI (single-container, served by the gateway process)
-      ui:
-        enabled: true
-        # embedded_zip | filesystem
-        mode: "filesystem"
-        filesystemRoot: "./ng-gateway-ui/apps/web-antd/dist"
 
       # SSL configuration
       ssl:
