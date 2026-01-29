@@ -9,7 +9,7 @@
 
 ### 0.1 `SupervisorLoop` 不应该由每个 driver/plugin 手动启动
 
-如果 driver/plugin 仍需自己拼装并启动（span、watch、ArcSwap、retry、observer、spawn），抽象只统一了循环内部，没统一“接入闭环”，价值被稀释。  
+如果 driver/plugin 仍需自己拼装并启动（span、broadcast、ArcSwap、retry、observer、spawn），抽象只统一了循环内部，没统一“接入闭环”，价值被稀释。  
 **最终版要求：SDK 统一托管启动与闭环 wiring**，driver/plugin 作者只实现 traits（泛型/associated types）与业务方法。
 
 ### 0.2 `ProtocolSupervisor` 不跨 ABI 暴露：Factory 仍返回 `dyn Driver/Plugin`，但对象是 SDK wrapper
@@ -53,7 +53,7 @@ OPCUA/IEC104/MQTT 等在连接成功后通常需要：
 - **极致性能**
   - 协议监督（connect/init/run）静态分发（泛型 + associated types）
   - 句柄热读无锁：`ArcSwapOption<Arc<Handle>>`
-  - 状态广播用 `watch`，payload 小且结构化
+- 对外订阅只保留 **有界** `broadcast<SupervisorEvent>`：统一语义与观测闭环；消费者如遇 `lagged` 必须用 `connection_state_snapshot()` 做 O(1) 重同步
 - **接入零样板**：driver/plugin 作者不再写“启动 supervisor”样板；Factory 自动 wrap
 
 ### 1.2 硬约束（必须遵守）
@@ -73,7 +73,8 @@ OPCUA/IEC104/MQTT 等在连接成功后通常需要：
 - **是什么**：core 唯一依赖的 southward 动态接口（`Box<dyn Driver>`），用于生命周期与数据/控制面的统一调度。
 - **职责（控制面）**：
   - `start/stop`：启动/停止（由 SDK wrapper 统一实现）
-  - `subscribe_connection_state`：提供连接态订阅（watch receiver）
+  - `subscribe_supervisor_events`：提供监督事件订阅（`broadcast::Receiver<SupervisorEvent>`，有界；可能 `lagged`）
+  - `connection_state_snapshot`：提供当前连接状态快照（用于 `lagged` 重同步；必须 O(1)/无锁热读）
 - **职责（数据面）**：
   - `collect_data/write_point/execute_action` 等对 core 提供的入口
 - **并发语义**：
@@ -89,7 +90,8 @@ OPCUA/IEC104/MQTT 等在连接成功后通常需要：
 - **是什么**：core 唯一依赖的 northward 动态接口（`Box<dyn Plugin>`），由 AppActor 调用。
 - **职责**：
   - `start/stop`：启动/停止
-  - `subscribe_connection_state`：连接态订阅
+  - `subscribe_supervisor_events`：监督事件订阅（`broadcast::Receiver<SupervisorEvent>`，有界）
+  - `connection_state_snapshot`：当前连接状态快照（lagged 重同步）
   - `process_data`：把 southward 数据发往平台（publish/uplink）
   - `events_tx`（或等价机制）：把平台下行业务事件（RPC/Command/WritePoint）发回 core
 - **生命周期**：与 app 实例同生共死，内部跨多次重连产生多次 Session。
@@ -99,7 +101,8 @@ OPCUA/IEC104/MQTT 等在连接成功后通常需要：
 - **是什么**：SDK 内置的统一托管层，实现 `Driver/Plugin`，并持有用户实现 `T` 与 supervision 内核。
 - **职责（必须统一的地方都在这里）**：
   - 创建并绑定 span（`channel_id` / `app_id` 等）
-  - 创建 `watch::Sender<ConnectionState>` 并对外暴露 receiver
+  - 创建 `broadcast::Sender<SupervisorEvent>` 并对外暴露 receiver（有界）
+  - 维护 `ConnectionState` 的 **无锁快照**（用于 `connection_state_snapshot()`，以及 `lagged` 后重同步）
   - 创建 `HandleCell`（ArcSwap）并保证：**Connected(Ready) 才发布，断连立刻清空**
   - 注入 `RetryPolicy/RetryController/Budget`
   - 注入 Observer（metrics/tracing）
@@ -165,7 +168,7 @@ OPCUA/IEC104/MQTT 等在连接成功后通常需要：
 - **职责**：
   - 协作取消（connect/init/run/backoff 都可取消）
   - 退避/预算（RetryController）
-  - 发布状态（watch::Sender<ConnectionState>）
+  - 发布监督事件（`broadcast::Sender<SupervisorEvent>`，有界；可能 `lagged`）
   - 发布/清理句柄（HandleCell）
   - 调用 observer（指标/日志/事件）
 - **强约束**：
@@ -201,7 +204,7 @@ pub enum Phase {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum FailureKind { Retryable, Fatal }
+pub enum FailureKind { Retryable, Fatal, Stop }
 
 #[derive(Clone, Copy, Debug)]
 pub enum FailurePhase { Connect, Init, Run }
@@ -224,7 +227,12 @@ pub struct RetryBudgetSnapshot {
 pub struct ConnectionState {
     pub phase: Phase,
     pub attempt: u64,
-    pub since: std::time::Instant,
+    /// Unix timestamp in milliseconds when this snapshot was emitted.
+    /// Stable across process boundaries (UI/REST/WS safe).
+    pub emitted_at_unix_ms: u64,
+    /// Unix timestamp in milliseconds when the current phase was entered.
+    /// Used to compute "stuck in Initializing for Xs" deterministically.
+    pub phase_entered_at_unix_ms: u64,
     pub backoff: Option<std::time::Duration>,
     pub last_failure: Option<Arc<FailureReport>>,
     pub budget: RetryBudgetSnapshot,
@@ -232,6 +240,31 @@ pub struct ConnectionState {
 ```
 
 > 关键：`Initializing` 是必须状态，否则“连接成功但订阅失败/总召失败”的阶段无法一致治理与展示。
+
+### 2.1 `SupervisorEvent`（唯一对外订阅通道：bounded broadcast）
+
+最终版只保留 **一条**对外订阅通道：`broadcast<SupervisorEvent>`（有界）。  
+它承担“状态变化/失败/退避/预算耗尽”等监督信息的广播。消费者（core monitor/UI bridge）必须遵循以下规则：
+
+- **lagged 处理**：收到 `broadcast::error::RecvError::Lagged(_)` 时，必须立刻调用 `connection_state_snapshot()` 做 O(1) 重同步，然后继续消费事件流。
+- **cheap clone**：事件载荷必须 cheap-clone（内部尽量 `Copy/Arc`），禁止在广播路径上做格式化与分配。
+
+`connection_state_snapshot()` 的推荐签名（对外 API）：
+
+```rust
+/// Returns the latest connection state snapshot for O(1) resync.
+/// Must be lock-free on the hot path.
+fn connection_state_snapshot(&self) -> Arc<ConnectionState>;
+```
+
+```rust
+#[derive(Clone, Debug)]
+pub enum SupervisorEvent {
+    /// A full snapshot of the current connection state.
+    /// The snapshot is cheap-clone via `Arc`.
+    State(Arc<ConnectionState>),
+}
+```
 
 ---
 
@@ -248,12 +281,8 @@ pub struct ConnectionState {
 
 ### 3.1 失败分类（必须由实现者显式提供）
 
-Supervisor 不做“字符串猜测”。实现者提供分类，分别针对 Connect/Init/Run：
-
-```rust
-pub enum FailureClass { Retryable, Fatal, Stop }
-pub enum StageHint { Connect, Init, Run }
-```
+Supervisor 不做“字符串猜测”。实现者必须提供错误分类，分别针对 Connect/Init/Run。  
+类型定义复用第 2 章的 `FailurePhase` / `FailureKind`（避免重复定义导致语义漂移）。
 
 ### 3.2 Trait 设计（泛型 + associated types，零成本）
 
@@ -269,13 +298,13 @@ pub struct Ctx<'a> {
     pub observer: &'a dyn Observer, // 默认 Noop
 }
 
-#[async_trait::async_trait]
 pub trait Session: Send + 'static {
     type Handle: Send + Sync + 'static;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// 句柄用于 data-plane，必须可被 Arc 包装并热读。
-    fn handle(&self) -> &Self::Handle;
+    /// The data-plane handle is always published as `Arc<Handle>`.
+    /// This makes handle publish O(1) and prevents ambiguous "owned/clone" contracts.
+    fn handle(&self) -> &Arc<Self::Handle>;
 
     /// Session Init：总召/订阅/恢复状态/预热等。成功后才允许进入 Connected(Ready) 并发布 handle。
     async fn init(&mut self, ctx: Ctx<'_>) -> Result<(), Self::Error>;
@@ -292,7 +321,6 @@ pub enum RunOutcome {
     FatalFailure,          // run 中不可恢复失败
 }
 
-#[async_trait::async_trait]
 pub trait Connector: Send + Sync + 'static {
     type Session: Session;
 
@@ -300,7 +328,7 @@ pub trait Connector: Send + Sync + 'static {
     async fn connect(&self, ctx: Ctx<'_>) -> Result<Self::Session, <Self::Session as Session>::Error>;
 
     /// 明确分类：Connect/Init/Run 的错误语义可能不同。
-    fn classify_error(&self, stage: StageHint, err: &<Self::Session as Session>::Error) -> FailureClass;
+    fn classify_error(&self, phase: FailurePhase, err: &<Self::Session as Session>::Error) -> FailureKind;
 
     /// 错误摘要（UI/告警友好，避免大对象 clone）。
     fn error_summary(&self, err: &<Self::Session as Session>::Error) -> Arc<str> {
@@ -309,6 +337,11 @@ pub trait Connector: Send + Sync + 'static {
 }
 ```
 
+> 重要说明（避免伪代码误导落地）：
+>
+> - `Handle` 的发布契约被制度化为 `&Arc<Handle>`：Supervisor 永远只做 `Arc::clone()`，不允许 `to_owned_handle()` 这类含糊接口。
+> - 上面 trait 的写法表达的是“零成本单态化”的最终目标。实现时应优先使用 Rust 原生 `async fn in trait`（或等价 GAT/`impl Future` 方案），避免 `async_trait` 带来的装箱/间接调用开销。
+>
 > 这套 “Connector -> Session(init/run)” 是最终版的关键：把总召/订阅等后置动作变成一等公民，纳入统一状态机与预算治理。
 
 ---
@@ -336,7 +369,11 @@ pub struct SupervisorLoop<C: Connector> {
     retry: RetryController,
     cancel: CancellationToken,
     span: tracing::Span,
-    state_tx: watch::Sender<ConnectionState>,
+    /// Bounded supervisor event bus (single source of truth).
+    event_tx: tokio::sync::broadcast::Sender<SupervisorEvent>,
+    /// O(1) resync snapshot for handling `broadcast::error::RecvError::Lagged`.
+    /// Implementation detail: ArcSwap<ConnectionState> or equivalent lock-free storage.
+    state_snapshot: arc_swap::ArcSwap<ConnectionState>,
     handle_cell: HandleCell<<C::Session as Session>::Handle>,
     observer: Box<dyn Observer>,
 }
@@ -344,6 +381,10 @@ pub struct SupervisorLoop<C: Connector> {
 impl<C: Connector> SupervisorLoop<C> {
   pub async fn run(mut self) -> anyhow::Result<()> {
     let mut attempt = 0u64;
+    // `publish(...)` MUST:
+    // - update `state_snapshot` (for O(1) resync after broadcast lagged)
+    // - send `SupervisorEvent::State(Arc<ConnectionState>)` via `event_tx`
+    // - notify `observer` (metrics/logging) ONLY on control-plane paths
     self.publish(Phase::Disconnected, attempt, None, None);
 
     loop {
@@ -357,7 +398,7 @@ impl<C: Connector> SupervisorLoop<C> {
         .instrument(self.span.clone()).await {
         Ok(s) => s,
         Err(e) => {
-          let class = self.connector.classify_error(StageHint::Connect, &e);
+          let class = self.connector.classify_error(FailurePhase::Connect, &e);
           let report = self.mk_report(FailurePhase::Connect, class, &e);
           if let Some(next) = self.on_failure(class, attempt, report.clone()).await? { continue; }
           return Err(anyhow::anyhow!("supervisor failed (connect)"));
@@ -367,7 +408,7 @@ impl<C: Connector> SupervisorLoop<C> {
       // --- INIT ---
       self.publish(Phase::Initializing, attempt, None, None);
       if let Err(e) = sess.init(self.ctx(attempt)).instrument(self.span.clone()).await {
-        let class = self.connector.classify_error(StageHint::Init, &e);
+        let class = self.connector.classify_error(FailurePhase::Init, &e);
         let report = self.mk_report(FailurePhase::Init, class, &e);
         self.handle_cell.store(None);
         if let Some(next) = self.on_failure(class, attempt, report.clone()).await? { continue; }
@@ -375,8 +416,8 @@ impl<C: Connector> SupervisorLoop<C> {
       }
 
       // 只有 init 成功后才发布 handle 并进入 Connected(Ready)
-      let h = Arc::new(sess.handle().to_owned_handle()); // 实际实现：Handle 通常放在 Session 内，可直接 Arc::new(clone/Arc)
-      self.handle_cell.store(Some(h));
+      // Handle publish is always an O(1) Arc clone.
+      self.handle_cell.store(Some(Arc::clone(sess.handle())));
       self.retry.on_success(std::time::Instant::now());
       self.publish(Phase::Connected, attempt, None, None);
 
@@ -384,11 +425,11 @@ impl<C: Connector> SupervisorLoop<C> {
       let outcome = match sess.run(self.ctx(attempt)).instrument(self.span.clone()).await {
         Ok(o) => o,
         Err(e) => {
-          let class = self.connector.classify_error(StageHint::Run, &e);
+          let class = self.connector.classify_error(FailurePhase::Run, &e);
           match class {
-            FailureClass::Stop => RunOutcome::GracefulStop,
-            FailureClass::Fatal => RunOutcome::FatalFailure,
-            FailureClass::Retryable => RunOutcome::RetryableFailure,
+            FailureKind::Stop => RunOutcome::GracefulStop,
+            FailureKind::Fatal => RunOutcome::FatalFailure,
+            FailureKind::Retryable => RunOutcome::RetryableFailure,
           }
         }
       };
@@ -405,7 +446,7 @@ impl<C: Connector> SupervisorLoop<C> {
         }
         RunOutcome::DisconnectedRetryable | RunOutcome::RetryableFailure => {
           let report = Arc::new(FailureReport{ phase: FailurePhase::Run, kind: FailureKind::Retryable, summary: Arc::<str>::from("disconnected"), code: None });
-          if let Some(next) = self.on_failure(FailureClass::Retryable, attempt, report).await? { continue; }
+          if let Some(next) = self.on_failure(FailureKind::Retryable, attempt, report).await? { continue; }
           return Err(anyhow::anyhow!("supervisor failed (budget exhausted)"));
         }
       }
@@ -414,7 +455,7 @@ impl<C: Connector> SupervisorLoop<C> {
 }
 ```
 
-> 注：上面出现 `to_owned_handle()` 只是表达“句柄需可被 Arc 化并供热读”。最终实现可要求 `Handle: Clone` 或直接让 Session 内部持有 `Arc<Handle>` 并返回引用到 `Arc`（更优）。
+> 注：`to_owned_handle()` 已删除。最终版强制：`Session::handle()` 返回 `&Arc<Handle>`，避免实现者自行发明 owned/clone 语义导致性能与正确性走偏。
 
 ### 4.3 强制 Span 传播
 
@@ -663,7 +704,7 @@ SDK `SupervisedDriver/SupervisedPlugin` 在构造时会把上述策略固化在�
 
 #### 7.2.1 结构化预算（推荐替换 `Failed(String)` 语义）
 
-- **目标**：让 retry/backoff/失败原因可以被统一观测（metrics/log/ui），并避免在 watch clone 中复制大字符串。
+- **目标**：让 retry/backoff/失败原因可以被统一观测（metrics/log/ui），并避免在事件广播 clone 中复制大字符串。
 - **建议**：把连接状态从 `*ConnectionState::Failed(String)` 升级为结构化 payload（内部字段用 `Arc`/`Copy`，clone 成本恒定）。
 
 设计建议（示意）：
@@ -714,7 +755,7 @@ SDK `SupervisedDriver/SupervisedPlugin` 在构造时会把上述策略固化在�
 
 `ng-gateway-core/src/southward/monitor.rs` 的 `ChannelMonitor` 做了典型 Observer 工作：
 
-- 订阅 `Driver::subscribe_connection_state()`（watch）
+- 订阅 `Driver::subscribe_supervisor_events()`（bounded broadcast；lagged 时用 `connection_state_snapshot()` 重同步）
 - 去重 state 变化（`last_state`）
 - 更新 Prometheus（connected gauge / reconnect count / connect_failed / disconnect）
 - 在 `Connected`/`Disconnected|Failed` 迁移时发 `DeviceConnected/DeviceDisconnected` northward 事件
@@ -723,7 +764,7 @@ SDK `SupervisedDriver/SupervisedPlugin` 在构造时会把上述策略固化在�
 
 `ng-gateway-core/src/northward/actor.rs` 中：
 
-- `AppActor::spawn_connection_monitor()` 订阅插件连接态并更新指标、flush buffer
+- `AppActor::spawn_connection_monitor()` 订阅插件监督事件并更新指标、flush buffer（lagged 时用 snapshot 重同步）
 - 同时 `send_data()` 与 worker loop 也会读取连接态决定是否丢弃/缓冲
 
 也就是说：**Observer 的副作用（metrics/log/event/buffer flush）目前主要在 core 层实现**，并没有一个统一的“监督事件总线”把所有连接生命周期信息结构化输出。
@@ -740,7 +781,7 @@ SDK `SupervisedDriver/SupervisedPlugin` 在构造时会把上述策略固化在�
 
 ### 8.1 Observer（最终版统一扩展点：监督事件，而不是散落的日志/指标）
 
-SupervisorLoop 内只发事件，不直接写 prometheus；由 Observer 负责：
+SupervisorLoop 内只发监督事件，不直接写 prometheus；由 Observer 负责（推荐在 core 内以订阅任务消费 `SupervisorEvent` 实现 Metrics/Logging）：
 
 - `on_state_change(ConnectionState)`
 - `on_failure(FailureReport)`
@@ -840,9 +881,9 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 - **禁止热路径 `String`/`Vec` 构造与 `to_string()`**：错误信息、失败原因、日志字段必须预先结构化或用 `Arc<str>` 保存；只允许在“失败路径/最终落库/最终展示”做一次性转换。
 - **失败报告使用 `Arc<FailureReport>` + `Arc<str>`**：避免在 retry/backoff 循环中重复复制大字符串。
 - **Handle 必须可 lock-free 热读**：只允许 `HandleCell(ArcSwapOption)` + `Arc<Handle>`，禁止在 collect/write/process_data 中出现锁。
-- **watch 广播的 clone 必须 cheap**：
-  - `ConnectionState` 允许 clone（watch 必须发送 owned 值），但其内部字段必须尽量用 `Copy`/`Arc`（例如 `last_failure: Option<Arc<FailureReport>>`）
-  - 禁止在 `publish()` 内做任何格式化与分配
+- **broadcast 事件的 clone 必须 cheap**：
+  - `SupervisorEvent` 必须 cheap-clone（内部字段尽量用 `Copy`/`Arc`，例如 `last_failure: Option<Arc<FailureReport>>`）
+  - 禁止在 `emit_event()` 内做任何格式化与分配
 - **span/log 字段不得引入高频分配**：`driver_kind/plugin_kind` 等常量必须为 `&'static str` 或 `Arc<str>` 缓存；禁止每次重连/每条消息拼接字符串。
 
 **落地检查清单（每次迁移必须自检）**
@@ -858,7 +899,7 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 
 **目标**：把“主动重连”变成 supervision 的一等公民事件，统一治理（状态/退避/预算/观测），并保持零额外开销。
 
-**统一方案（Phase 2/3 要落地）**
+**统一方案（Phase 1 必备）**
 
 - SupervisorLoop 持有一个 **bounded control-plane 信号通道**（建议 `mpsc::Sender<ReconnectRequest>`，容量=1，`try_send`，可“覆盖旧请求/丢弃重复”）
 - `Ctx`/`Handle` 暴露一个 `request_reconnect(reason)` 的轻量入口：
@@ -895,26 +936,6 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
   - 引入 `Initializing` 与 Connect/Init/Run 失败阶段
   - 冻结 `budget exhausted` 的对外语义（必须可观测、可解释）
 
-### Phase 0.5：确认 `cdylib` 运行时现实并冻结 ABI 契约（必须先做，否则后面会返工）
-
-> 这是你这次指出的关键点：**`cdylib` 无法可靠共享 host 的 tokio/tracing 上下文**。最终版要把这块从“实现细节”升级为“架构契约”，并统一到宏导出符号里。
-
-- **A. 冻结“ABI 必须符号集”**（host loader 与宏必须一致）
-  - driver：`ng_driver_api_version/ng_driver_sdk_version/ng_driver_version/ng_driver_type/ng_driver_name/ng_driver_description/ng_driver_metadata_json_ptr/create_driver_factory/ng_driver_set_log_sink/ng_driver_set_max_level/ng_driver_get_max_level/ng_driver_init_tracing`
-  - plugin：`ng_plugin_api_version/ng_plugin_sdk_version/ng_plugin_version/ng_plugin_type/ng_plugin_name/ng_plugin_description/ng_plugin_metadata_json_ptr/create_plugin_factory/ng_plugin_init_tracing`
-- **B. 冻结 host 调用顺序（严禁随意调整）**
-  - driver：`dlopen -> (optional) ng_driver_set_log_sink -> ng_driver_init_tracing -> probe symbols/metadata -> create_driver_factory`
-  - plugin：`dlopen -> ng_plugin_init_tracing -> probe symbols/metadata -> create_plugin_factory`
-- **C. 冻结 `NG_RUNTIME` 策略**
-  - 每个 `cdylib` 一个 `static Lazy<Runtime>`（multi-thread）
-  - thread_name：包含 `driver_type/plugin_type`（便于观测与排障）
-  - 禁止：每实例 runtime、每调用 spawn 新 runtime、以及任何形式的“在 host runtime 上运行插件 tokio 逻辑但依赖 Handle::current()”
-- **D. 验证性实验（必须写成可重复测试/工具）**
-  - 写一个最小 `cdylib` driver/plugin：在 trait 方法里调用 `tokio::spawn` 与 `Handle::current()`，验证：
-    - 在 host runtime 线程上直接调用时，插件侧 `Handle::current()` 是否可靠
-    - 在 `NG_RUNTIME` 内执行时必然可靠
-  - 结论写入文档（本章）并作为“禁止回退”的依据
-
 ### Phase 1：SDK supervision 内核落地（以现有 retry 为基线）
 
 - 新增 `ng-gateway-sdk::supervision` 模块：
@@ -922,6 +943,7 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
   - `connector.rs`：`Connector/Session/Ctx/RunOutcome`
   - `retry.rs`：**复用并迁移**现有 `ng-gateway-sdk/src/retry.rs`（允许破坏式移动文件/调整 API），并扩展 stage-aware 语义
   - `handle.rs`：`HandleCell`
+  - `event.rs`：`SupervisorEvent`（bounded `broadcast`）+ `connection_state_snapshot()` 快照契约 + `lagged` 指标/日志规范
   - `loop.rs`：`SupervisorLoop<C>`
   - `observer.rs`：Observer trait + Noop（先落地接口，不做 host 注入）
   - `wrapper_southward.rs`：`SupervisedDriver<T>`
@@ -933,6 +955,7 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 
 - 单测：retry determinism（jitter=none）、budget 耗尽边界、状态机迁移合法性（含 Connect/Init/Run 分阶段）
 - fake connector/session 组件测试：脚本驱动 connect/init/run 的各种结果，验证 state/backoff/failed
+- fake session 在 `run()` 内触发 `request_reconnect(reason)`：必须走统一路径（清 handle → Reconnecting → backoff/budget → Connecting），且 budget/观测口径一致
 - `cdylib` 形态集成测试（必须真实 dlopen）：
   - host 可加载/探测/创建 factory
   - `start/stop` 可用，且 supervisor loop 跑在 `NG_RUNTIME`（可用 thread_name 断言）
@@ -963,7 +986,7 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 > 这是“最佳实践必须做”的破坏式变更：不再用 `Failed(String)` 做状态载荷。
 
 - 在 SDK 中引入统一 `ConnectionState`（含 `Initializing`、阶段化失败、budget snapshot）
-- southward/northward 对外接口统一返回 `watch::Receiver<ConnectionState>`
+- southward/northward 对外接口统一返回 `broadcast::Receiver<SupervisorEvent>`（有界），并提供 `connection_state_snapshot()` 处理 lagged 重同步
 - core 的 `ChannelMonitor` / `AppActor` 只消费统一 state（不再分两套枚举）
 - UI/REST/WS 的状态展示统一映射（避免“南北两套状态解释不一致”）
 - **破坏式推进方法（强制执行）**
@@ -1009,7 +1032,7 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
   - 从 handle 暴露 `request_reconnect(reason)`（`try_send`，禁止 await）
   - 在 run 阶段统一 select 处理 `ReconnectRequest`
 - **G. 删除旧 supervisor.rs 并收敛观测**
-  - 删除协议内 reconnect loop / backoff / watch state 发送
+  - 删除协议内 reconnect loop / backoff / 任何自建 state 广播逻辑
   - 协议内只保留：错误分类、必要的业务日志（低频）、以及 data-plane 逻辑
 - **H. 测试与基准（必须补齐）**
   - 单测：connect/init/run 三阶段分别失败 → state 与 budget 行为一致
@@ -1047,10 +1070,7 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 
 最终版最佳实践建议：
 
-- `ConnectionState` 表达 **“对外可用性（Ready）”**，默认以 uplink 为准（能发数据才算 Connected）
-- downlink 作为可选子系统：
-  - 用独立 observer 事件与指标记录其健康（不污染主连接态）
-  - 必要时在 `ConnectionState` 里挂 `subsystems: SmallVec<[SubsystemState; N]>`（可选项，取决于你们 UI/告警需求）
+- `ConnectionState` 表达 **“对外可用性（Ready）”**
 
 #### Phase 3.1 迁移要点（执行项）
 
@@ -1059,8 +1079,8 @@ connect/init/run 必须协作取消；sleep/backoff 必须可取消；退出必�
 - **复用 9.5 主动 Reconnect（Northward 侧完成落地）**：
   - 任何“主动断开/主动刷新连接”只能调用 `request_reconnect`
   - 统一 budget 语义：预算耗尽进入 Failed
-- **把 AppActor 的热路径连接检查从 watch clone 改成 atomic 快读**
-  - 现状 `AppActor::send_data()` 与 worker loop 每次都 `plugin.subscribe_connection_state().borrow().clone()`，将来统一改为：
+- **把 AppActor 的热路径连接检查从连接态订阅 clone 改成 atomic 快读**
+  - 现状 `AppActor::send_data()` 与 worker loop 每次都 `plugin.subscribe_supervisor_events()` 消费事件并维护本地快照/atomic，data-path 再去读 snapshot/atomic（零分配、零 clone），将来统一改为：
     - monitor 任务更新一个 `AtomicBool connected`
     - data-path 只读 atomic（零分配、零 clone）
 
