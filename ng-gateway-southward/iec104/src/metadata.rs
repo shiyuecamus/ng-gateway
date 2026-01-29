@@ -1,4 +1,4 @@
-use crate::protocol::frame::asdu::TypeID;
+use super::protocol::frame::asdu::TypeID;
 use ng_gateway_sdk::{
     ui_text, DriverSchemas, EnumItem, Field, Group, Node, RuleValue, Rules, UiDataType, UiProps,
 };

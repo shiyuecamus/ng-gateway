@@ -8,10 +8,14 @@ pub(crate) mod model;
 pub mod payload;
 pub mod probe;
 pub mod runtime_api;
+pub mod supervised;
 pub mod template;
 pub(crate) mod types;
 
-use crate::{NorthwardError, NorthwardResult};
+use crate::{
+    supervision::{NoopObserverFactory, ObserverFactory},
+    ConnectionState, NorthwardResult,
+};
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
 use envelope::EnvelopeKind;
@@ -21,10 +25,9 @@ use model::{
 };
 use runtime_api::NorthwardRuntimeApi;
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::sync::Arc;
-use std::{fmt::Debug, time::Duration};
 use tokio::sync::{broadcast, mpsc, watch};
-use types::NorthwardConnectionState;
 
 /// Initialization context for northward plugins
 ///
@@ -81,6 +84,19 @@ pub struct NorthwardInitContext {
     pub runtime: Arc<dyn NorthwardRuntimeApi>,
     /// Retry policy for connection management with exponential backoff
     pub retry_policy: crate::RetryPolicy,
+    /// Host-provided supervision observer factory (low-frequency control plane).
+    pub observer_factory: Arc<dyn ObserverFactory>,
+}
+
+impl NorthwardInitContext {
+    /// Attach a disabled/no-op observer configuration.
+    ///
+    /// This is intended for tests and offline tools that do not run inside the gateway host.
+    #[inline]
+    pub fn with_noop_observer(mut self) -> Self {
+        self.observer_factory = Arc::new(NoopObserverFactory);
+        self
+    }
 }
 
 /// Define and export a northward plugin factory and metadata for dynamic loading.
@@ -106,7 +122,7 @@ pub struct NorthwardInitContext {
 ///     name = "ThingsBoard",
 ///     description = "ThingsBoard northbound adapter",
 ///     plugin_type = "thingsboard",
-///     factory = MyFactory,
+///     component = MyConnector,
 ///     metadata_fn = build_metadata
 /// );
 ///
@@ -114,15 +130,209 @@ pub struct NorthwardInitContext {
 /// ng_plugin_factory!(
 ///     name = "Kafka",
 ///     plugin_type = "kafka",
-///     factory = MyFactory,
+///     component = MyConnector,
 ///     metadata_fn = build_metadata,
 ///     channel_capacity = 10000
 /// );
 /// ```
 #[macro_export]
 macro_rules! ng_plugin_factory {
+    // Final form (component + model_convert): with description.
+    (name = $name:expr, description = $description:expr, plugin_type = $plugin_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(,)?) => {
+        // Generated, per-library factory to avoid exposing generic extension points.
+        struct __NgComponentPluginFactory {
+            model_convert: $model_convert,
+        }
+
+        impl __NgComponentPluginFactory {
+            /// Create a new factory instance.
+            ///
+            /// # Notes
+            /// This MUST be low-frequency and MUST NOT perform any I/O.
+            #[inline]
+            fn new() -> Self {
+                Self {
+                    model_convert: <$model_convert as ::core::default::Default>::default(),
+                }
+            }
+        }
+
+        impl ::core::default::Default for __NgComponentPluginFactory {
+            #[inline]
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $crate::PluginFactory for __NgComponentPluginFactory {
+            fn create_plugin(
+                &self,
+                ctx: $crate::NorthwardInitContext,
+            ) -> $crate::NorthwardResult<Box<dyn $crate::Plugin>> {
+                // Compile-time contract checks (clear error messages for implementers).
+                fn __assert_handle_is_northward_handle<H: $crate::NorthwardHandle>() {}
+                __assert_handle_is_northward_handle::<<$component as $crate::supervision::Connector>::Handle>();
+
+                // Compile-time contract check:
+                // `Connector::InitContext` MUST be exactly `NorthwardInitContext`.
+                fn __assert_init_ctx_is_northward_init_context<C>()
+                where
+                    C: $crate::supervision::Connector<InitContext = $crate::NorthwardInitContext>,
+                {
+                }
+                __assert_init_ctx_is_northward_init_context::<$component>();
+
+                use $crate::export::tracing::info_span;
+                let span = info_span!(
+                    "northward-plugin",
+                    app_id = ctx.app_id,
+                    plugin_type = $plugin_type
+                );
+
+                // NOTE: `new(ctx)` MUST be sync and MUST NOT perform I/O.
+                let observer = ctx.observer_factory.create_northward(
+                    $crate::supervision::NorthwardObserverLabels {
+                        app_id: ctx.app_id,
+                        plugin_kind: ::std::sync::Arc::<str>::from($plugin_type),
+                    }
+                );
+
+                let retry_policy = ctx.retry_policy;
+                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+
+                let params = $crate::supervision::SupervisorParams {
+                    retry_policy,
+                    reconnect_queue: 8,
+                };
+                let (loop_, _state_rx) = $crate::supervision::SupervisorLoop::new_with_span(
+                    connector,
+                    params,
+                    observer,
+                    span,
+                );
+
+                let plugin = $crate::SupervisedPlugin::new(loop_);
+                Ok(Box::new(plugin))
+            }
+
+            fn convert_plugin_config(
+                &self,
+                config: $crate::export::serde_json::Value,
+            ) -> $crate::NorthwardResult<std::sync::Arc<dyn $crate::PluginConfig>> {
+                <$model_convert as $crate::supervision::converter::NorthwardModelConverter>::convert_plugin_config(
+                    &self.model_convert,
+                    config,
+                )
+            }
+        }
+
+        $crate::ng_plugin_factory!(
+            @core name = $name,
+            description = Some($description),
+            plugin_type = $plugin_type,
+            factory_ty = __NgComponentPluginFactory,
+            factory_ctor = || __NgComponentPluginFactory::new(),
+            metadata_fn = $metadata_fn,
+            channel_capacity = 1024 $(+ $cap * 0 + $cap)?
+        );
+    };
+
+    // Final form (component + model_convert): NO description.
+    (name = $name:expr, plugin_type = $plugin_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(,)?) => {
+        // Generated, per-library factory to avoid exposing generic extension points.
+        struct __NgComponentPluginFactory {
+            model_convert: $model_convert,
+        }
+
+        impl __NgComponentPluginFactory {
+            #[inline]
+            fn new() -> Self {
+                Self {
+                    model_convert: <$model_convert as ::core::default::Default>::default(),
+                }
+            }
+        }
+
+        impl ::core::default::Default for __NgComponentPluginFactory {
+            #[inline]
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $crate::PluginFactory for __NgComponentPluginFactory {
+            fn create_plugin(
+                &self,
+                ctx: $crate::NorthwardInitContext,
+            ) -> $crate::NorthwardResult<Box<dyn $crate::Plugin>> {
+                fn __assert_handle_is_northward_handle<H: $crate::NorthwardHandle>() {}
+                __assert_handle_is_northward_handle::<<$component as $crate::supervision::Connector>::Handle>();
+
+                // Compile-time contract check:
+                // `Connector::InitContext` MUST be exactly `NorthwardInitContext`.
+                fn __assert_init_ctx_is_northward_init_context<C>()
+                where
+                    C: $crate::supervision::Connector<InitContext = $crate::NorthwardInitContext>,
+                {
+                }
+                __assert_init_ctx_is_northward_init_context::<$component>();
+
+                use $crate::export::tracing::info_span;
+                let span = info_span!(
+                    "northward-plugin",
+                    app_id = ctx.app_id,
+                    plugin_type = $plugin_type
+                );
+
+                let observer = ctx.observer_factory.create_northward(
+                    $crate::supervision::NorthwardObserverLabels {
+                        app_id: ctx.app_id,
+                        plugin_kind: ::std::sync::Arc::<str>::from($plugin_type),
+                    }
+                );
+
+                let retry_policy = ctx.retry_policy;
+                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+
+                let params = $crate::supervision::SupervisorParams {
+                    retry_policy,
+                    reconnect_queue: 8,
+                };
+                let (loop_, _state_rx) = $crate::supervision::SupervisorLoop::new_with_span(
+                    connector,
+                    params,
+                    observer,
+                    span,
+                );
+
+                let plugin = $crate::SupervisedPlugin::new(loop_);
+                Ok(Box::new(plugin))
+            }
+
+            fn convert_plugin_config(
+                &self,
+                config: $crate::export::serde_json::Value,
+            ) -> $crate::NorthwardResult<std::sync::Arc<dyn $crate::PluginConfig>> {
+                <$model_convert as $crate::supervision::model_convert::NorthwardModelConverter>::convert_plugin_config(
+                    &self.model_convert,
+                    config,
+                )
+            }
+        }
+
+        $crate::ng_plugin_factory!(
+            @core name = $name,
+            description = None,
+            plugin_type = $plugin_type,
+            factory_ty = __NgComponentPluginFactory,
+            factory_ctor = || __NgComponentPluginFactory::new(),
+            metadata_fn = $metadata_fn,
+            channel_capacity = 1024 $(+ $cap * 0 + $cap)?
+        );
+    };
+
     // Core implementation with optional description and explicit factory ctor
-    (@core name = $name:expr, description = $desc_opt:expr, plugin_type = $plugin_type:expr, factory = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path, channel_capacity = $cap:expr) => {
+    (@core name = $name:expr, description = $desc_opt:expr, plugin_type = $plugin_type:expr, factory_ty = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path, channel_capacity = $cap:expr) => {
         #[no_mangle]
         pub extern "C" fn ng_plugin_api_version() -> u32 {
             $crate::sdk::sdk_api_version()
@@ -287,7 +497,7 @@ macro_rules! ng_plugin_factory {
                 }
             }
 
-            fn subscribe_connection_state(&self) -> tokio::sync::watch::Receiver<$crate::NorthwardConnectionState> {
+            fn subscribe_connection_state(&self) -> tokio::sync::watch::Receiver<std::sync::Arc<$crate::ConnectionState>> {
                 self.inner.subscribe_connection_state()
             }
 
@@ -308,20 +518,6 @@ macro_rules! ng_plugin_factory {
                 // Signal cancellation to the actor loop
                 self.cancel_token.cancel();
                 Ok(())
-            }
-
-            async fn ping(&self) -> $crate::NorthwardResult<std::time::Duration> {
-                let inner = self.inner.clone();
-                let handle = NG_RUNTIME.handle();
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                handle.spawn(async move {
-                    let res = inner.ping().await;
-                    let _ = tx.send(res);
-                });
-                match rx.await {
-                    Ok(res) => res,
-                    Err(_) => Err($crate::NorthwardError::RuntimeError { reason: "Plugin ping task cancelled".to_string() }),
-                }
             }
         }
 
@@ -394,58 +590,6 @@ macro_rules! ng_plugin_factory {
             };
         }
     };
-
-    // Public API: explicit constructor and description
-    (name = $name:expr, description = $description:expr, plugin_type = $plugin_type:expr, factory = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_plugin_factory!(
-            @core name = $name,
-            description = Some($description),
-            plugin_type = $plugin_type,
-            factory = $factory,
-            factory_ctor = $ctor,
-            metadata_fn = $metadata_fn,
-            channel_capacity = 1024 $(+ $cap * 0 + $cap)? // Magic to use $cap if present, else 1024
-        );
-    };
-
-    // Public API: default constructor and description
-    (name = $name:expr, description = $description:expr, plugin_type = $plugin_type:expr, factory = $factory:ty, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_plugin_factory!(
-            @core name = $name,
-            description = Some($description),
-            plugin_type = $plugin_type,
-            factory = $factory,
-            factory_ctor = || <$factory as ::core::default::Default>::default(),
-            metadata_fn = $metadata_fn,
-            channel_capacity = 1024 $(+ $cap * 0 + $cap)?
-        );
-    };
-
-    // Public API: explicit constructor and NO description
-    (name = $name:expr, plugin_type = $plugin_type:expr, factory = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_plugin_factory!(
-            @core name = $name,
-            description = None,
-            plugin_type = $plugin_type,
-            factory = $factory,
-            factory_ctor = $ctor,
-            metadata_fn = $metadata_fn,
-            channel_capacity = 1024 $(+ $cap * 0 + $cap)?
-        );
-    };
-
-    // Public API: default constructor and NO description
-    (name = $name:expr, plugin_type = $plugin_type:expr, factory = $factory:ty, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_plugin_factory!(
-            @core name = $name,
-            description = None,
-            plugin_type = $plugin_type,
-            factory = $factory,
-            factory_ctor = || <$factory as ::core::default::Default>::default(),
-            metadata_fn = $metadata_fn,
-            channel_capacity = 1024 $(+ $cap * 0 + $cap)?
-        );
-    };
 }
 
 impl_downcast!(sync NorthwardPublisher);
@@ -484,49 +628,19 @@ pub trait PluginFactory: DowncastSync + Send + Sync {
 
 pub trait PluginConfig: DowncastSync + Send + Sync + Debug {}
 
-/// Northward plugin trait - self-supervised protocol adapter (aligned with southbound Driver)
+/// Northward plugin trait (host-facing ABI contract).
 ///
-/// # Design Philosophy
+/// # Final architecture (recommended)
+/// In the final supervision architecture, **external plugin crates do NOT implement**
+/// this trait directly. Instead, plugin authors implement `supervision::Connector/Session/Handle`
+/// plus an inherent `fn new(ctx: NorthwardInitContext)`, and the SDK macro generates a
+/// `PluginFactory` that returns `SupervisedPlugin<C>`, which implements this `Plugin` trait.
 ///
-/// This trait is **fully aligned with southbound Driver design**:
-/// - Plugin manages its own connection lifecycle (connect, reconnect, disconnect)
-/// - Plugin spawns internal supervisor task for connection monitoring
-/// - External components subscribe to connection state via `watch::Receiver`
-/// - Plugin sends business events (RPC, Command, Attribute) via event channel
+/// This keeps connection governance (retry/budget/state publication/handle publication)
+/// inside the SDK supervision loop and makes behavior consistent across plugins.
 ///
-/// ## Responsibility Separation
-///
-/// **Plugin responsibilities (Self-Supervised)**:
-/// - Initialize and spawn internal connection supervisor task
-/// - Manage connection lifecycle (connect, exponential backoff retry, disconnect)
-/// - Maintain internal `watch::Sender<NorthwardConnectionState>` for state broadcasting
-/// - Send business events (RPC responses, commands, attributes) via `events_tx`
-/// - Encode/decode protocol-specific messages
-/// - Implement platform-specific authentication and provisioning
-///
-/// **AppActor responsibilities (Observer)**:
-/// - Subscribe to plugin connection state via `subscribe_connection_state()`
-/// - Route data to plugin via `process_data()`
-/// - Forward business events to Gateway
-/// - Manage plugin lifecycle (start/stop)
-///
-/// ## Comparison with Southbound Driver
-///
-/// | Aspect | Southbound Driver | Northward Plugin |
-/// |--------|------------------|------------------|
-/// | Connection Management | Driver internal supervisor | Plugin internal supervisor |
-/// | State Broadcasting | `watch::Sender<SouthwardConnectionState>` | `watch::Sender<NorthwardConnectionState>` |
-/// | State Subscription | `subscribe_connection_state()` | `subscribe_connection_state()` |
-/// | External Monitor | `ChannelMonitor` subscribes | `AppActor` subscribes |
-/// | Business Events | Device data via `NorthwardPublisher` | RPC/Command via `events_tx` |
-///
-/// ## Benefits
-///
-/// 1. **Architecture Consistency**: North and south use identical patterns
-/// 2. **Plugin Autonomy**: Each plugin controls its own reconnection strategy
-/// 3. **Decoupling**: AppActor doesn't need to know connection details
-/// 4. **Flexibility**: Different plugins can use different retry policies
-/// 5. **Simplicity**: No redundant `is_connected()` checks needed
+/// # Transitional notes
+/// The trait remains public for ABI compatibility during migration.
 #[async_trait]
 pub trait Plugin: DowncastSync + Send + Sync {
     /// Start the plugin (asynchronous). Spawn supervisors and establish connections.
@@ -556,14 +670,14 @@ pub trait Plugin: DowncastSync + Send + Sync {
     ///     while state_rx.changed().await.is_ok() {
     ///         let state = state_rx.borrow().clone();
     ///         match state {
-    ///             NorthwardConnectionState::Connected => { /* handle */ }
-    ///             NorthwardConnectionState::Disconnected => { /* handle */ }
+    ///             ConnectionState::Connected => { /* handle */ }
+    ///             ConnectionState::Disconnected => { /* handle */ }
     ///             _ => {}
     ///         }
     ///     }
     /// });
     /// ```
-    fn subscribe_connection_state(&self) -> watch::Receiver<NorthwardConnectionState>;
+    fn subscribe_connection_state(&self) -> watch::Receiver<Arc<ConnectionState>>;
 
     /// Process outbound data using internal connection
     ///
@@ -623,14 +737,6 @@ pub trait Plugin: DowncastSync + Send + Sync {
     /// }
     /// ```
     async fn stop(&self) -> NorthwardResult<()>;
-
-    /// Optional: Health check / ping
-    ///
-    /// Returns the latency if connection is healthy.
-    /// Default implementation returns NotConnected error.
-    async fn ping(&self) -> NorthwardResult<Duration> {
-        Err(NorthwardError::NotConnected)
-    }
 }
 
 /// Northward data types
@@ -691,7 +797,7 @@ pub type EventReceiver = broadcast::Receiver<NorthwardEvent>;
 /// Business events emitted by northward plugins (aligned with southbound design)
 ///
 /// **Design Philosophy**:
-/// - Connection lifecycle is managed via `watch::Receiver<NorthwardConnectionState>`
+/// - Connection lifecycle is managed via `watch::Receiver<ConnectionState>`
 /// - This enum only contains **business events** that need Gateway-level processing
 /// - Plugins send these events via `events_tx` provided during initialization
 ///
@@ -707,7 +813,7 @@ pub type EventReceiver = broadcast::Receiver<NorthwardEvent>;
 /// **Connection State Flow** (separate channel):
 /// ```text
 /// Plugin (supervisor task)
-///   → conn_state_tx.send(NorthwardConnectionState::Connected)
+///   → conn_state_tx.send(ConnectionState::Connected)
 ///   → AppActor subscribes via subscribe_connection_state()
 ///   → AppActor updates internal state
 /// ```

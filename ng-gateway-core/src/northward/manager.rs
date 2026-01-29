@@ -9,16 +9,15 @@
 use super::{
     super::{
         lifecycle::{start_with_policy, StartPolicy},
-        northward::NorthwardEventsBus,
+        northward::{NorthwardEventsBus, NorthwardRegistry},
         southward::manager::NGSouthwardManager,
     },
-    actor::AppActor,
+    actor::{AppActor, AppActorParams, AppIo, NorthwardAppObserverFactory},
     extension::AppExtensionManager,
     router::SubscriptionRouter,
     runtime_api::CoreNorthwardRuntimeApi,
     subscription_sync::{compute_sync_plan, DeviceSyncStatus, SubscriptionSyncTracker, SyncPlan},
 };
-use crate::northward::NorthwardRegistry;
 use dashmap::DashMap;
 use ng_gateway_common::metrics::NGMetricsHub;
 use ng_gateway_error::{NGError, NGResult};
@@ -29,8 +28,8 @@ use ng_gateway_models::{
     NorthwardManager,
 };
 use ng_gateway_sdk::{
-    AttributeData, DeviceConnectedData, DeviceDisconnectedData, NorthwardConnectionState,
-    NorthwardData, NorthwardInitContext, PointValue, TelemetryData,
+    AttributeData, ConnectionState, DeviceConnectedData, DeviceDisconnectedData, NorthwardData,
+    NorthwardInitContext, PointValue, TelemetryData,
 };
 use sea_orm::DatabaseConnection;
 use std::{collections::HashMap, sync::Arc};
@@ -215,6 +214,14 @@ impl NGNorthwardManager {
         // Create extension manager for this app (with database connection)
         let extension_manager = Arc::new(AppExtensionManager::new(app.id, db.clone()));
 
+        // Build per-app I/O first so the supervision Observer can flush buffers on Connected.
+        let io = AppIo::new(&self.metrics_hub, app.id, app.plugin_id, app.queue_policy)?;
+        let observer_factory = Arc::new(NorthwardAppObserverFactory::new(
+            app.id,
+            &io,
+            app.queue_policy,
+        ));
+
         // Create initialization context with all dependencies
         let init_ctx = NorthwardInitContext {
             extension_manager,
@@ -228,6 +235,7 @@ impl NGNorthwardManager {
                 &self.southward_manager,
             ))),
             retry_policy: app.retry_policy,
+            observer_factory,
         };
 
         // Create plugin instance with context (no I/O)
@@ -241,19 +249,17 @@ impl NGNorthwardManager {
         );
 
         // Create AppActor with initialized plugin
-        let actor = AppActor::new(
-            app.id,
-            app.name.clone(),
-            app.plugin_id,
-            &self.metrics_hub,
+        Ok(Arc::new(AppActor::new(AppActorParams {
+            app_id: app.id,
+            app_name: app.name.clone(),
+            plugin_id: app.plugin_id,
             plugin,
             events_rx,
             config,
-            app.queue_policy,
+            queue_policy: app.queue_policy,
             shutdown_token,
-        )?;
-
-        Ok(Arc::new(actor))
+            io,
+        })))
     }
 
     // === Data routing ===
@@ -809,7 +815,7 @@ impl NGNorthwardManager {
             actor.plugin_id(),
             actor.app_name(),
             actor.state(),
-            conn_state.is_connected(),
+            conn_state,
         ))
     }
 
@@ -934,7 +940,7 @@ impl NGNorthwardManager {
 
 // Implement the trait for accessing connection states
 impl NorthwardManager for NGNorthwardManager {
-    fn get_app_connection_state(&self, app_id: i32) -> Option<NorthwardConnectionState> {
+    fn get_app_connection_state(&self, app_id: i32) -> Option<Arc<ConnectionState>> {
         self.app_actors
             .get(&app_id)
             .map(|actor| actor.value().get_connection_state())

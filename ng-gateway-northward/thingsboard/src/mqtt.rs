@@ -1,5 +1,6 @@
-use super::{config::ThingsBoardPluginConfig, provision::ProvisionCredentials};
-use crate::normalize_client_id;
+use super::{
+    config::ThingsBoardPluginConfig, normalize_client_id, provision::ProvisionCredentials,
+};
 use ng_gateway_sdk::{NorthwardError, NorthwardResult};
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, TlsConfiguration, Transport};
 use std::time::Duration;

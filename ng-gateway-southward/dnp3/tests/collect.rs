@@ -2,8 +2,11 @@ mod common;
 
 use anyhow::{bail, Context};
 use common::{build_init_context, build_test_topology, init_tracing, CapturingPublisher};
-use ng_driver_dnp3::driver::Dnp3Driver;
-use ng_gateway_sdk::{Driver, SouthwardConnectionState};
+use ng_driver_dnp3::Dnp3Connector;
+use ng_gateway_sdk::{
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
+    Driver, SupervisedDriver,
+};
 use std::{sync::Arc, time::Duration};
 
 /// Integration test for DNP3 driver.
@@ -32,7 +35,14 @@ async fn dnp3_connect_and_recv_data() -> anyhow::Result<()> {
     let (ctx, _device_arc, _runtime_points) =
         build_init_context(channel, device, points, pub_trait);
 
-    let driver = Dnp3Driver::with_context(ctx).context("Failed to create DNP3 driver")?;
+    let connector =
+        <Dnp3Connector as Connector>::new(ctx).context("Failed to create DNP3 connector")?;
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<Dnp3Connector> = SupervisedDriver::new(loop_);
 
     driver.start().await.context("Failed to start driver")?;
 
@@ -44,7 +54,7 @@ async fn dnp3_connect_and_recv_data() -> anyhow::Result<()> {
     let mut conn_rx = driver.subscribe_connection_state();
     let wait_connect = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if matches!(*conn_rx.borrow(), SouthwardConnectionState::Connected) {
+            if conn_rx.borrow().is_connected() {
                 break;
             }
             if conn_rx.changed().await.is_err() {

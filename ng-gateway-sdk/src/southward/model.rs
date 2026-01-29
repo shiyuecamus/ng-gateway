@@ -1,12 +1,12 @@
 use super::{
-    transport::{NoopSouthwardTransportMeter, SouthwardTransportMeter},
-    types::{
-        AccessMode, CollectionType, DataPointType, DataType, HealthStatus, ReportType, Status,
+    super::{
+        supervision::{NoopObserverFactory, ObserverFactory},
+        NorthwardPublisher, RetryPolicy, Transform,
     },
+    transport::{NoopSouthwardTransportMeter, SouthwardTransportMeter},
+    types::{AccessMode, CollectionType, DataPointType, DataType, ReportType, Status},
     RuntimeChannel, RuntimeDevice, RuntimePoint,
 };
-use crate::{NorthwardPublisher, RetryPolicy, Transform};
-use chrono::{DateTime, Utc};
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -123,7 +123,7 @@ pub struct Parameter {
 ///
 /// Consolidated view of channel topology plus host-injected capabilities for driver initialization.
 /// @author saiki
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SouthwardInitContext {
     /// All devices under this channel
     pub devices: Vec<Arc<dyn RuntimeDevice>>,
@@ -137,6 +137,8 @@ pub struct SouthwardInitContext {
     pub channel_id: i32,
     /// Host-injected transport meter (authoritative measured bytes).
     pub transport_meter: Arc<dyn SouthwardTransportMeter>,
+    /// Host-provided supervision observer factory (low-frequency control plane).
+    pub observer_factory: Arc<dyn ObserverFactory>,
 }
 
 impl SouthwardInitContext {
@@ -146,18 +148,9 @@ impl SouthwardInitContext {
     #[inline]
     pub fn with_noop_observability(mut self) -> Self {
         self.transport_meter = Arc::new(NoopSouthwardTransportMeter);
+        self.observer_factory = Arc::new(NoopObserverFactory);
         self
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DriverHealth {
-    pub status: HealthStatus,
-    pub last_activity: DateTime<Utc>,
-    pub error_count: u64,
-    pub success_rate: f64,
-    pub average_response_time: Duration,
-    pub details: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Driver metrics

@@ -1,16 +1,18 @@
 use crate::protocol::{ChannelRuntime, PointsByDevice};
 use crate::publisher::NullPublisher;
 use ng_driver_modbus::{
-    driver::ModbusDriver,
     types::{
         Endianness, ModbusChannel, ModbusChannelConfig, ModbusConnection, ModbusDevice,
         ModbusFunctionCode, ModbusPoint,
     },
+    ModbusConnector,
 };
+use ng_gateway_sdk::supervision::NoopObserverFactory;
 use ng_gateway_sdk::{
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
     NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status, Transform,
+    SouthwardInitContext, Status, SupervisedDriver, Transform,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -158,9 +160,17 @@ pub fn build_modbus_channel_runtime(
         publisher,
         channel_id,
         transport_meter: Arc::new(NoopSouthwardTransportMeter),
+        observer_factory: Arc::new(NoopObserverFactory),
     };
 
-    let driver = ModbusDriver::with_context(ctx)?;
+    let connector = <ModbusConnector as Connector>::new(ctx)?;
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<ModbusConnector> =
+        SupervisedDriver::new_with_collect_max_inflight(loop_, args.tcp_pool_size as usize);
     let driver: Arc<dyn Driver> = Arc::new(driver);
 
     Ok(ChannelRuntime {

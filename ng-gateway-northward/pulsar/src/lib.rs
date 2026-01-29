@@ -1,11 +1,13 @@
 pub mod config;
-mod factory;
+mod connector;
+mod converter;
+mod handle;
 mod metadata;
-mod plugin;
-mod supervisor;
+mod session;
 
 pub use config::PulsarPluginConfig;
-use factory::PulsarPluginFactory;
+use connector::PulsarConnector;
+use converter::PulsarConverter;
 use metadata::build_metadata;
 use ng_gateway_sdk::ng_plugin_factory;
 
@@ -14,6 +16,7 @@ ng_plugin_factory!(
     name = "Pulsar",
     description = "Apache Pulsar northward plugin",
     plugin_type = "pulsar",
-    factory = PulsarPluginFactory,
-    metadata_fn = build_metadata
+    component = PulsarConnector,
+    metadata_fn = build_metadata,
+    model_convert = PulsarConverter
 );

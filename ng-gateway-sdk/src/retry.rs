@@ -1,3 +1,4 @@
+use super::RetryBudgetSnapshot;
 use backoff::{backoff::Backoff, ExponentialBackoff};
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
@@ -196,5 +197,29 @@ impl RetryController {
     #[inline]
     pub fn retries_used(&self) -> u32 {
         self.retries_used
+    }
+
+    /// Build a cheap retry budget snapshot for observability.
+    ///
+    /// # Semantics
+    /// - `remaining_hint` is best-effort and only reported for count-based budgets.
+    /// - For `max_attempts = None`, the budget is considered unbounded and hint is `None`.
+    #[inline]
+    pub fn budget_snapshot(&self) -> RetryBudgetSnapshot {
+        match self.max_attempts {
+            Some(max) => {
+                // `retries_used` counts failures that consumed a retry slot.
+                // Remaining is saturating to avoid underflow on edge cases.
+                let remaining = max.saturating_sub(self.retries_used);
+                RetryBudgetSnapshot {
+                    exhausted: remaining == 0,
+                    remaining_hint: Some(remaining),
+                }
+            }
+            None => RetryBudgetSnapshot {
+                exhausted: false,
+                remaining_hint: None,
+            },
+        }
     }
 }

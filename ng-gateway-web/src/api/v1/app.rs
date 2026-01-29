@@ -111,7 +111,9 @@ pub async fn list(state: web::Data<Arc<AppState>>) -> WebResult<WebResponse<Vec<
     // Use trait method to get connection state without depending on concrete type
     let northward_manager = state.gateway.northward_manager();
     for app in apps.iter_mut() {
-        app.connection_state = northward_manager.get_app_connection_state(app.id);
+        app.connection_state = northward_manager
+            .get_app_connection_state(app.id)
+            .map(|s| s.as_ref().clone());
     }
 
     Ok(WebResponse::ok(apps))
@@ -128,7 +130,9 @@ pub async fn page(
     // Use trait method to get connection state without depending on concrete type
     let northward_manager = state.gateway.northward_manager();
     for app in result.records.iter_mut() {
-        app.connection_state = northward_manager.get_app_connection_state(app.id);
+        app.connection_state = northward_manager
+            .get_app_connection_state(app.id)
+            .map(|s| s.as_ref().clone());
     }
 
     Ok(WebResponse::ok(result))
@@ -146,7 +150,9 @@ pub async fn get_by_id(
     // Enrich with connection state from runtime manager
     // Use trait method to get connection state without depending on concrete type
     let northward_manager = state.gateway.northward_manager();
-    app.connection_state = northward_manager.get_app_connection_state(app.id);
+    app.connection_state = northward_manager
+        .get_app_connection_state(app.id)
+        .map(|s| s.as_ref().clone());
 
     Ok(WebResponse::ok(app))
 }

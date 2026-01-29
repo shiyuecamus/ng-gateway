@@ -1,11 +1,13 @@
 pub mod codec;
-pub mod driver;
-pub mod factory;
+mod connector;
+mod converter;
+mod handle;
 pub mod metadata;
-pub mod supervisor;
+mod session;
 pub mod types;
 
-use factory::EthernetIpDriverFactory;
+pub use connector::EthernetIpConnector;
+use converter::EthernetIpConverter;
 use metadata::build_metadata;
 use ng_gateway_sdk::ng_driver_factory;
 
@@ -13,6 +15,7 @@ ng_driver_factory!(
     name = "Ethernet/IP",
     description = "Ethernet/IP industrial protocol driver for Allen-Bradley PLCs",
     driver_type = "ethernet-ip",
-    factory = EthernetIpDriverFactory,
-    metadata_fn = build_metadata
+    component = EthernetIpConnector,
+    metadata_fn = build_metadata,
+    model_convert = EthernetIpConverter
 );

@@ -1,8 +1,11 @@
 mod common;
 
 use common::{build_init_context, build_test_topology_for_version, init_tracing};
-use ng_driver_dlt645::{Dl645Driver, Dl645Version};
-use ng_gateway_sdk::{Driver, SouthwardConnectionState};
+use ng_driver_dlt645::{Dl645Connector, Dl645Version};
+use ng_gateway_sdk::{
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
+    Driver, SupervisedDriver,
+};
 use std::{sync::Arc, time::Duration};
 
 /// Manual integration test: DL/T 645-1997 short disconnect and reconnect.
@@ -35,12 +38,14 @@ async fn reconnect_and_collect() {
 
     let (ctx, device_arc, runtime_points) = build_init_context(channel, device, points);
 
-    let driver = match Dl645Driver::with_context(ctx) {
-        Ok(d) => d,
-        Err(e) => {
-            panic!("failed to create Dl645Driver (1997): {e}");
-        }
-    };
+    let connector = <Dl645Connector as Connector>::new(ctx)
+        .unwrap_or_else(|e| panic!("create connector failed: {e}"));
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<Dl645Connector> = SupervisedDriver::new(loop_);
 
     if let Err(e) = driver.start().await {
         panic!("Dl645Driver::start (1997) failed: {e}");
@@ -50,7 +55,7 @@ async fn reconnect_and_collect() {
     let wait_res = tokio::time::timeout(Duration::from_secs(10), async move {
         loop {
             let state = conn_rx.borrow().clone();
-            if matches!(state, SouthwardConnectionState::Connected) {
+            if state.is_connected() {
                 break;
             }
             if conn_rx.changed().await.is_err() {

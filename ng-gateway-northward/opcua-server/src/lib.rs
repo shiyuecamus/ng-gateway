@@ -1,16 +1,19 @@
 mod codec;
 mod config;
-mod factory;
+mod connector;
+mod converter;
+mod handle;
 mod metadata;
 mod node_cache;
 mod node_id;
-mod plugin;
 mod queue;
 mod server;
+mod session;
 mod write_dispatch;
 
 pub use config::OpcuaServerPluginConfig;
-use factory::OpcuaServerPluginFactory;
+use connector::OpcuaServerConnector;
+use converter::OpcuaServerConverter;
 use metadata::build_metadata;
 use ng_gateway_sdk::ng_plugin_factory;
 
@@ -19,6 +22,7 @@ ng_plugin_factory!(
     name = "OPC UA Server",
     description = "OPC UA server northward plugin",
     plugin_type = "opcua-server",
-    factory = OpcuaServerPluginFactory,
-    metadata_fn = build_metadata
+    component = OpcuaServerConnector,
+    metadata_fn = build_metadata,
+    model_convert = OpcuaServerConverter
 );

@@ -234,11 +234,11 @@ fn reemit_as_tracing(ctx: &HostSinkContext, ev: HostWireEvent) {
     let level = ev
         .level_u8
         .and_then(parse_level_u8)
-        .or_else(|| ev.level.as_deref().and_then(parse_level))
+        .or(ev.level.as_deref().and_then(parse_level))
         .unwrap_or(tracing::Level::INFO);
     let channel_id = ev.span.as_ref().and_then(|s| {
         s.channel_id
-            .or_else(|| log_fields::map_i32(&s.fields, log_fields::CHANNEL_ID))
+            .or(log_fields::map_i32(&s.fields, log_fields::CHANNEL_ID))
     });
 
     // Use a sentinel key to avoid span allocation for no-channel events.

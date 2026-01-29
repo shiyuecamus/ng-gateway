@@ -2,24 +2,21 @@ pub(crate) mod codec;
 pub mod log;
 pub(crate) mod model;
 pub mod probe;
+pub mod supervised;
 pub mod transport;
 pub(crate) mod types;
 pub(crate) mod validation;
 pub mod wire;
 
-use crate::{DriverResult, NGValue, NorthwardData, Transform};
+use crate::{ConnectionState, DriverResult, NGValue, NorthwardData, Transform};
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
 use model::{
-    ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverHealth, PointModel,
-    SouthwardInitContext,
+    ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, PointModel, SouthwardInitContext,
 };
 use std::{fmt, fmt::Debug, sync::Arc};
-use tokio::sync::watch::Receiver;
-use types::{
-    AccessMode, CollectionType, DataPointType, DataType, ReportType, SouthwardConnectionState,
-    Status,
-};
+use tokio::sync::watch;
+use types::{AccessMode, CollectionType, DataPointType, DataType, ReportType, Status};
 
 /// Driver-layer execute result (Driver -> Gateway).
 #[derive(Debug, Clone)]
@@ -58,7 +55,7 @@ pub enum ExecuteOutcome {
 ///     name = "Modbus",
 ///     description = "Modbus protocol driver",
 ///     driver_type = "modbus",
-///     factory = MyFactory,
+///     component = MyConnector,
 ///     metadata_fn = build_metadata
 /// );
 ///
@@ -66,15 +63,282 @@ pub enum ExecuteOutcome {
 /// ng_driver_factory!(
 ///     name = "Advanced Driver",
 ///     driver_type = "advanced",
-///     factory = MyFactory,
+///     component = MyConnector,
 ///     metadata_fn = build_metadata,
 ///     channel_capacity = 500
 /// );
 /// ```
 #[macro_export]
 macro_rules! ng_driver_factory {
+    // Final form (component + model_convert): with description.
+    (name = $name:expr, description = $description:expr, driver_type = $driver_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(, collect_max_inflight = $collect_max_inflight:expr)? $(,)?) => {
+        // Generated, per-library factory to avoid exposing generic extension points.
+        struct __NgComponentDriverFactory {
+            model_convert: $model_convert,
+        }
+
+        impl __NgComponentDriverFactory {
+            /// Create a new factory instance.
+            ///
+            /// # Notes
+            /// This MUST be low-frequency and MUST NOT perform any I/O.
+            #[inline]
+            fn new() -> Self {
+                Self {
+                    model_convert: <$model_convert as ::core::default::Default>::default(),
+                }
+            }
+        }
+
+        impl ::core::default::Default for __NgComponentDriverFactory {
+            #[inline]
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $crate::DriverFactory for __NgComponentDriverFactory {
+            fn create_driver(
+                &self,
+                ctx: $crate::SouthwardInitContext,
+            ) -> $crate::DriverResult<Box<dyn $crate::Driver>> {
+                // Compile-time contract checks (clear error messages for implementers).
+                fn __assert_handle_is_southward_handle<H: $crate::SouthwardHandle>() {}
+                __assert_handle_is_southward_handle::<<$component as $crate::supervision::Connector>::Handle>();
+
+                // Compile-time contract check:
+                // `Connector::InitContext` MUST be exactly `SouthwardInitContext`.
+                fn __assert_init_ctx_is_southward_init_context<C>()
+                where
+                    C: $crate::supervision::Connector<InitContext = $crate::SouthwardInitContext>,
+                {
+                }
+                __assert_init_ctx_is_southward_init_context::<$component>();
+
+                use $crate::export::tracing::info_span;
+                let span = info_span!(
+                    "southward-driver",
+                    channel_id = ctx.channel_id,
+                    driver_type = $driver_type
+                );
+
+                // NOTE: `Connector::new(ctx)` MUST be sync and MUST NOT perform I/O.
+                let observer = ctx.observer_factory.create_southward(
+                    $crate::supervision::SouthwardObserverLabels {
+                        channel_id: ctx.channel_id,
+                        driver_kind: ::std::sync::Arc::<str>::from($driver_type),
+                    }
+                );
+
+                // IMPORTANT:
+                // Southward retry/backoff policy is configured per-channel via
+                // `runtime_channel.connection_policy().backoff`.
+                //
+                // If we used `SupervisorParams::default()` here, any DB/UI config
+                // like `maxAttempts` would be ignored and drivers would retry forever.
+                let retry_policy = ctx.runtime_channel.connection_policy().backoff.clone();
+
+                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+
+                let params = $crate::supervision::SupervisorParams {
+                    retry_policy,
+                    reconnect_queue: 8,
+                };
+                let (loop_, _state_rx) = $crate::supervision::SupervisorLoop::new_with_span(
+                    connector,
+                    params,
+                    observer,
+                    span,
+                );
+
+                let collect_max_inflight: usize = 1usize;
+                $(let collect_max_inflight: usize = $collect_max_inflight;)?
+                let driver = $crate::SupervisedDriver::new_with_collect_max_inflight(loop_, collect_max_inflight);
+                Ok(Box::new(driver))
+            }
+
+            fn convert_runtime_channel(
+                &self,
+                channel: $crate::ChannelModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeChannel>> {
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_channel(
+                    &self.model_convert,
+                    channel,
+                )
+            }
+
+            fn convert_runtime_device(
+                &self,
+                device: $crate::DeviceModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeDevice>> {
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_device(
+                    &self.model_convert,
+                    device,
+                )
+            }
+
+            fn convert_runtime_point(
+                &self,
+                point: $crate::PointModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimePoint>> {
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_point(
+                    &self.model_convert,
+                    point,
+                )
+            }
+
+            fn convert_runtime_action(
+                &self,
+                action: $crate::ActionModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeAction>> {
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_action(
+                    &self.model_convert,
+                    action,
+                )
+            }
+        }
+
+        $crate::ng_driver_factory!(
+            @core name = $name,
+            description = Some($description),
+            driver_type = $driver_type,
+            factory_ty = __NgComponentDriverFactory,
+            factory_ctor = || __NgComponentDriverFactory::new(),
+            metadata_fn = $metadata_fn,
+            channel_capacity = 100 $(+ $cap * 0 + $cap)?
+        );
+    };
+
+    // Final form (component + model_convert): NO description.
+    (name = $name:expr, driver_type = $driver_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(, collect_max_inflight = $collect_max_inflight:expr)? $(,)?) => {
+        // Reuse the same generated factory, but export NULL description.
+        struct __NgComponentDriverFactory {
+            model_convert: $model_convert,
+        }
+
+        impl __NgComponentDriverFactory {
+            #[inline]
+            fn new() -> Self {
+                Self {
+                    model_convert: <$model_convert as ::core::default::Default>::default(),
+                }
+            }
+        }
+
+        impl ::core::default::Default for __NgComponentDriverFactory {
+            #[inline]
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $crate::DriverFactory for __NgComponentDriverFactory {
+            fn create_driver(
+                &self,
+                ctx: $crate::SouthwardInitContext,
+            ) -> $crate::DriverResult<Box<dyn $crate::Driver>> {
+                fn __assert_handle_is_southward_handle<H: $crate::SouthwardHandle>() {}
+                __assert_handle_is_southward_handle::<<$component as $crate::supervision::Connector>::Handle>();
+
+                // Compile-time contract check:
+                // `Connector::InitContext` MUST be exactly `SouthwardInitContext`.
+                fn __assert_init_ctx_is_southward_init_context<C>()
+                where
+                    C: $crate::supervision::Connector<InitContext = $crate::SouthwardInitContext>,
+                {
+                }
+                __assert_init_ctx_is_southward_init_context::<$component>();
+
+                use $crate::export::tracing::info_span;
+                let span = info_span!(
+                    "southward-driver",
+                    channel_id = ctx.channel_id,
+                    driver_type = $driver_type
+                );
+
+                let observer = ctx.observer_factory.create_southward(
+                    $crate::supervision::SouthwardObserverLabels {
+                        channel_id: ctx.channel_id,
+                        driver_kind: ::std::sync::Arc::<str>::from($driver_type),
+                    }
+                );
+
+                // IMPORTANT: honor per-channel retry policy from `ConnectionPolicy`.
+                let retry_policy = ctx.runtime_channel.connection_policy().backoff.clone();
+
+                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+
+                let params = $crate::supervision::SupervisorParams {
+                    retry_policy,
+                    reconnect_queue: 8,
+                };
+                let (loop_, _state_rx) = $crate::supervision::SupervisorLoop::new_with_span(
+                    connector,
+                    params,
+                    observer,
+                    span,
+                );
+
+                let collect_max_inflight: usize = 1usize;
+                $(let collect_max_inflight: usize = $collect_max_inflight;)?
+                let driver = $crate::SupervisedDriver::new_with_collect_max_inflight(loop_, collect_max_inflight);
+                Ok(Box::new(driver))
+            }
+
+            fn convert_runtime_channel(
+                &self,
+                channel: $crate::ChannelModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeChannel>> {
+                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_channel(
+                    &self.model_convert,
+                    channel,
+                )
+            }
+
+            fn convert_runtime_device(
+                &self,
+                device: $crate::DeviceModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeDevice>> {
+                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_device(
+                    &self.model_convert,
+                    device,
+                )
+            }
+
+            fn convert_runtime_point(
+                &self,
+                point: $crate::PointModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimePoint>> {
+                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_point(
+                    &self.model_convert,
+                    point,
+                )
+            }
+
+            fn convert_runtime_action(
+                &self,
+                action: $crate::ActionModel,
+            ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeAction>> {
+                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_action(
+                    &self.model_convert,
+                    action,
+                )
+            }
+        }
+
+        $crate::ng_driver_factory!(
+            @core name = $name,
+            description = None,
+            driver_type = $driver_type,
+            factory_ty = __NgComponentDriverFactory,
+            factory_ctor = || __NgComponentDriverFactory::new(),
+            metadata_fn = $metadata_fn,
+            channel_capacity = 100 $(+ $cap * 0 + $cap)?
+        );
+    };
+
     // Private core to eliminate duplication. Accepts Option description.
-    (@core name = $name:expr, description = $desc_opt:expr, driver_type = $driver_type:expr, factory = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path, channel_capacity = $cap:expr) => {
+    (@core name = $name:expr, description = $desc_opt:expr, driver_type = $driver_type:expr, factory_ty = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path, channel_capacity = $cap:expr) => {
         #[no_mangle]
         pub extern "C" fn ng_driver_api_version() -> u32 {
             $crate::sdk::sdk_api_version()
@@ -288,10 +552,10 @@ macro_rules! ng_driver_factory {
                                 status_changed,
                             } => added
                                 .first()
-                                .or_else(|| updated.first())
-                                .or_else(|| removed.first())
+                                .or(updated.first())
+                                .or(removed.first())
                                 .map(|d| d.channel_id())
-                                .or_else(|| status_changed.first().map(|(d, _)| d.channel_id())),
+                                .or(status_changed.first().map(|(d, _)| d.channel_id())),
                             $crate::RuntimeDelta::PointsChanged { device, .. } => Some(device.channel_id()),
                             $crate::RuntimeDelta::ActionsChanged { device, .. } => Some(device.channel_id()),
                         }
@@ -497,12 +761,8 @@ macro_rules! ng_driver_factory {
                 reply_rx.await.map_err(|_| $crate::DriverError::ExecutionError("Driver task cancelled".to_string()))?
             }
 
-            fn subscribe_connection_state(&self) -> tokio::sync::watch::Receiver<$crate::SouthwardConnectionState> {
+            fn subscribe_connection_state(&self) -> tokio::sync::watch::Receiver<std::sync::Arc<$crate::ConnectionState>> {
                 self.inner.subscribe_connection_state()
-            }
-
-            async fn health_check(&self) -> $crate::DriverResult<$crate::DriverHealth> {
-                self.inner.health_check().await
             }
         }
 
@@ -615,58 +875,6 @@ macro_rules! ng_driver_factory {
             let handle = NG_RUNTIME.handle().clone();
             $crate::log::init_driver_tracing(handle, debug);
         }
-    };
-
-    // Public API: with explicit constructor and description
-    (name = $name:expr, description = $description:expr, driver_type = $driver_type:expr, factory = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_driver_factory!(
-            @core name = $name,
-            description = Some($description),
-            driver_type = $driver_type,
-            factory = $factory,
-            factory_ctor = $ctor,
-            metadata_fn = $metadata_fn,
-            channel_capacity = 100 $(+ $cap * 0 + $cap)?
-        );
-    };
-
-    // Public API: default constructor and description (preferred order)
-    (name = $name:expr, description = $description:expr, driver_type = $driver_type:expr, factory = $factory:ty, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_driver_factory!(
-            @core name = $name,
-            description = Some($description),
-            driver_type = $driver_type,
-            factory = $factory,
-            factory_ctor = || <$factory as ::core::default::Default>::default(),
-            metadata_fn = $metadata_fn,
-            channel_capacity = 100 $(+ $cap * 0 + $cap)?
-        );
-    };
-
-    // Public API: with explicit constructor and NO description
-    (name = $name:expr, driver_type = $driver_type:expr, factory = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_driver_factory!(
-            @core name = $name,
-            description = None,
-            driver_type = $driver_type,
-            factory = $factory,
-            factory_ctor = $ctor,
-            metadata_fn = $metadata_fn,
-            channel_capacity = 100 $(+ $cap * 0 + $cap)?
-        );
-    };
-
-    // Public API: default constructor and NO description
-    (name = $name:expr, driver_type = $driver_type:expr, factory = $factory:ty, metadata_fn = $metadata_fn:path $(, channel_capacity = $cap:expr)?) => {
-        $crate::ng_driver_factory!(
-            @core name = $name,
-            description = None,
-            driver_type = $driver_type,
-            factory = $factory,
-            factory_ctor = || <$factory as ::core::default::Default>::default(),
-            metadata_fn = $metadata_fn,
-            channel_capacity = 100 $(+ $cap * 0 + $cap)?
-        );
     };
 }
 
@@ -819,19 +1027,16 @@ pub trait Driver: DowncastSync + Send + Sync {
         timeout_ms: Option<u64>,
     ) -> DriverResult<WriteResult>;
 
-    /// Subscribe to connection state updates.
+    /// Subscribe to structured connection state updates.
     ///
-    /// Implementations must return a `watch::Receiver<ConnectionState>` which reflects
-    /// the driver's current connectivity. The receiver should be valid and must never block.
-    fn subscribe_connection_state(&self) -> Receiver<SouthwardConnectionState>;
+    /// Implementations must return a `watch::Receiver<Arc<ConnectionState>>` which reflects
+    /// the driver's current connectivity as a **snapshot stream** (watch semantics).
+    fn subscribe_connection_state(&self) -> watch::Receiver<Arc<ConnectionState>>;
 
     /// Apply runtime delta (default no-op)
     async fn apply_runtime_delta(&self, _delta: RuntimeDelta) -> DriverResult<()> {
         Ok(())
     }
-
-    /// Get driver health status
-    async fn health_check(&self) -> DriverResult<DriverHealth>;
 }
 
 /// Driver-layer write result (Driver -> Gateway).

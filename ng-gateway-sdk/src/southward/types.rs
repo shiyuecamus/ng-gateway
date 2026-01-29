@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::fmt::{self, Display, Formatter};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i16)]
@@ -78,114 +77,6 @@ pub enum AccessMode {
 pub enum DataPointType {
     Attribute = 0,
     Telemetry = 1,
-}
-
-/// Health status enumeration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HealthStatus {
-    Healthy,
-    Degraded,
-    Unhealthy,
-    Unknown,
-}
-
-/// Channel connection state
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SouthwardConnectionState {
-    Disconnected,
-    Connecting,
-    Connected,
-    Reconnecting,
-    /// Failed with a human-readable reason string
-    Failed(String),
-}
-
-impl SouthwardConnectionState {
-    #[inline]
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected)
-    }
-
-    #[inline]
-    pub fn is_disconnected(&self) -> bool {
-        matches!(self, Self::Disconnected)
-    }
-
-    #[inline]
-    pub fn is_connecting(&self) -> bool {
-        matches!(self, Self::Connecting)
-    }
-    #[inline]
-    pub fn is_reconnecting(&self) -> bool {
-        matches!(self, Self::Reconnecting)
-    }
-
-    #[inline]
-    pub fn is_failed(&self) -> bool {
-        matches!(self, Self::Failed(_))
-    }
-
-    #[inline]
-    pub fn as_value(&self) -> i64 {
-        match self {
-            Self::Disconnected => 0,
-            Self::Connecting => 1,
-            Self::Connected => 2,
-            Self::Reconnecting => 3,
-            Self::Failed(_) => 4,
-        }
-    }
-}
-
-impl serde::Serialize for SouthwardConnectionState {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let s = match self {
-            Self::Disconnected => "Disconnected",
-            Self::Connecting => "Connecting",
-            Self::Connected => "Connected",
-            Self::Reconnecting => "Reconnecting",
-            Self::Failed(_) => "Failed",
-        };
-        serializer.serialize_str(s)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SouthwardConnectionState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "Disconnected" => Ok(Self::Disconnected),
-            "Connecting" => Ok(Self::Connecting),
-            "Connected" => Ok(Self::Connected),
-            "Reconnecting" => Ok(Self::Reconnecting),
-            "Failed" => Ok(Self::Failed(String::new())),
-            _ => Err(serde::de::Error::unknown_variant(
-                &s,
-                &[
-                    "Disconnected",
-                    "Connecting",
-                    "Connected",
-                    "Reconnecting",
-                    "Failed",
-                ],
-            )),
-        }
-    }
-}
-
-impl Display for SouthwardConnectionState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            SouthwardConnectionState::Failed(reason) => write!(f, "Failed({})", reason),
-            other => write!(f, "{:?}", other),
-        }
-    }
 }
 
 /// Device operational state

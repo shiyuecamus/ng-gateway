@@ -6,15 +6,14 @@ use common::{
 };
 use ng_driver_modbus::{
     types::{ModbusAction, ModbusFunctionCode, ModbusParameter},
-    ModbusDriver,
+    ModbusConnector,
 };
 use ng_gateway_sdk::{
-    AccessMode, DataType, Driver, NGValue, RuntimeAction, SouthwardConnectionState, Transform,
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
+    AccessMode, DataType, Driver, NGValue, RuntimeAction, SupervisedDriver, Transform,
 };
 use std::{sync::Arc, time::Duration};
 
-// 定义动作测试所需的点位 (主要为了让驱动能启动并连接)
-// 这里我们只定义一个用于测试写入的点位
 fn get_test_points() -> Vec<TestPointConfig> {
     vec![TestPointConfig {
         name: "hr_0".to_string(),
@@ -66,12 +65,14 @@ async fn test_modbus_tcp_actions() {
     let (ctx, device_arc, _runtime_points) = build_init_context(channel, device, points);
 
     // 3. 创建驱动实例
-    let driver = match ModbusDriver::with_context(ctx) {
-        Ok(d) => d,
-        Err(e) => {
-            panic!("Failed to create ModbusDriver: {e}");
-        }
-    };
+    let connector = <ModbusConnector as Connector>::new(ctx)
+        .unwrap_or_else(|e| panic!("Failed to create ModbusConnector: {e}"));
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<ModbusConnector> = SupervisedDriver::new(loop_);
 
     // 4. 启动驱动
     if let Err(e) = driver.start().await {
@@ -86,7 +87,7 @@ async fn test_modbus_tcp_actions() {
         loop {
             let state = conn_rx.borrow().clone();
             tracing::debug!("Current connection state: {:?}", state);
-            if matches!(state, SouthwardConnectionState::Connected) {
+            if state.is_connected() {
                 break;
             }
             if conn_rx.changed().await.is_err() {

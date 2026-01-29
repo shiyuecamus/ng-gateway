@@ -4,6 +4,7 @@ pub mod mqtt;
 pub mod northward;
 mod retry;
 mod southward;
+pub mod supervision;
 mod transform;
 mod ui_schema;
 mod value;
@@ -48,7 +49,8 @@ pub use northward::{
     },
     probe::{discover_north_libraries_in_dir, probe_north_library, NorthwardProbeInfo},
     runtime_api::NorthwardRuntimeApi,
-    types::{AlarmSeverity, DropPolicy, NorthwardConnectionState, TargetType},
+    supervised::{NorthwardHandle, SupervisedPlugin},
+    types::{AlarmSeverity, DropPolicy, TargetType},
     EventReceiver, NorthwardData, NorthwardEvent, NorthwardInitContext, NorthwardPublisher, Plugin,
     PluginConfig, PluginFactory,
 };
@@ -56,19 +58,17 @@ pub use retry::{build_exponential_backoff, RetryController, RetryDecision, Retry
 pub use southward::{
     codec::ValueCodec,
     model::{
-        ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverHealth, DriverMetrics,
-        Parameter, PointModel, SouthwardInitContext,
+        ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverMetrics, Parameter,
+        PointModel, SouthwardInitContext,
     },
     probe::{probe_driver_library, DriverProbeInfo},
+    supervised::{SouthwardHandle, SupervisedDriver},
     transport::{
         bind_udp_metered, bind_udp_metered_with_timeout, connect_serial_metered,
         connect_tcp_metered, connect_tcp_metered_with_timeout, MeteredStream, MeteredUdpSocket,
         NoopSouthwardTransportMeter, SerialConnectConfig, SouthwardTransportMeter,
     },
-    types::{
-        AccessMode, CollectionType, DataPointType, DataType, DeviceState, HealthStatus, ReportType,
-        SouthwardConnectionState, Status,
-    },
+    types::{AccessMode, CollectionType, DataPointType, DataType, DeviceState, ReportType, Status},
     validation::{
         downcast_parameters, resolve_action_inputs_typed, validate_action_parameters,
         validate_and_resolve_action_inputs,
@@ -77,6 +77,10 @@ pub use southward::{
     CollectItem, CollectionGroupKey, Driver, DriverConfig, DriverFactory, ExecuteOutcome,
     ExecuteResult, RuntimeAction, RuntimeChannel, RuntimeDelta, RuntimeDevice, RuntimeParameter,
     RuntimePoint, WriteOutcome, WriteResult,
+};
+pub use supervision::{
+    ConnectionState, FailureKind, FailurePhase, FailureReport, HandleCell, Phase,
+    RetryBudgetSnapshot,
 };
 pub use transform::Transform;
 pub use ui_schema::{

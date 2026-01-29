@@ -10,11 +10,10 @@
 use crate::{
     collector::NGCollector,
     commands::{gateway_command_registry, GetStatusHandler},
-    driver::{DriverLoader, DriverRegistry},
     lifecycle::StartPolicy,
     northward::{NGNorthwardManager, NorthwardEventsBus, NorthwardLoader},
     realtime::NGRealtimeMonitorHub,
-    southward::{NGSouthwardManager, SouthwardDataBus},
+    southward::{NGSouthwardManager, SouthwardDataBus, SouthwardLoader},
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -88,7 +87,7 @@ type SharedEventsReceiver = Shared<Option<EventsReceiver>>;
 /// - This is best-effort and MUST be non-blocking.
 /// - It closes the semantics loop for "lease expiry" (cleanup loop) without requiring web handlers.
 struct DriverLogOverrideSink {
-    driver_loader: DriverLoader,
+    driver_loader: SouthwardLoader,
     index: Arc<crate::southward::index::RuntimeIndex>,
 }
 
@@ -184,9 +183,8 @@ pub struct NGGateway {
     /// This is intentionally **not** a global singleton. The gateway owns it and
     /// passes it explicitly to subsystems that need to register or update metrics.
     metrics_hub: Arc<NGMetricsHub>,
-    /// Driver registry and loader
-    driver_registry: DriverRegistry,
-    driver_loader: DriverLoader,
+    /// Southward loader
+    southward_loader: SouthwardLoader,
 
     /// Northward plugin loader
     northward_loader: Arc<NorthwardLoader>,
@@ -275,8 +273,8 @@ impl Gateway for NGGateway {
         let northward_events_bus = Arc::new(NorthwardEventsBus::new(northward_events_tx));
 
         // Initialize driver system
-        let driver_registry = Arc::new(DashMap::new());
-        let driver_loader = DriverLoader::new(driver_registry.clone());
+        let southward_registry = Arc::new(DashMap::new());
+        let southward_loader = SouthwardLoader::new(southward_registry.clone());
 
         // Load enabled drivers for current platform from DB and register
         let enabled = DriverRepository::find_by_platform(os_type, os_arch, Some(&conn))
@@ -294,13 +292,13 @@ impl Gateway for NGGateway {
                 Some((m.id, path_str))
             })
             .collect();
-        driver_loader.load_all(&id_paths).await;
+        southward_loader.load_all(&id_paths).await;
 
         // Initialize southward manager (owns snapshot GC config).
         // Use Arc to avoid repeated multi-Arc clones for hot-reloadable settings.
         let southward_cfg = Arc::new(settings.general.southward.clone());
         let southward_manager = Arc::new(NGSouthwardManager::new(
-            Arc::clone(&driver_registry),
+            southward_registry,
             Arc::clone(&metrics_hub),
             Arc::clone(&southward_cfg),
         ));
@@ -314,14 +312,14 @@ impl Gateway for NGGateway {
         // Best-effort: install once and align all loaded drivers to current effective global level.
         if let Some(rt) = log_control::global() {
             let installed = log_control::set_change_sink(Arc::new(DriverLogOverrideSink {
-                driver_loader: driver_loader.clone(),
+                driver_loader: southward_loader.clone(),
                 index: southward_manager.runtime_index(),
             }));
             if !installed {
                 warn!("Log override change sink already installed; skipping");
             }
             let desired: u8 = rt.overrides().effective_global_level().into();
-            let _ = driver_loader.set_max_level_all(desired);
+            let _ = southward_loader.set_max_level_all(desired);
         }
 
         // Initialize channels and devices
@@ -338,7 +336,7 @@ impl Gateway for NGGateway {
 
         // Start channels (monitors are spawned inside)
         southward_manager
-            .start_channels(&southward_data_bus)
+            .start_channels()
             .await
             .map_err(|e| InitContextError::Primitive(format!("Failed to start channels: {e}")))?;
 
@@ -389,8 +387,7 @@ impl Gateway for NGGateway {
             metrics_hub: Arc::clone(&metrics_hub),
             northward_manager,
             northward_loader,
-            driver_registry,
-            driver_loader,
+            southward_loader,
             southward_manager: Arc::clone(&southward_manager),
             collector: Arc::new(NGCollector::new(
                 settings.general.collector.clone(),
@@ -1188,7 +1185,7 @@ impl DriverRuntimeCmd for NGGateway {
         }
 
         let _ = self
-            .driver_loader
+            .southward_loader
             .load_driver_library(file_path, driver_id)
             .await
             .map_err(|e| NGError::DriverError(e.to_string()))?;
@@ -1205,7 +1202,7 @@ impl DriverRuntimeCmd for NGGateway {
         }
 
         // Unregister registry entry if exists
-        self.driver_loader.unregister(driver_id).await;
+        self.southward_loader.unregister(driver_id).await;
         // Remove file best-effort
         let _ = fs::remove_file(file_path).await;
         Ok(())
@@ -1659,7 +1656,7 @@ impl NGGateway {
     /// Handle a single northward event (unified logic, aligned with new event design)
     ///
     /// This method processes business events from northward plugins.
-    /// Connection lifecycle events are now handled via `watch::Receiver<NorthwardConnectionState>`
+    /// Connection lifecycle events are now handled via `watch::Receiver<Arc<ConnectionState>>`
     /// in AppActor's connection monitor task.
     ///
     /// # Event Types (Business Events Only)
@@ -2091,11 +2088,10 @@ impl NGGateway {
         southward_manager: &Arc<NGSouthwardManager>,
         metrics_hub: &Arc<NGMetricsHub>,
     ) -> ClientRpcResponse {
-        let device_id = cmd.device_id.or_else(|| {
-            cmd.device_name
-                .as_ref()
-                .and_then(|name| southward_manager.find_device_id_by_name(name.as_str()))
-        });
+        let device_id = cmd.device_id.or(cmd
+            .device_name
+            .as_ref()
+            .and_then(|name| southward_manager.find_device_id_by_name(name.as_str())));
         if let Some(id) = device_id {
             match execute_action_direct(
                 southward_manager,
@@ -2179,12 +2175,6 @@ impl NGGateway {
     /// Get collection engine reference
     pub fn get_collector(&self) -> &NGCollector {
         &self.collector
-    }
-
-    #[inline]
-    /// Get driver registry reference
-    pub fn get_driver_registry(&self) -> &DriverRegistry {
-        &self.driver_registry
     }
 
     /// Pause the gateway (stop collection but keep connections)

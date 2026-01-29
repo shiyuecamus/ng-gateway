@@ -300,6 +300,16 @@ pub struct SessionEventLoop {
 }
 
 impl SessionEventLoop {
+    /// Clone the internal cancellation token used by the IO driver.
+    ///
+    /// # Notes
+    /// - Calling `cancel()` on the returned token will stop the IO driver task spawned by `enter/spawn`.
+    /// - This is required by the SDK supervision layer to avoid leaking background tasks across reconnect attempts.
+    #[inline]
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.inner_cancel.clone()
+    }
+
     pub fn enter(self) -> impl Stream<Item = SessionEvent> {
         let session = Arc::clone(&self.session);
         let events_rx = session.subscribe_events();

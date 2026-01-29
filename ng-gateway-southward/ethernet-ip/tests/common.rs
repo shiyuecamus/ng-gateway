@@ -2,9 +2,10 @@ use ng_driver_ethernet_ip::types::{
     EthernetIpChannel, EthernetIpChannelConfig, EthernetIpDevice, EthernetIpPoint,
 };
 use ng_gateway_sdk::{
-    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType,
-    NoopSouthwardTransportMeter, NorthwardData, NorthwardPublisher, ReportType, RuntimeChannel,
-    RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform,
+    supervision::NoopObserverFactory, AccessMode, CollectionType, ConnectionPolicy,
+    ConnectionState, DataPointType, DataType, NoopSouthwardTransportMeter, NorthwardData,
+    NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -144,6 +145,7 @@ pub fn build_init_context(
         publisher: Arc::new(TestPublisher),
         channel_id,
         transport_meter: Arc::new(NoopSouthwardTransportMeter),
+        observer_factory: Arc::new(NoopObserverFactory),
     };
 
     (ctx, device_arc, runtime_points)
@@ -151,13 +153,13 @@ pub fn build_init_context(
 
 /// Wait until connection state becomes `Connected` or timeout.
 pub async fn wait_connected(
-    mut conn_rx: tokio::sync::watch::Receiver<ng_gateway_sdk::SouthwardConnectionState>,
+    mut conn_rx: tokio::sync::watch::Receiver<Arc<ConnectionState>>,
     timeout_dur: Duration,
 ) -> anyhow::Result<()> {
     let res = tokio::time::timeout(timeout_dur, async move {
         loop {
             let state = conn_rx.borrow().clone();
-            if matches!(state, ng_gateway_sdk::SouthwardConnectionState::Connected) {
+            if state.is_connected() {
                 return Ok(());
             }
             if conn_rx.changed().await.is_err() {

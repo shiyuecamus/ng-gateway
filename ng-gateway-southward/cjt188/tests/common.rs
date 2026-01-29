@@ -3,9 +3,9 @@ use ng_driver_cjt188::types::{
     MeterType,
 };
 use ng_gateway_sdk::{
-    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType,
-    NoopSouthwardTransportMeter, NorthwardData, NorthwardPublisher, ReportType, RuntimeChannel,
-    RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform,
+    supervision::NoopObserverFactory, AccessMode, CollectionType, ConnectionPolicy, DataPointType,
+    DataType, NoopSouthwardTransportMeter, NorthwardData, NorthwardPublisher, ReportType,
+    RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -145,6 +145,7 @@ pub fn build_init_context(
         publisher: Arc::new(TestPublisher),
         channel_id,
         transport_meter: Arc::new(NoopSouthwardTransportMeter),
+        observer_factory: Arc::new(NoopObserverFactory),
     };
 
     (ctx, device_arc, runtime_points)

@@ -1,4 +1,4 @@
-use crate::config::{ConnectionConfig, ProvisionMethod};
+use super::config::{ConnectionConfig, ProvisionMethod};
 use ng_gateway_sdk::{ExtensionManager, ExtensionManagerExt, NorthwardError, NorthwardResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -277,7 +277,7 @@ pub async fn load_or_prepare_credentials(
         } => {
             // Direct connection with pre-configured credentials
             Ok(Some(ProvisionCredentials::MqttBasic {
-                client_id: client_id.clone().unwrap_or_else(generate_client_id),
+                client_id: client_id.clone().unwrap_or(generate_client_id()),
                 username: username.clone(),
                 password: password.clone(),
             }))

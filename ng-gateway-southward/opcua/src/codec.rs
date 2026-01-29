@@ -75,7 +75,7 @@ impl OpcUaCodec {
                 // Numeric (fast) path.
                 Self::numeric_as_f64(value).and_then(|n| {
                     ValueCodec::coerce_f64_to_value(n, expected, t)
-                        .or_else(|| ValueCodec::coerce_bool_to_value(n != 0.0, expected, t))
+                        .or(ValueCodec::coerce_bool_to_value(n != 0.0, expected, t))
                 })
             }
         }

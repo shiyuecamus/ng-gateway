@@ -382,7 +382,7 @@ fn parse_f64_from_str(target: &'static str, s: &str) -> Result<f64, NGValueCastE
     }
 
     // Support common "0x..." hex integers (e.g. configs / PLC parameters).
-    let parsed = if let Some(hex) = st.strip_prefix("0x").or_else(|| st.strip_prefix("0X")) {
+    let parsed = if let Some(hex) = st.strip_prefix("0x").or(st.strip_prefix("0X")) {
         let n = u64::from_str_radix(hex.trim(), 16).map_err(|_| NGValueCastError::ParseError {
             target,
             value: st.to_string(),
@@ -423,7 +423,7 @@ fn parse_i64_from_str(target: &'static str, s: &str) -> Result<i64, NGValueCastE
         Some(b'-') => (-1i128, &st[1..]),
         _ => (1i128, st),
     };
-    if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+    if let Some(hex) = rest.strip_prefix("0x").or(rest.strip_prefix("0X")) {
         let u = u64::from_str_radix(hex.trim(), 16).map_err(|_| NGValueCastError::ParseError {
             target,
             value: st.to_string(),
@@ -460,7 +460,7 @@ fn parse_u64_from_str(target: &'static str, s: &str) -> Result<u64, NGValueCastE
     }
 
     // Hex integer (no sign for u64).
-    if let Some(hex) = st.strip_prefix("0x").or_else(|| st.strip_prefix("0X")) {
+    if let Some(hex) = st.strip_prefix("0x").or(st.strip_prefix("0X")) {
         return u64::from_str_radix(hex.trim(), 16).map_err(|_| NGValueCastError::ParseError {
             target,
             value: st.to_string(),

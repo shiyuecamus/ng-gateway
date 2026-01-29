@@ -59,7 +59,7 @@ impl TryFrom<&str> for Tsap {
             .map_err(|_| S7Error::InvalidSlot(0xFF))?;
             return Ok(Tsap(high, low));
         }
-        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        if let Some(hex) = s.strip_prefix("0x").or(s.strip_prefix("0X")) {
             let v = u16::from_str_radix(hex, 16).map_err(|_| S7Error::InvalidRack(0xFF))?;
             return Ok(Tsap(((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8));
         }

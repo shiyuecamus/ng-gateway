@@ -1,6 +1,6 @@
 use crate::enums::core::GatewayState;
 use chrono::{DateTime, Duration, Utc};
-use ng_gateway_sdk::{DeviceState, HealthStatus, SouthwardConnectionState};
+use ng_gateway_sdk::{ConnectionState, DeviceState};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
@@ -294,9 +294,7 @@ pub struct ChannelStatsSnapshot {
     /// Driver name.
     pub driver_name: String,
     /// Connection state.
-    pub state: SouthwardConnectionState,
-    /// Health status.
-    pub health: Option<HealthStatus>,
+    pub state: ConnectionState,
     /// Number of devices on this channel.
     pub device_count: usize,
     /// Performance metrics snapshot.
@@ -319,10 +317,10 @@ pub struct NorthwardAppStatsSnapshot {
     pub plugin_id: i32,
     /// App name.
     pub name: String,
-    /// App state (running, stopped, etc.).
-    pub state: AppActorState,
-    /// Connection status.
-    pub is_connected: bool,
+    /// App actor state (lifecycle: starting/running/stopping).
+    pub actor_state: AppActorState,
+    /// Unified connection state snapshot for this app (plugin supervision loop).
+    pub connection_state: ConnectionState,
     /// Performance metrics snapshot.
     pub metrics: NorthwardAppMetricsSnapshot,
 }

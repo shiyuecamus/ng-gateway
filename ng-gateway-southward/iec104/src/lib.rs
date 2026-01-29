@@ -1,11 +1,13 @@
-mod driver;
-mod factory;
+mod connector;
+mod converter;
+mod handle;
 mod metadata;
 pub mod protocol;
-mod supervisor;
+mod session;
 mod types;
 
-use factory::Iec104DriverFactory;
+use connector::Iec104Connector;
+use converter::Iec104Converter;
 use metadata::build_metadata;
 use ng_gateway_sdk::ng_driver_factory;
 
@@ -14,6 +16,8 @@ ng_driver_factory!(
     name = "IEC 60870-5-104",
     description = "IEC104 protocol driver",
     driver_type = "iec104",
-    factory = Iec104DriverFactory,
-    metadata_fn = build_metadata
+    component = Iec104Connector,
+    metadata_fn = build_metadata,
+    model_convert = Iec104Converter,
+    collect_max_inflight = 8
 );

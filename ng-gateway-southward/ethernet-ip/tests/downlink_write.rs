@@ -1,11 +1,12 @@
 mod common;
 
 use common::{build_init_context, build_test_topology, init_tracing, wait_connected};
-use ng_driver_ethernet_ip::driver::EthernetIpDriver;
 use ng_driver_ethernet_ip::types::{EthernetIpAction, EthernetIpParameter};
+use ng_driver_ethernet_ip::EthernetIpConnector;
 use ng_gateway_sdk::{
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
     validate_and_resolve_action_inputs, AccessMode, DataType, Driver, ExecuteOutcome, NGValue,
-    NorthwardData, RuntimeAction, Transform,
+    NorthwardData, RuntimeAction, SupervisedDriver, Transform,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -33,13 +34,19 @@ async fn downlink_write_point() -> anyhow::Result<()> {
         build_test_topology(host, port, slot, timeout_ms, &tags, AccessMode::ReadWrite);
     let (ctx, device_arc, runtime_points) = build_init_context(channel, device, points);
 
-    let driver = EthernetIpDriver::with_context(ctx)
-        .map_err(|e| anyhow::anyhow!("failed to create EthernetIpDriver: {e}"))?;
+    let connector = <EthernetIpConnector as Connector>::new(ctx)
+        .map_err(|e| anyhow::anyhow!("failed to create EthernetIpConnector: {e}"))?;
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<EthernetIpConnector> = SupervisedDriver::new(loop_);
 
     driver
         .start()
         .await
-        .map_err(|e| anyhow::anyhow!("EthernetIpDriver::start failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("EthernetIp::start failed: {e}"))?;
 
     wait_connected(driver.subscribe_connection_state(), Duration::from_secs(10)).await?;
 
@@ -120,13 +127,19 @@ async fn downlink_execute_action_single_param() -> anyhow::Result<()> {
         build_test_topology(host, port, slot, timeout_ms, &tags, AccessMode::Read);
     let (ctx, device_arc, _runtime_points) = build_init_context(channel, device, points);
 
-    let driver = EthernetIpDriver::with_context(ctx)
-        .map_err(|e| anyhow::anyhow!("failed to create EthernetIpDriver: {e}"))?;
+    let connector = <EthernetIpConnector as Connector>::new(ctx)
+        .map_err(|e| anyhow::anyhow!("failed to create EthernetIpConnector: {e}"))?;
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<EthernetIpConnector> = SupervisedDriver::new(loop_);
 
     driver
         .start()
         .await
-        .map_err(|e| anyhow::anyhow!("EthernetIpDriver::start failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("EthernetIp::start failed: {e}"))?;
 
     wait_connected(driver.subscribe_connection_state(), Duration::from_secs(10)).await?;
 

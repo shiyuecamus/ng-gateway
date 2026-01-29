@@ -19,6 +19,7 @@ pub enum SessionLifecycleState {
 }
 
 /// Public session events for observability
+#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub enum SessionEvent {
     /// Lifecycle changed notification

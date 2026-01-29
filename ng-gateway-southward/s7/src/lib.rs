@@ -1,13 +1,15 @@
 mod codec;
-mod driver;
-mod factory;
+mod connector;
+mod converter;
+mod handle;
 mod metadata;
 #[allow(unused)]
 mod protocol;
-mod supervisor;
+mod session;
 mod types;
 
-use factory::S7DriverFactory;
+use connector::S7Connector;
+use converter::S7Converter;
 use metadata::build_metadata;
 use ng_gateway_sdk::ng_driver_factory;
 
@@ -16,6 +18,7 @@ ng_driver_factory!(
     name = "Siemens S7",
     description = "Siemens S7 protocol driver",
     driver_type = "s7",
-    factory = S7DriverFactory,
-    metadata_fn = build_metadata
+    component = S7Connector,
+    metadata_fn = build_metadata,
+    model_convert = S7Converter
 );

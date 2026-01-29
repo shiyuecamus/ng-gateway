@@ -282,7 +282,9 @@ pub async fn list(state: web::Data<Arc<AppState>>) -> WebResult<WebResponse<Vec<
     // Use trait method to get connection state without depending on concrete type
     let southward_manager = state.gateway.southward_manager();
     for channel in channels.iter_mut() {
-        channel.connection_state = southward_manager.get_channel_connection_state(channel.id);
+        channel.connection_state = southward_manager
+            .get_channel_connection_state(channel.id)
+            .map(|s| s.as_ref().clone());
     }
 
     Ok(WebResponse::ok(channels))
@@ -310,7 +312,9 @@ pub async fn page(
     // Use trait method to get connection state without depending on concrete type
     let southward_manager = state.gateway.southward_manager();
     for channel in result.records.iter_mut() {
-        channel.connection_state = southward_manager.get_channel_connection_state(channel.id);
+        channel.connection_state = southward_manager
+            .get_channel_connection_state(channel.id)
+            .map(|s| s.as_ref().clone());
     }
 
     Ok(WebResponse::ok(result))
@@ -339,7 +343,9 @@ pub async fn get_by_id(
     // Enrich with connection state from runtime manager
     // Use trait method to get connection state without depending on concrete type
     let southward_manager = state.gateway.southward_manager();
-    channel.connection_state = southward_manager.get_channel_connection_state(channel.id);
+    channel.connection_state = southward_manager
+        .get_channel_connection_state(channel.id)
+        .map(|s| s.as_ref().clone());
 
     Ok(WebResponse::ok(channel))
 }

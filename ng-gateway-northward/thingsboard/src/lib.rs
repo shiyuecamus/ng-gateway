@@ -1,18 +1,20 @@
 mod config;
-mod factory;
+mod connector;
+mod converter;
+mod handle;
 mod handlers;
 mod metadata;
 mod mqtt;
-mod plugin;
 mod provision;
-mod supervisor;
+mod session;
 mod topics;
 mod types;
 
 pub use config::{
     CommunicationConfig, ConnectionConfig, MessageFormat, ProvisionMethod, ThingsBoardPluginConfig,
 };
-use factory::ThingsBoardPluginFactory;
+use connector::ThingsBoardConnector;
+use converter::ThingsBoardConverter;
 use metadata::build_metadata;
 use ng_gateway_sdk::ng_plugin_factory;
 
@@ -21,8 +23,10 @@ ng_plugin_factory!(
     name = "ThingsBoard",
     description = "ThingsBoard northward plugin",
     plugin_type = "thingsboard",
-    factory = ThingsBoardPluginFactory,
-    metadata_fn = build_metadata
+    component = ThingsBoardConnector,
+    metadata_fn = build_metadata,
+    model_convert = ThingsBoardConverter,
+    channel_capacity = 1000
 );
 
 // Connect to provision endpoint (no auth)

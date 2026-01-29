@@ -2,20 +2,25 @@ mod common;
 
 use chrono::{TimeZone, Utc};
 use common::{build_init_context, build_test_topology_for_version, init_tracing};
-use ng_driver_dlt645::{Dl645Action, Dl645Driver, Dl645FunctionCode, Dl645Parameter, Dl645Version};
+use ng_driver_dlt645::{
+    Dl645Action, Dl645Connector, Dl645FunctionCode, Dl645Parameter, Dl645Version,
+};
 use ng_gateway_sdk::{
-    validate_and_resolve_action_inputs, DataType, Driver, RuntimeAction, SouthwardConnectionState,
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
+    validate_and_resolve_action_inputs, DataType, Driver, RuntimeAction, SupervisedDriver,
     Transform,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
+
+type Dl645Driver = SupervisedDriver<Dl645Connector>;
 
 async fn wait_connected(driver: &Dl645Driver) {
     let mut conn_rx = driver.subscribe_connection_state();
     tokio::time::timeout(Duration::from_secs(10), async move {
         loop {
             let state = conn_rx.borrow().clone();
-            if matches!(state, SouthwardConnectionState::Connected) {
+            if state.is_connected() {
                 break;
             }
             if conn_rx.changed().await.is_err() {
@@ -48,8 +53,14 @@ where
 
     let (ctx, device_arc, _runtime_points) = build_init_context(channel, device, points);
 
-    let driver = Dl645Driver::with_context(ctx)
-        .unwrap_or_else(|e| panic!("failed to create Dl645Driver (1997): {e}"));
+    let connector = <Dl645Connector as Connector>::new(ctx)
+        .unwrap_or_else(|e| panic!("create connector failed: {e}"));
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: Dl645Driver = SupervisedDriver::new(loop_);
 
     driver
         .start()

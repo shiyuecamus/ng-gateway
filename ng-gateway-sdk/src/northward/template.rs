@@ -46,7 +46,7 @@ pub fn render_template(template: &str, data: &Value) -> String {
     if let Ok(hb) = HB.read() {
         return hb
             .render(&name, data)
-            .or_else(|_| hb.render_template(template, data))
+            .or(hb.render_template(template, data))
             .unwrap_or_default();
     }
 

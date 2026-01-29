@@ -1,13 +1,14 @@
 use crate::protocol::{ChannelRuntime, PointsByDevice};
 use crate::publisher::NullPublisher;
 use ng_driver_opcua::{
-    OpcUaAuth, OpcUaChannel, OpcUaChannelConfig, OpcUaDevice, OpcUaDriver, OpcUaPoint,
+    OpcUaAuth, OpcUaChannel, OpcUaChannelConfig, OpcUaConnector, OpcUaDevice, OpcUaPoint,
     OpcUaReadMode, SecurityMode, SecurityPolicy,
 };
 use ng_gateway_sdk::{
+    supervision::{Connector, NoopObserverFactory, SupervisorLoop, SupervisorParams},
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
     NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status, Transform,
+    SouthwardInitContext, Status, SupervisedDriver, Transform,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -139,9 +140,16 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
         publisher,
         channel_id,
         transport_meter: Arc::new(NoopSouthwardTransportMeter),
+        observer_factory: Arc::new(NoopObserverFactory),
     };
 
-    let driver = OpcUaDriver::with_context(ctx)?;
+    let connector = <OpcUaConnector as Connector>::new(ctx)?;
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<OpcUaConnector> = SupervisedDriver::new(loop_);
     let driver: Arc<dyn Driver> = Arc::new(driver);
 
     Ok(ChannelRuntime {

@@ -8,8 +8,7 @@
 use crate::{config::OpcuaServerPluginConfig, write_dispatch::WriteDispatcher};
 use base64::Engine;
 use ng_gateway_sdk::{
-    AccessMode, DataType, NorthwardConnectionState, NorthwardError, NorthwardResult,
-    NorthwardRuntimeApi, PointMeta,
+    AccessMode, DataType, NorthwardError, NorthwardResult, NorthwardRuntimeApi, PointMeta,
 };
 use opcua::{
     crypto::SecurityPolicy,
@@ -30,7 +29,6 @@ use opcua::{
     },
 };
 use std::{net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -168,7 +166,6 @@ impl OpcuaServerRuntime {
         _runtime: Arc<dyn NorthwardRuntimeApi>,
         _node_cache: Arc<crate::node_cache::NodeCache>,
         write_dispatch: Arc<WriteDispatcher>,
-        conn_state_tx: watch::Sender<NorthwardConnectionState>,
         shutdown: CancellationToken,
     ) -> NorthwardResult<Self> {
         if config.port == 0 {
@@ -282,8 +279,6 @@ impl OpcuaServerRuntime {
         tokio::spawn(async move {
             let _ = server.run().await;
         });
-
-        let _ = conn_state_tx.send(NorthwardConnectionState::Connected);
 
         Ok(Self {
             handle,

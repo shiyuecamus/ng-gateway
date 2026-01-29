@@ -35,7 +35,7 @@ use ng_gateway_models::{
     enums::core::GatewayState,
     web::PrometheusTextPayload,
 };
-use ng_gateway_sdk::{HealthStatus, SouthwardConnectionState};
+use ng_gateway_sdk::ConnectionState;
 use prometheus::{Encoder, Registry, TextEncoder};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -48,8 +48,7 @@ pub struct SouthwardChannelSnapshotParams {
     pub channel_id: i32,
     pub name: String,
     pub driver_name: String,
-    pub state: SouthwardConnectionState,
-    pub health: Option<HealthStatus>,
+    pub state: Arc<ConnectionState>,
     pub device_count: usize,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_activity: chrono::DateTime<chrono::Utc>,
@@ -214,8 +213,8 @@ impl NGMetricsHub {
         app_id: i32,
         plugin_id: i32,
         name: String,
-        state: AppActorState,
-        is_connected: bool,
+        actor_state: AppActorState,
+        connection_state: Arc<ConnectionState>,
     ) -> NorthwardAppStatsSnapshot {
         let metrics = self
             .snapshot_northward_app_metrics(app_id, plugin_id)
@@ -233,8 +232,8 @@ impl NGMetricsHub {
             app_id,
             plugin_id,
             name,
-            state,
-            is_connected,
+            actor_state,
+            connection_state: (*connection_state).clone(),
             metrics,
         }
     }
@@ -367,8 +366,7 @@ impl NGMetricsHub {
             channel_id: params.channel_id,
             name: params.name,
             driver_name: params.driver_name,
-            state: params.state,
-            health: params.health,
+            state: params.state.as_ref().clone(),
             device_count: params.device_count,
             metrics,
             control_metrics,

@@ -4,9 +4,10 @@ use anyhow::Context;
 use common::{
     build_init_context, build_test_actions, build_test_topology, init_tracing, CapturingPublisher,
 };
-use ng_driver_dnp3::driver::Dnp3Driver;
+use ng_driver_dnp3::Dnp3Connector;
 use ng_gateway_sdk::{
-    validate_and_resolve_action_inputs, Driver, RuntimeAction, SouthwardConnectionState,
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
+    validate_and_resolve_action_inputs, Driver, RuntimeAction, SupervisedDriver,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -37,7 +38,14 @@ async fn dnp3_execute_actions() -> anyhow::Result<()> {
 
     let (ctx, device_arc, _runtime_points) = build_init_context(channel, device, points, pub_trait);
 
-    let driver = Dnp3Driver::with_context(ctx).context("Failed to create DNP3 driver")?;
+    let connector =
+        <Dnp3Connector as Connector>::new(ctx).context("Failed to create DNP3 connector")?;
+    let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
+        connector,
+        SupervisorParams::default(),
+        tracing::Span::current(),
+    );
+    let driver: SupervisedDriver<Dnp3Connector> = SupervisedDriver::new(loop_);
 
     driver.start().await.context("Failed to start driver")?;
 
@@ -45,7 +53,7 @@ async fn dnp3_execute_actions() -> anyhow::Result<()> {
     let mut conn_rx = driver.subscribe_connection_state();
     let wait_connect = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if matches!(*conn_rx.borrow(), SouthwardConnectionState::Connected) {
+            if conn_rx.borrow().is_connected() {
                 break;
             }
             if conn_rx.changed().await.is_err() {
@@ -63,15 +71,7 @@ async fn dnp3_execute_actions() -> anyhow::Result<()> {
             port
         );
     }
-    tracing::info!("DNP3 Connected! Waiting for association to be ready...");
-
-    // Wait for association to be available (connection may be established before association is added)
-    driver
-        .wait_association(Duration::from_secs(5))
-        .await
-        .context("Timeout waiting for DNP3 association to be ready")?;
-
-    tracing::info!("DNP3 Association ready! Executing actions...");
+    tracing::info!("DNP3 Connected! Executing actions...");
 
     // 1. Test CROB (Pulse On)
     let crob_action = actions

@@ -36,7 +36,7 @@ use ng_gateway_error::{
     storage::{CacheError, StorageError},
     NGResult,
 };
-use ng_gateway_sdk::{NorthwardConnectionState, NorthwardData, SouthwardConnectionState};
+use ng_gateway_sdk::{ConnectionState, NorthwardData};
 use sea_orm::DatabaseConnection;
 use settings::Settings;
 use std::{sync::Arc, time::Duration};
@@ -352,7 +352,7 @@ pub trait SouthwardManager: DowncastSync + Send + Sync + 'static {
     /// Get the connection state for a channel
     ///
     /// Returns `None` if the channel is not found in the runtime manager.
-    fn get_channel_connection_state(&self, channel_id: i32) -> Option<SouthwardConnectionState>;
+    fn get_channel_connection_state(&self, channel_id: i32) -> Option<Arc<ConnectionState>>;
 }
 
 /// Trait for accessing northward app connection states
@@ -360,7 +360,7 @@ pub trait NorthwardManager: DowncastSync + Send + Sync + 'static {
     /// Get the connection state for an app
     ///
     /// Returns `None` if the app is not found in the runtime manager.
-    fn get_app_connection_state(&self, app_id: i32) -> Option<NorthwardConnectionState>;
+    fn get_app_connection_state(&self, app_id: i32) -> Option<Arc<ConnectionState>>;
 }
 
 /// Trait for accessing realtime monitor hub

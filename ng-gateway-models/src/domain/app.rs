@@ -5,7 +5,7 @@ use crate::{
     initializer::SeedableTrait,
 };
 use chrono::{DateTime, Utc};
-use ng_gateway_sdk::{NorthwardConnectionState, QueuePolicy, RetryPolicy};
+use ng_gateway_sdk::{ConnectionState, QueuePolicy, RetryPolicy};
 use sea_orm::{DeriveIntoActiveModel, FromQueryResult, IntoActiveModel};
 use serde::{Deserialize, Serialize};
 use serde_aux::prelude::*;
@@ -62,7 +62,7 @@ pub struct AppInfo {
     /// Connection state from runtime manager (optional, not from database)
     #[sea_orm(skip)]
     #[serde(skip_deserializing, default)]
-    pub connection_state: Option<NorthwardConnectionState>,
+    pub connection_state: Option<ConnectionState>,
 }
 
 /// New northward app for insertion

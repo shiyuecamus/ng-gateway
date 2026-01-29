@@ -59,7 +59,7 @@ pub mod fields {
     /// Stable tracing target for driver logs re-emitted by the host.
     pub const TARGET_DRIVER: &str = "driver";
     /// Stable span name used by the host-side driver ingest bridge.
-    pub const SPAN_DRIVER_LOG: &str = "driver-log";
+    pub const SPAN_DRIVER_LOG: &str = "driver";
 
     /// Extract an `i32` from a JSON map field.
     #[inline]

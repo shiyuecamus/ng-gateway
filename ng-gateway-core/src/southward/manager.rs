@@ -1,12 +1,11 @@
-use crate::driver::DriverRegistry;
 use crate::{
     lifecycle::{start_with_policy, StartPolicy},
     southward::{
         index::{PointEntry, RuntimeIndex},
-        monitor::ChannelMonitor,
         observability::ChannelBoundTransportMeter,
+        observer::SouthwardChannelObserverFactory,
         publisher::MpscNorthwardPublisher,
-        SouthwardDataBus,
+        SouthwardDataBus, SouthwardRegistry,
     },
 };
 use chrono::{DateTime, Utc};
@@ -29,10 +28,10 @@ use ng_gateway_models::{
     SouthwardManager,
 };
 use ng_gateway_sdk::{
-    AccessMode, AttributeData, CollectionType, DeviceState, Driver, DriverFactory, DriverHealth,
-    NGValue, NorthwardData, PointMeta, ReportType, RuntimeAction, RuntimeChannel, RuntimeDelta,
-    RuntimeDevice, RuntimePoint, SouthwardConnectionState, SouthwardInitContext, Status,
-    TelemetryData,
+    AccessMode, AttributeData, CollectionType, ConnectionState, DeviceState, Driver, DriverFactory,
+    FailureKind, FailurePhase, FailureReport, NGValue, NorthwardData, Phase, PointMeta, ReportType,
+    RuntimeAction, RuntimeChannel, RuntimeDelta, RuntimeDevice, RuntimePoint, SouthwardInitContext,
+    Status, TelemetryData,
 };
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
@@ -176,7 +175,7 @@ pub struct ChannelInstance {
     pub config: Arc<dyn RuntimeChannel>,
 
     /// Connection state
-    pub state: SouthwardConnectionState,
+    pub state: Arc<ConnectionState>,
 
     /// Channel status
     pub status: Status,
@@ -190,9 +189,6 @@ pub struct ChannelInstance {
     /// `Arc<str>` makes clones cheap (no per-call allocation) and allows us to pass
     /// `&str` to Prometheus label APIs.
     pub driver_label: Arc<str>,
-
-    /// Last health check result
-    pub health: Option<DriverHealth>,
 
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
@@ -233,10 +229,7 @@ pub struct NGSouthwardManager {
     index: Arc<RuntimeIndex>,
 
     /// Driver registry for creating new drivers
-    driver_registry: DriverRegistry,
-
-    /// Channel monitor component
-    monitor: ChannelMonitor,
+    southward_registry: SouthwardRegistry,
 
     /// Metrics hub (single source of truth).
     metrics_hub: Arc<NGMetricsHub>,
@@ -323,16 +316,14 @@ impl NGSouthwardManager {
     #[inline]
     /// Create a new data manager
     pub fn new(
-        driver_registry: DriverRegistry,
+        southward_registry: SouthwardRegistry,
         metrics_hub: Arc<NGMetricsHub>,
         snapshot_gc_cfg: Arc<Southward>,
     ) -> Self {
         let index = Arc::new(RuntimeIndex::new());
-        let monitor = ChannelMonitor::new(Arc::clone(&index), Arc::clone(&metrics_hub));
         Self {
             index,
-            driver_registry,
-            monitor,
+            southward_registry,
             metrics_hub,
             device_snapshots: Arc::new(DashMap::new()),
             snapshot_gc: Arc::new(SnapshotGcRuntime {
@@ -794,26 +785,28 @@ impl NGSouthwardManager {
         let mut rx = driver.subscribe_connection_state();
 
         match timeout(Duration::from_millis(timeout_ms), async move {
-            // Convert Ref<'_, ConnectionState> to owned ConnectionState immediately
-            rx.wait_for(|state| {
-                matches!(
-                    state,
-                    SouthwardConnectionState::Connected | SouthwardConnectionState::Failed(_)
-                )
-            })
-            .await
-            .map(|r| r.clone())
+            rx.wait_for(|state| matches!(state.phase, Phase::Connected | Phase::Failed))
+                .await
+                .map(|r| r.clone())
         })
         .await
         {
-            Ok(Ok(state)) => match state {
-                SouthwardConnectionState::Connected => Ok(()),
-                SouthwardConnectionState::Failed(reason) => Err(NGError::DriverError(format!(
-                    "Driver connection failed: {}",
-                    reason
-                ))),
-                _ => Err(NGError::DriverError("Invalid connection state".to_string())),
-            },
+            Ok(Ok(state)) => {
+                if state.phase == Phase::Connected {
+                    return Ok(());
+                }
+                if state.phase == Phase::Failed {
+                    let reason = state
+                        .last_failure
+                        .as_ref()
+                        .map(|r| r.summary.as_ref())
+                        .unwrap_or("unknown failure");
+                    return Err(NGError::DriverError(format!(
+                        "Driver connection failed: {reason}"
+                    )));
+                }
+                Err(NGError::DriverError("Invalid connection phase".to_string()))
+            }
             Ok(Err(_)) => Err(NGError::DriverError(
                 "Driver connection state channel closed".to_string(),
             )),
@@ -878,10 +871,7 @@ impl NGSouthwardManager {
 
         // Start according to policy via by-id path
         match self.start_channel(channel_id, policy).await {
-            Ok(()) => {
-                self.monitor.spawn(channel_id, southward_data_bus);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(e) => {
                 match policy {
                     StartPolicy::SyncWaitConnected { .. } => {
@@ -891,8 +881,17 @@ impl NGSouthwardManager {
                     StartPolicy::AsyncFireAndForget => {
                         // For async, keep instance but mark as failed
                         if let Some(mut entry) = self.index.channels.get_mut(&channel_id) {
-                            entry.state =
-                                SouthwardConnectionState::Failed("async start failed".to_string());
+                            let report = Arc::new(FailureReport {
+                                phase: FailurePhase::Connect,
+                                kind: FailureKind::Fatal,
+                                summary: Arc::<str>::from("async start failed"),
+                                code: Some(Arc::<str>::from("async_start_failed")),
+                            });
+                            entry.state = ConnectionState::arc_now_with_failure(
+                                Phase::Failed,
+                                0,
+                                Some(report),
+                            );
                         }
                     }
                 }
@@ -929,7 +928,7 @@ impl NGSouthwardManager {
     ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id
         let driver_factory = self
-            .driver_registry
+            .southward_registry
             .get(&config.driver_id)
             .map(|entry| entry.value().clone())
             .ok_or(NGError::DriverError(format!(
@@ -963,7 +962,7 @@ impl NGSouthwardManager {
         let driver: Arc<dyn Driver> = Arc::from(driver);
 
         // Defer connection to the unified start phase after devices/points are loaded
-        let connection_state = SouthwardConnectionState::Disconnected;
+        let connection_state = ConnectionState::arc_now(Phase::Disconnected, 0);
 
         let now = Utc::now();
         let status = config.status();
@@ -975,7 +974,6 @@ impl NGSouthwardManager {
             status,
             prom,
             driver_label,
-            health: None,
             created_at: now,
             last_activity: now,
         })
@@ -991,7 +989,7 @@ impl NGSouthwardManager {
     ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id
         let driver_factory = self
-            .driver_registry
+            .southward_registry
             .get(&config.driver_id)
             .map(|entry| entry.value().clone())
             .ok_or(NGError::DriverError(format!(
@@ -1050,6 +1048,13 @@ impl NGSouthwardManager {
             )),
             channel_id: runtime_channel.id(),
             transport_meter: Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom))),
+            observer_factory: Arc::new(SouthwardChannelObserverFactory::new(
+                runtime_channel.id(),
+                Arc::clone(&prom),
+                Arc::clone(&self.metrics_hub),
+                Arc::clone(&self.index),
+                Arc::clone(southward_data_bus),
+            )),
         };
 
         // Create driver and wrap
@@ -1059,7 +1064,7 @@ impl NGSouthwardManager {
         let driver: Arc<dyn Driver> = Arc::from(driver);
 
         // Defer connection; status/state copied from channel config
-        let connection_state = SouthwardConnectionState::Disconnected;
+        let connection_state = ConnectionState::arc_now(Phase::Disconnected, 0);
         let now = Utc::now();
         let status = runtime_channel.status();
         Ok(ChannelInstance {
@@ -1070,7 +1075,6 @@ impl NGSouthwardManager {
             status,
             prom,
             driver_label,
-            health: None,
             created_at: now,
             last_activity: now,
         })
@@ -1202,6 +1206,13 @@ impl NGSouthwardManager {
             )),
             channel_id,
             transport_meter: Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom))),
+            observer_factory: Arc::new(SouthwardChannelObserverFactory::new(
+                channel_id,
+                Arc::clone(&prom),
+                Arc::clone(&self.metrics_hub),
+                Arc::clone(&self.index),
+                Arc::clone(southward_data_bus),
+            )),
         }
     }
 
@@ -1251,11 +1262,9 @@ impl NGSouthwardManager {
     }
 
     /// Start all channels by constructing runtime contexts and injecting a high-performance publisher
-    pub async fn start_channels(&self, southward_data_bus: &Arc<SouthwardDataBus>) -> NGResult<()> {
+    pub async fn start_channels(&self) -> NGResult<()> {
         // Collect channel ids first to avoid holding iter_mut guards across await
         let ids = self.get_enabled_channel_ids();
-        // Spawn monitors up-front to capture transitions uniformly
-        self.monitor.spawn_all(ids.clone(), southward_data_bus);
         for id in ids.into_iter() {
             self.start_channel(id, StartPolicy::AsyncFireAndForget)
                 .await?;
@@ -1265,11 +1274,8 @@ impl NGSouthwardManager {
         Ok(())
     }
 
-    /// Stop a channel's runtime, cancel its monitor, and optionally remove all runtime mappings
+    /// Stop a channel's runtime and optionally remove all runtime mappings
     pub async fn stop_channel(&self, channel_id: i32, remove: bool) {
-        // Cancel per-channel monitor
-        self.monitor.cancel(channel_id);
-
         // Snapshot driver label early (used for metrics unregister when removing).
         // IMPORTANT: do not hold DashMap guards across await.
         let driver_label = self
@@ -1366,9 +1372,9 @@ impl NGSouthwardManager {
         timeout_ms: u64,
     ) -> NGResult<()> {
         let channel_id = config.id;
-        // Stop previous runtime and clean monitor/task entries
+        // Stop previous runtime and clean runtime entries
         self.stop_channel(channel_id, false).await;
-        // Create and start synchronously (will insert and spawn monitor)
+        // Create and start synchronously (will insert and start runtime)
         self.create_and_start_channel(
             config,
             southward_data_bus,
@@ -2247,7 +2253,7 @@ impl NGSouthwardManager {
         let total_devices = self.index.devices.len() as u64;
 
         // Baseline connected channels by scan (best-effort). After initialization,
-        // `ChannelMonitor` maintains this value incrementally in the hub.
+        // the supervision observer maintains this value incrementally in the hub.
         let connected_channels = self
             .index
             .channels
@@ -2307,7 +2313,6 @@ impl NGSouthwardManager {
         let channel_name = entry.config.name().to_string();
         let driver_name = entry.config.driver_id().to_string();
         let state = entry.state.clone();
-        let health = entry.health.as_ref().map(|h| h.status);
         let created_at = entry.created_at;
         let last_activity = entry.last_activity;
         drop(entry);
@@ -2326,7 +2331,6 @@ impl NGSouthwardManager {
                     name: channel_name,
                     driver_name,
                     state,
-                    health,
                     device_count,
                     created_at,
                     last_activity,
@@ -2351,7 +2355,6 @@ impl NGSouthwardManager {
         self.index.devices.clear();
         self.index.channels.clear();
         self.device_snapshots.clear();
-        self.monitor.cancel_all();
 
         // Reset hub manager snapshot state to zeroed baseline.
         self.refresh_manager_snapshot_from_index().await;
@@ -2362,7 +2365,7 @@ impl NGSouthwardManager {
 
 // Implement the trait for accessing connection states
 impl SouthwardManager for NGSouthwardManager {
-    fn get_channel_connection_state(&self, channel_id: i32) -> Option<SouthwardConnectionState> {
+    fn get_channel_connection_state(&self, channel_id: i32) -> Option<Arc<ConnectionState>> {
         self.index
             .channels
             .get(&channel_id)

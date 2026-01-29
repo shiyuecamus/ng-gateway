@@ -394,14 +394,14 @@ sequenceDiagram
   - 一旦连接成功，立即：
     - 更新 `SharedClient`（数据路径直接读）；
     - 订阅 ThingsBoard 需要的多个主题（设备 RPC/属性、网关 RPC/属性等）；
-    - 通过 `watch::Sender<NorthwardConnectionState>` 广播连接状态；
+    - 通过 `watch::Sender<Arc<ConnectionState>>` 广播连接状态；
   - EventLoop 中对每个事件：
     - ConnAck / Disconnect：更新连接状态与健康标记；
     - Publish / SubAck：写入业务事件通道，交由插件逻辑解析为 `NorthwardEvent`。
 
 - **与南向一致的可观测性**：
   - SharedClient 中记录 `healthy` 与 `last_error`；
-  - 统一的 `NorthwardConnectionState` watch 通道可被上层 Actor 订阅展示。
+  - 统一的 `watch<Arc<ConnectionState>>` 通道可被上层 Actor 订阅展示。
 
 > **客户收益**：北向与南向共享一套 supervisor 设计理念，行为可预测、日志一致，便于运维人员快速理解与定位问题。
 

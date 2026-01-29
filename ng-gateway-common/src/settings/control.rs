@@ -514,7 +514,7 @@ fn validate_retry_policy_patch(_cur: RetryPolicy, next: RetryPolicy) -> NGResult
 }
 
 fn atomic_rewrite(path: &Path, content: &str) -> NGResult<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = path.parent().unwrap_or(Path::new("."));
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())

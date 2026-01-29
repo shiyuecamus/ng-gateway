@@ -195,8 +195,8 @@ pub fn build_context(
             let first = a
                 .client_attributes
                 .first()
-                .or_else(|| a.shared_attributes.first())
-                .or_else(|| a.server_attributes.first());
+                .or(a.shared_attributes.first())
+                .or(a.server_attributes.first());
             let ch = first
                 .and_then(|pv| runtime.get_point_meta(pv.point_id))
                 .map(|m| m.channel_name.as_ref().to_string());

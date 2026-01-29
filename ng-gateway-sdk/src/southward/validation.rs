@@ -90,9 +90,9 @@ pub fn validate_action_parameters(
 
         let numeric_value: Option<f64> = value
             .as_f64()
-            .or_else(|| value.as_i64().map(|v| v as f64))
-            .or_else(|| value.as_u64().map(|v| v as f64))
-            .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()));
+            .or(value.as_i64().map(|v| v as f64))
+            .or(value.as_u64().map(|v| v as f64))
+            .or(value.as_str().and_then(|s| s.parse::<f64>().ok()));
 
         match numeric_value {
             Some(v) => {

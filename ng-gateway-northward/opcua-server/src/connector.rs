@@ -1,0 +1,116 @@
+//! OPC UA Server supervised connector implementation.
+//!
+//! This plugin is an in-process OPC UA server. "Connect" means:
+//! - bind/listen successfully
+//! - initialize server runtime
+//!
+//! Connection governance (state publication, retries) is handled by SDK `SupervisorLoop`.
+
+use super::{
+    config::OpcuaServerPluginConfig, handle::OpcuaServerHandle, node_cache::NodeCache,
+    queue::create_update_queue, server::OpcuaServerRuntime, session::OpcuaServerSession,
+    write_dispatch::WriteDispatcher,
+};
+use ng_gateway_sdk::{
+    supervision::{Connector, FailureKind, FailurePhase, Session, SessionContext},
+    NorthwardError, NorthwardEvent, NorthwardInitContext, NorthwardResult, NorthwardRuntimeApi,
+};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+/// OPC UA Server connector.
+#[derive(Clone)]
+pub struct OpcuaServerConnector {
+    config: Arc<OpcuaServerPluginConfig>,
+    runtime: Arc<dyn NorthwardRuntimeApi>,
+    plugin_id: i32,
+    events_tx: mpsc::Sender<NorthwardEvent>,
+}
+
+impl OpcuaServerConnector {
+    /// Create the connector from init context (no I/O).
+    pub fn from_init(ctx: NorthwardInitContext) -> NorthwardResult<Self> {
+        let config = ctx
+            .config
+            .downcast_arc::<OpcuaServerPluginConfig>()
+            .map_err(|_| NorthwardError::ConfigurationError {
+                message: "Failed to downcast to OpcuaServerPluginConfig".to_string(),
+            })?;
+
+        Ok(Self {
+            config,
+            runtime: ctx.runtime,
+            plugin_id: ctx.app_id,
+            events_tx: ctx.events_tx,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Connector for OpcuaServerConnector {
+    type InitContext = NorthwardInitContext;
+    type Handle = OpcuaServerHandle;
+    type Session = OpcuaServerSession;
+
+    #[inline]
+    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    where
+        Self: Sized,
+    {
+        Self::from_init(ctx)
+    }
+
+    async fn connect(
+        &self,
+        ctx: SessionContext,
+    ) -> Result<Self::Session, <Self::Session as Session>::Error> {
+        let (update_tx, update_rx) =
+            create_update_queue(self.config.update_queue_capacity, self.config.drop_policy);
+        let (node_build_tx, node_build_rx) = mpsc::channel::<i32>(4096);
+
+        let node_cache = Arc::new(NodeCache::new());
+
+        let handle = Arc::new(OpcuaServerHandle::new(
+            Arc::clone(&self.config),
+            Arc::clone(&self.runtime),
+            Arc::clone(&node_cache),
+            node_build_tx,
+            update_tx,
+            Arc::new(WriteDispatcher::new(
+                Arc::clone(&self.config),
+                Arc::clone(&self.runtime),
+                Arc::clone(&node_cache),
+                self.events_tx.clone(),
+            )),
+        ));
+
+        // Starting the server is the "connect" step (bind/listen + runtime init).
+        let server = OpcuaServerRuntime::start(
+            self.plugin_id,
+            Arc::clone(&self.config),
+            Arc::clone(&self.runtime),
+            Arc::clone(&node_cache),
+            Arc::clone(&handle.write_dispatch),
+            ctx.cancel.child_token(),
+        )
+        .await?;
+
+        Ok(OpcuaServerSession::new(
+            handle,
+            server,
+            node_build_rx,
+            update_rx,
+        ))
+    }
+
+    fn classify_error(
+        &self,
+        _phase: FailurePhase,
+        err: &<Self::Session as Session>::Error,
+    ) -> FailureKind {
+        match err {
+            NorthwardError::ConfigurationError { .. } => FailureKind::Fatal,
+            _ => FailureKind::Retryable,
+        }
+    }
+}

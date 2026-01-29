@@ -1,3 +1,5 @@
+use ng_gateway_sdk::PointMeta;
+
 /// Sanitize a string component for stable OPC UA String NodeId usage.
 ///
 /// We keep a conservative allow-list to maximize interoperability:
@@ -20,11 +22,22 @@ pub fn sanitize_nodeid_component(input: &str) -> String {
 /// Build the NG-Gateway NodeId string (without `ns=1;` prefix).
 ///
 /// Format: `{channel}.{device}.{point_key}`
-pub fn make_nodeid_path(channel: &str, device: &str, point_key: &str) -> String {
+#[inline]
+fn make_nodeid_path(channel: &str, device: &str, point_key: &str) -> String {
     format!(
         "{}.{}.{}",
         sanitize_nodeid_component(channel),
         sanitize_nodeid_component(device),
         sanitize_nodeid_component(point_key)
     )
+}
+
+#[inline]
+pub(crate) fn make_full_node_id(namespace_index: u16, meta: &PointMeta) -> String {
+    let path = make_nodeid_path(
+        meta.channel_name.as_ref(),
+        meta.device_name.as_ref(),
+        meta.point_key.as_ref(),
+    );
+    format!("ns={namespace_index};s={path}")
 }

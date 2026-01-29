@@ -3,7 +3,7 @@ use crate::{
     entities::channel::ActiveModel,
     enums::common::{CollectionType, ReportType, Status},
 };
-use ng_gateway_sdk::{ConnectionPolicy, SouthwardConnectionState};
+use ng_gateway_sdk::{ConnectionPolicy, ConnectionState};
 use sea_orm::{DeriveIntoActiveModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 use serde_aux::prelude::*;
@@ -42,7 +42,7 @@ pub struct ChannelInfo {
     /// Connection state from runtime manager (optional, not from database)
     #[sea_orm(skip)]
     #[serde(skip_deserializing, default)]
-    pub connection_state: Option<SouthwardConnectionState>,
+    pub connection_state: Option<ConnectionState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, DeriveIntoActiveModel, Validate)]

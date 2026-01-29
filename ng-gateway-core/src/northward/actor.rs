@@ -6,6 +6,7 @@
 //! - Own worker task with CancellationToken control
 //! - Lock-free metrics and config hot-reload
 
+use crate::observability::supervision::{CompositeObserver, CoreObserverFactory};
 use chrono::{DateTime, Utc};
 use ng_gateway_common::metrics::{
     channel::{bounded, InstrumentedReceiver, InstrumentedSender, QueueObserver},
@@ -16,7 +17,8 @@ use ng_gateway_common::metrics::{
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::core::metrics::{AppActorState, NorthwardAppMetricsSnapshot};
 use ng_gateway_sdk::{
-    DropPolicy, NorthwardConnectionState, NorthwardData, NorthwardEvent, Plugin, PluginConfig,
+    supervision::{NorthwardObserverLabels, Observer, ObserverFactory, RetryBudgetSnapshot},
+    ConnectionState, DropPolicy, NorthwardData, NorthwardEvent, Phase, Plugin, PluginConfig,
     QueuePolicy,
 };
 use std::{
@@ -28,12 +30,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::{
-        mpsc::{
-            self,
-            error::{SendTimeoutError, TrySendError},
-        },
-        watch,
+    sync::mpsc::{
+        self,
+        error::{SendTimeoutError, TrySendError},
     },
     time::timeout,
 };
@@ -45,6 +44,165 @@ use tracing::{debug, error, info, warn};
 /// Used to buffer data when plugin is not connected.
 /// Data is flushed when connection is established.
 type BufferQueue = Arc<Mutex<VecDeque<(Arc<NorthwardData>, Instant)>>>;
+
+/// Pre-built per-app I/O and metric handles.
+///
+/// This is created by the host (northward manager) so it can be shared with:
+/// - the AppActor (data-plane send/buffer paths)
+/// - the supervision Observer (control-plane flush/metrics paths)
+pub struct AppIo {
+    pub prom: Arc<NorthwardAppMetricHandles>,
+    pub data_tx: InstrumentedSender<Arc<NorthwardData>>,
+    pub data_rx: InstrumentedReceiver<Arc<NorthwardData>>,
+    pub buffer_queue: BufferQueue,
+    pub buffer_observer: QueueObserver,
+}
+
+impl AppIo {
+    /// Create all per-app metric handles and bounded queues.
+    ///
+    /// # Notes
+    /// This is NOT a hot-path function; it runs during app bootstrap.
+    pub(crate) fn new(
+        metrics_hub: &NGMetricsHub,
+        app_id: i32,
+        plugin_id: i32,
+        queue_policy: QueuePolicy,
+    ) -> NGResult<Self> {
+        let prom = metrics_hub.register_northward_app_metrics(app_id, plugin_id)?;
+        let (data_tx, data_rx) = bounded(
+            metrics_hub,
+            format!("northward_app_{app_id}"),
+            queue_policy.capacity as usize,
+        )?;
+        let buffer_observer = QueueObserver::new(
+            metrics_hub,
+            format!("northward_app_buffer_{app_id}"),
+            queue_policy.buffer_capacity as u64,
+        )?;
+        Ok(Self {
+            prom,
+            data_tx,
+            data_rx,
+            buffer_queue: Arc::new(Mutex::new(VecDeque::new())),
+            buffer_observer,
+        })
+    }
+}
+
+/// Per-app supervision observer factory.
+///
+/// This bridges SDK supervision callbacks into core-owned side effects:
+/// - update Prometheus metrics
+/// - flush uplink buffer when Connected
+///
+/// # Notes
+/// - This is control-plane only (phase transitions / failures / backoff).
+/// - It MUST NOT block (no await). Buffer flush uses non-blocking `try_send`.
+#[derive(Clone)]
+pub(crate) struct NorthwardAppObserverFactory {
+    app_id: i32,
+    prom: Arc<NorthwardAppMetricHandles>,
+    queue_policy: QueuePolicy,
+    buffer_queue: BufferQueue,
+    buffer_observer: QueueObserver,
+    data_tx: InstrumentedSender<Arc<NorthwardData>>,
+}
+
+impl NorthwardAppObserverFactory {
+    #[inline]
+    pub(crate) fn new(app_id: i32, io: &AppIo, queue_policy: QueuePolicy) -> Self {
+        Self {
+            app_id,
+            prom: Arc::clone(&io.prom),
+            queue_policy,
+            buffer_queue: Arc::clone(&io.buffer_queue),
+            buffer_observer: io.buffer_observer.clone(),
+            data_tx: io.data_tx.clone(),
+        }
+    }
+}
+
+impl ObserverFactory for NorthwardAppObserverFactory {
+    fn create_northward(&self, labels: NorthwardObserverLabels) -> Arc<dyn Observer> {
+        // Best-effort sanity check without panicking.
+        if labels.app_id != self.app_id {
+            warn!(
+                expected_app_id = self.app_id,
+                got_app_id = labels.app_id,
+                "northward observer labels mismatch"
+            );
+        }
+
+        let side_effects: Arc<dyn Observer> = Arc::new(NorthwardAppObserver {
+            app_id: self.app_id,
+            prom: Arc::clone(&self.prom),
+            queue_policy: self.queue_policy,
+            buffer_queue: Arc::clone(&self.buffer_queue),
+            buffer_observer: self.buffer_observer.clone(),
+            data_tx: self.data_tx.clone(),
+            last_phase: AtomicU8::new(u8::from(Phase::Disconnected)),
+        });
+
+        let logging: Arc<dyn Observer> = CoreObserverFactory::new().create_northward(labels);
+        Arc::new(CompositeObserver::new(vec![logging, side_effects]))
+    }
+}
+
+struct NorthwardAppObserver {
+    app_id: i32,
+    prom: Arc<NorthwardAppMetricHandles>,
+    queue_policy: QueuePolicy,
+    buffer_queue: BufferQueue,
+    buffer_observer: QueueObserver,
+    data_tx: InstrumentedSender<Arc<NorthwardData>>,
+    last_phase: AtomicU8,
+}
+
+impl Observer for NorthwardAppObserver {
+    fn on_state(&self, state: &ng_gateway_sdk::ConnectionState) {
+        let now = u8::from(state.phase);
+        let prev = self.last_phase.swap(now, Ordering::AcqRel);
+        if prev == now {
+            return;
+        }
+
+        // Update connected gauge.
+        self.prom.set_connected(state.is_connected());
+
+        // Count reconnect transitions.
+        if state.is_reconnecting() && prev != u8::from(Phase::Reconnecting) {
+            self.prom.inc_reconnect();
+        }
+
+        // Record failures (non-message).
+        if state.is_failed() && prev != u8::from(Phase::Failed) {
+            self.prom.record_error_event();
+        }
+
+        // Flush buffer on transition to Connected.
+        if state.phase == Phase::Connected && self.queue_policy.buffer_enabled {
+            if let Err(e) = AppActor::flush_buffer(
+                &self.buffer_queue,
+                &self.data_tx,
+                self.queue_policy,
+                self.app_id,
+                &self.prom,
+                &self.buffer_observer,
+            ) {
+                warn!(app_id = self.app_id, error = %e, "Failed to flush buffer");
+            }
+        }
+    }
+
+    #[inline]
+    fn on_failure(&self, _report: &ng_gateway_sdk::FailureReport) {
+        self.prom.record_error_event();
+    }
+
+    #[inline]
+    fn on_backoff(&self, _delay: Duration, _budget: &RetryBudgetSnapshot) {}
+}
 
 /// Independent actor for each northward app
 ///
@@ -98,6 +256,32 @@ pub struct AppActor {
     created_at: DateTime<Utc>,
 }
 
+/// Parameters required to construct an `AppActor`.
+///
+/// # Rationale
+/// This bundles construction inputs to keep `AppActor::new` ergonomic and
+/// to satisfy `clippy::too_many_arguments` under `-D warnings`.
+pub struct AppActorParams {
+    /// Application ID.
+    pub app_id: i32,
+    /// Application name.
+    pub app_name: String,
+    /// Plugin ID.
+    pub plugin_id: i32,
+    /// Plugin instance (already initialized, will be wrapped in `Arc`).
+    pub plugin: Box<dyn Plugin>,
+    /// Events receiver from the plugin.
+    pub events_rx: mpsc::Receiver<NorthwardEvent>,
+    /// Plugin configuration.
+    pub config: Arc<dyn PluginConfig>,
+    /// Queue policy for backpressure handling.
+    pub queue_policy: QueuePolicy,
+    /// Cancellation token (usually a child token from Gateway).
+    pub shutdown_token: CancellationToken,
+    /// Pre-built per-app I/O bundle.
+    pub io: AppIo,
+}
+
 impl AppActor {
     /// Create a new AppActor
     ///
@@ -118,54 +302,24 @@ impl AppActor {
     /// # Notes
     /// The plugin must be initialized (init() called) before passing to this constructor,
     /// as this function wraps it in Arc, making mutable access impossible.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        app_id: i32,
-        app_name: String,
-        plugin_id: i32,
-        metrics_hub: &NGMetricsHub,
-        plugin: Box<dyn Plugin>,
-        events_rx: mpsc::Receiver<NorthwardEvent>,
-        config: Arc<dyn PluginConfig>,
-        queue_policy: QueuePolicy,
-        shutdown_token: CancellationToken,
-    ) -> NGResult<Self> {
-        let prom = metrics_hub.register_northward_app_metrics(app_id, plugin_id)?;
-
-        // Create bounded data channel (instrumented for Prometheus queue metrics).
-        let (data_tx, data_rx) = bounded(
-            metrics_hub,
-            format!("northward_app_{app_id}"),
-            queue_policy.capacity as usize,
-        )?;
-
-        // Create buffer observer (instrumented).
-        let buffer_observer = QueueObserver::new(
-            metrics_hub,
-            format!("northward_app_buffer_{app_id}"),
-            queue_policy.buffer_capacity as u64,
-        )?;
-
-        // Wrap in Arc after initialization (zero runtime overhead for hot path)
-        let plugin = Arc::from(plugin);
-
-        Ok(Self {
-            app_id,
-            app_name,
-            plugin_id,
-            plugin,
-            config,
-            queue_policy,
-            data_tx,
-            data_rx: Mutex::new(Some(data_rx)),
-            events_rx: Mutex::new(Some(events_rx)),
-            shutdown_token,
+    pub fn new(params: AppActorParams) -> Self {
+        Self {
+            app_id: params.app_id,
+            app_name: params.app_name,
+            plugin_id: params.plugin_id,
+            plugin: Arc::from(params.plugin),
+            config: params.config,
+            queue_policy: params.queue_policy,
+            data_tx: params.io.data_tx,
+            data_rx: Mutex::new(Some(params.io.data_rx)),
+            events_rx: Mutex::new(Some(params.events_rx)),
+            shutdown_token: params.shutdown_token,
             state: AtomicU8::new(AppActorState::Uninitialized as u8),
-            prom,
-            buffer_queue: Arc::new(Mutex::new(VecDeque::new())),
-            buffer_observer,
+            prom: params.io.prom,
+            buffer_queue: params.io.buffer_queue,
+            buffer_observer: params.io.buffer_observer,
             created_at: Utc::now(),
-        })
+        }
     }
 
     /// Get a consistent northward metrics snapshot for REST/WS.
@@ -249,9 +403,9 @@ impl AppActor {
             )));
         }
 
-        // Check connection state
+        // Check connection state (snapshot stream)
         let conn_state = self.plugin.subscribe_connection_state().borrow().clone();
-        let is_connected = matches!(conn_state, NorthwardConnectionState::Connected);
+        let is_connected = conn_state.is_connected();
 
         // If not connected and buffer is enabled, buffer the data
         if !is_connected && self.queue_policy.buffer_enabled {
@@ -379,7 +533,7 @@ impl AppActor {
     /// # Returns
     /// * `Ok(flushed_count)` if flush completed successfully
     /// * `Err` if data channel was closed during flush
-    fn flush_buffer(
+    pub(crate) fn flush_buffer(
         buffer_queue: &BufferQueue,
         data_tx: &InstrumentedSender<Arc<NorthwardData>>,
         queue_policy: QueuePolicy,
@@ -488,25 +642,28 @@ impl AppActor {
         let mut rx = self.plugin.subscribe_connection_state();
 
         match timeout(Duration::from_millis(timeout_ms), async move {
-            rx.wait_for(|state| {
-                matches!(
-                    state,
-                    NorthwardConnectionState::Connected | NorthwardConnectionState::Failed(_)
-                )
-            })
-            .await
-            .map(|r| r.clone())
+            rx.wait_for(|state| matches!(state.phase, Phase::Connected | Phase::Failed))
+                .await
+                .map(|r| r.clone())
         })
         .await
         {
-            Ok(Ok(state)) => match state {
-                NorthwardConnectionState::Connected => Ok(()),
-                NorthwardConnectionState::Failed(reason) => Err(NGError::Error(format!(
-                    "Plugin connection failed: {}",
-                    reason
-                ))),
-                _ => Err(NGError::Error("Invalid connection state".to_string())),
-            },
+            Ok(Ok(state)) => {
+                if state.phase == Phase::Connected {
+                    return Ok(());
+                }
+                if state.phase == Phase::Failed {
+                    let reason = state
+                        .last_failure
+                        .as_ref()
+                        .map(|r| r.summary.as_ref())
+                        .unwrap_or("unknown failure");
+                    return Err(NGError::Error(format!(
+                        "Plugin connection failed: {reason}"
+                    )));
+                }
+                Err(NGError::Error("Invalid connection phase".to_string()))
+            }
             Ok(Err(_)) => Err(NGError::Error(
                 "Plugin connection state channel closed".to_string(),
             )),
@@ -548,7 +705,7 @@ impl AppActor {
                             Some(data) => {
                                 // Check connection state before processing
                                 let conn_state = plugin.subscribe_connection_state().borrow().clone();
-                                let is_connected = matches!(conn_state, NorthwardConnectionState::Connected);
+                                let is_connected = conn_state.is_connected();
 
                                 if !is_connected {
                                     // Not connected: skip processing
@@ -642,11 +799,7 @@ impl AppActor {
         // 1. Spawn data worker task
         self.spawn_worker_task();
 
-        // 2. Subscribe to plugin connection state and spawn monitor
-        let state_rx = self.plugin.subscribe_connection_state();
-        self.spawn_connection_monitor(state_rx);
-
-        // 3. Transition to Running (actual connection state tracked via monitor)
+        // 2. Transition to Running (connection state side effects are handled by supervision Observer)
         self.state
             .store(AppActorState::Running as u8, Ordering::Release);
         self.prom.set_state(AppActorState::Running as u8 as i64);
@@ -656,129 +809,6 @@ impl AppActor {
         );
 
         Ok(())
-    }
-
-    /// Spawn connection state monitor task (aligned with ChannelMonitor)
-    ///
-    /// This task subscribes to the plugin's connection state and:
-    /// - Logs connection state transitions
-    /// - Updates metrics
-    /// - Flushes buffered data when connection is established
-    ///
-    /// Note: AppActor's state is managed separately and can be queried via get_connection_state()
-    ///
-    /// The task automatically terminates when:
-    /// - shutdown_token is cancelled
-    /// - Plugin's state channel is closed
-    fn spawn_connection_monitor(&self, mut state_rx: watch::Receiver<NorthwardConnectionState>) {
-        let app_id = self.app_id;
-        let app_name = self.app_name.clone();
-        let prom = Arc::clone(&self.prom);
-        let token = self.shutdown_token.clone();
-        let buffer_queue = Arc::clone(&self.buffer_queue);
-        let buffer_observer = self.buffer_observer.clone();
-        let queue_policy = self.queue_policy;
-        let data_tx = self.data_tx.clone();
-
-        tokio::spawn(async move {
-            info!(
-                "Connection monitor started for app {} ({})",
-                app_id, app_name
-            );
-
-            // Track last state to avoid duplicate processing
-            let mut last_state = state_rx.borrow().clone();
-
-            // Log initial state
-            Self::log_connection_state(app_id, &app_name, &last_state);
-
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        info!("Connection monitor cancelled for app {}", app_id);
-                        break;
-                    }
-                    result = state_rx.changed() => {
-                        if result.is_err() {
-                            warn!("Connection state channel closed for app {}", app_id);
-                            break;
-                        }
-
-                        let conn_state = state_rx.borrow().clone();
-                        if conn_state == last_state {
-                            continue;
-                        }
-
-                        Self::log_connection_state(app_id, &app_name, &conn_state);
-
-                        // Update connected gauge on every transition.
-                        prom.set_connected(conn_state.is_connected());
-
-                        // Count reconnect transitions.
-                        if conn_state.is_reconnecting()
-                            && !last_state.is_reconnecting()
-                        {
-                            prom.inc_reconnect();
-                        }
-
-                        // Handle state transitions: update metrics and flush buffer
-                        match conn_state {
-                            NorthwardConnectionState::Failed(_) => {
-                                prom.record_error_event();
-                            }
-                            NorthwardConnectionState::Connected if queue_policy.buffer_enabled => {
-                                // Flush buffered data when connection is established
-                                if let Err(e) = Self::flush_buffer(
-                                    &buffer_queue,
-                                    &data_tx,
-                                    queue_policy,
-                                    app_id,
-                                    &prom,
-                                    &buffer_observer,
-                                ) {
-                                    warn!(
-                                        app_id = app_id,
-                                        error = %e,
-                                        "Failed to flush buffer after connection"
-                                    );
-                                }
-                            }
-                            _ => {
-                                // Other states: no action needed
-                            }
-                        }
-
-                        last_state = conn_state;
-                    }
-                }
-            }
-
-            info!("Connection monitor stopped for app {}", app_id);
-        });
-    }
-
-    /// Log connection state transitions
-    fn log_connection_state(app_id: i32, app_name: &str, conn_state: &NorthwardConnectionState) {
-        match conn_state {
-            NorthwardConnectionState::Connected => {
-                info!("App {} ({}) connected", app_id, app_name);
-            }
-            NorthwardConnectionState::Disconnected => {
-                warn!("App {} ({}) disconnected", app_id, app_name);
-            }
-            NorthwardConnectionState::Connecting => {
-                debug!("App {} ({}) connecting", app_id, app_name);
-            }
-            NorthwardConnectionState::Reconnecting => {
-                debug!("App {} ({}) reconnecting", app_id, app_name);
-            }
-            NorthwardConnectionState::Failed(reason) => {
-                error!(
-                    "App {} ({}) connection failed: {}",
-                    app_id, app_name, reason
-                );
-            }
-        }
     }
 
     /// Stop the app actor gracefully
@@ -820,15 +850,7 @@ impl AppActor {
     }
 
     /// Get current connection state from plugin
-    pub fn get_connection_state(&self) -> NorthwardConnectionState {
+    pub fn get_connection_state(&self) -> Arc<ConnectionState> {
         self.plugin.subscribe_connection_state().borrow().clone()
-    }
-
-    /// Ping the plugin to check latency
-    pub async fn ping(&self) -> NGResult<std::time::Duration> {
-        self.plugin
-            .ping()
-            .await
-            .map_err(|e| NGError::Error(format!("Ping failed: {}", e)))
     }
 }
