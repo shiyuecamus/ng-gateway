@@ -331,23 +331,6 @@ macro_rules! ng_plugin_factory {
 
     // Core implementation with optional description and explicit factory ctor
     (@core name = $name:expr, description = $desc_opt:expr, plugin_type = $plugin_type:expr, factory_ty = $factory:ty, metadata_fn = $metadata_fn:path, channel_capacity = $cap:expr) => {
-        /// Convert a `&'static str` to a C string safely.
-        ///
-        /// # Notes
-        /// - This MUST NOT panic.
-        /// - If the input contains an interior NUL, it will be sanitized to a space (`0x20`).
-        #[inline]
-        fn __ng_cstring_sanitized(input: &'static str) -> ::std::ffi::CString {
-            let bytes = input.as_bytes();
-            let mut buf: ::std::vec::Vec<u8> = ::std::vec::Vec::with_capacity(bytes.len() + 1);
-            for &b in bytes.iter() {
-                buf.push(if b == 0 { b' ' } else { b });
-            }
-            buf.push(0);
-            // SAFETY: we ensured there are no interior NULs and we appended a terminator.
-            unsafe { ::std::ffi::CString::from_vec_unchecked(buf) }
-        }
-
         #[no_mangle]
         pub extern "C" fn ng_plugin_api_version() -> u32 {
             $crate::sdk::sdk_api_version()
@@ -357,7 +340,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_sdk_version() -> *const ::std::os::raw::c_char {
             static SDK_VER: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| __ng_cstring_sanitized($crate::sdk::SDK_VERSION))
+                Lazy::new(|| $crate::ffi::cstring_sanitized($crate::sdk::SDK_VERSION))
             };
             SDK_VER.as_ptr()
         }
@@ -366,7 +349,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_version() -> *const ::std::os::raw::c_char {
             static VER: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| __ng_cstring_sanitized(env!("CARGO_PKG_VERSION")))
+                Lazy::new(|| $crate::ffi::cstring_sanitized(env!("CARGO_PKG_VERSION")))
             };
             VER.as_ptr()
         }
@@ -375,7 +358,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_type() -> *const ::std::os::raw::c_char {
             static TYPE_STR: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| __ng_cstring_sanitized($plugin_type))
+                Lazy::new(|| $crate::ffi::cstring_sanitized($plugin_type))
             };
             TYPE_STR.as_ptr()
         }
@@ -384,7 +367,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_name() -> *const ::std::os::raw::c_char {
             static NAME_STR: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| __ng_cstring_sanitized($name))
+                Lazy::new(|| $crate::ffi::cstring_sanitized($name))
             };
             NAME_STR.as_ptr()
         }
@@ -393,7 +376,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_description() -> *const ::std::os::raw::c_char {
             static DESC_STR: $crate::export::once_cell::sync::Lazy<Option<::std::ffi::CString>> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| $desc_opt.map(__ng_cstring_sanitized))
+                Lazy::new(|| $desc_opt.map($crate::ffi::cstring_sanitized))
             };
             match DESC_STR.as_ref() {
                 Some(c) => c.as_ptr(),
@@ -420,11 +403,7 @@ macro_rules! ng_plugin_factory {
             out_ptr: *mut *const u8,
             out_len: *mut usize,
         ) {
-            if out_ptr.is_null() || out_len.is_null() {
-                return;
-            }
-            *out_ptr = NG_PLUGIN_METADATA_JSON.as_ptr();
-            *out_len = NG_PLUGIN_METADATA_JSON.len();
+            $crate::ffi::write_slice_ptr_len(out_ptr, out_len, &NG_PLUGIN_METADATA_JSON);
         }
 
         #[no_mangle]
@@ -440,13 +419,7 @@ macro_rules! ng_plugin_factory {
         #[doc(hidden)]
         pub static NG_RUNTIME: $crate::export::once_cell::sync::Lazy<Option<tokio::runtime::Runtime>> = {
             use $crate::export::once_cell::sync::Lazy;
-            Lazy::new(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .thread_name(concat!($plugin_type, "-plugin"))
-                    .build()
-                    .ok()
-            })
+            Lazy::new(|| $crate::ffi::build_runtime(concat!($plugin_type, "-plugin")))
         };
 
         /// Initialize tracing for this northward plugin library.
