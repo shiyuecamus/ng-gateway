@@ -231,7 +231,6 @@ macro_rules! ng_plugin_factory {
             description = Some($description),
             plugin_type = $plugin_type,
             factory_ty = __NgComponentPluginFactory,
-            factory_ctor = || __NgComponentPluginFactory::new(),
             metadata_fn = $metadata_fn,
             channel_capacity = 1024 $(+ $cap * 0 + $cap)?
         );
@@ -325,14 +324,30 @@ macro_rules! ng_plugin_factory {
             description = None,
             plugin_type = $plugin_type,
             factory_ty = __NgComponentPluginFactory,
-            factory_ctor = || __NgComponentPluginFactory::new(),
             metadata_fn = $metadata_fn,
             channel_capacity = 1024 $(+ $cap * 0 + $cap)?
         );
     };
 
     // Core implementation with optional description and explicit factory ctor
-    (@core name = $name:expr, description = $desc_opt:expr, plugin_type = $plugin_type:expr, factory_ty = $factory:ty, factory_ctor = $ctor:expr, metadata_fn = $metadata_fn:path, channel_capacity = $cap:expr) => {
+    (@core name = $name:expr, description = $desc_opt:expr, plugin_type = $plugin_type:expr, factory_ty = $factory:ty, metadata_fn = $metadata_fn:path, channel_capacity = $cap:expr) => {
+        /// Convert a `&'static str` to a C string safely.
+        ///
+        /// # Notes
+        /// - This MUST NOT panic.
+        /// - If the input contains an interior NUL, it will be sanitized to a space (`0x20`).
+        #[inline]
+        fn __ng_cstring_sanitized(input: &'static str) -> ::std::ffi::CString {
+            let bytes = input.as_bytes();
+            let mut buf: ::std::vec::Vec<u8> = ::std::vec::Vec::with_capacity(bytes.len() + 1);
+            for &b in bytes.iter() {
+                buf.push(if b == 0 { b' ' } else { b });
+            }
+            buf.push(0);
+            // SAFETY: we ensured there are no interior NULs and we appended a terminator.
+            unsafe { ::std::ffi::CString::from_vec_unchecked(buf) }
+        }
+
         #[no_mangle]
         pub extern "C" fn ng_plugin_api_version() -> u32 {
             $crate::sdk::sdk_api_version()
@@ -342,7 +357,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_sdk_version() -> *const ::std::os::raw::c_char {
             static SDK_VER: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| ::std::ffi::CString::new($crate::sdk::SDK_VERSION).unwrap())
+                Lazy::new(|| __ng_cstring_sanitized($crate::sdk::SDK_VERSION))
             };
             SDK_VER.as_ptr()
         }
@@ -351,7 +366,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_version() -> *const ::std::os::raw::c_char {
             static VER: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| ::std::ffi::CString::new(env!("CARGO_PKG_VERSION")).unwrap())
+                Lazy::new(|| __ng_cstring_sanitized(env!("CARGO_PKG_VERSION")))
             };
             VER.as_ptr()
         }
@@ -360,7 +375,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_type() -> *const ::std::os::raw::c_char {
             static TYPE_STR: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| ::std::ffi::CString::new($plugin_type).unwrap())
+                Lazy::new(|| __ng_cstring_sanitized($plugin_type))
             };
             TYPE_STR.as_ptr()
         }
@@ -369,7 +384,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_name() -> *const ::std::os::raw::c_char {
             static NAME_STR: $crate::export::once_cell::sync::Lazy<::std::ffi::CString> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| ::std::ffi::CString::new($name).unwrap())
+                Lazy::new(|| __ng_cstring_sanitized($name))
             };
             NAME_STR.as_ptr()
         }
@@ -378,7 +393,7 @@ macro_rules! ng_plugin_factory {
         pub extern "C" fn ng_plugin_description() -> *const ::std::os::raw::c_char {
             static DESC_STR: $crate::export::once_cell::sync::Lazy<Option<::std::ffi::CString>> = {
                 use $crate::export::once_cell::sync::Lazy;
-                Lazy::new(|| $desc_opt.map(|d| ::std::ffi::CString::new(d).unwrap()))
+                Lazy::new(|| $desc_opt.map(__ng_cstring_sanitized))
             };
             match DESC_STR.as_ref() {
                 Some(c) => c.as_ptr(),
@@ -394,7 +409,8 @@ macro_rules! ng_plugin_factory {
             use $crate::export::serde_json;
             Lazy::new(|| {
                 let md: $crate::PluginConfigSchemas = $metadata_fn();
-                serde_json::to_vec(&md).expect("serialize northward metadata")
+                // MUST NOT panic across FFI boundaries; return empty metadata on serialization error.
+                serde_json::to_vec(&md).unwrap_or_else(|_| ::std::vec::Vec::new())
             })
         };
 
@@ -411,160 +427,25 @@ macro_rules! ng_plugin_factory {
             *out_len = NG_PLUGIN_METADATA_JSON.len();
         }
 
-        // Define wrapper types to ensure runtime context isolation
-        struct RuntimeAwarePlugin {
-            inner: std::sync::Arc<Box<dyn $crate::Plugin>>,
-            tx: tokio::sync::mpsc::Sender<std::sync::Arc<$crate::NorthwardData>>,
-            cancel_token: $crate::export::tokio_util::sync::CancellationToken,
-            // Only used during start() to take ownership of the receiver
-            rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<std::sync::Arc<$crate::NorthwardData>>>>,
-        }
-
-        impl std::fmt::Debug for RuntimeAwarePlugin {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("RuntimeAwarePlugin")
-                 .field("inner", &"dyn Plugin")
-                 .field("channel_capacity", &self.tx.capacity())
-                 .finish()
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl $crate::Plugin for RuntimeAwarePlugin {
-            async fn start(&self) -> $crate::NorthwardResult<()> {
-                let inner = self.inner.clone();
-                let cancel_token = self.cancel_token.clone();
-
-                // 1. Take ownership of the receiver (once only)
-                let mut rx = {
-                    let mut rx_opt = self.rx.lock().unwrap();
-                    rx_opt.take().ok_or($crate::NorthwardError::RuntimeError {
-                        reason: "Plugin already started".to_string()
-                    })?
-                };
-
-                let handle = NG_RUNTIME.handle();
-                let (tx_res, rx_res) = tokio::sync::oneshot::channel();
-
-                handle.spawn(async move {
-                    // A. Initialize internal plugin
-                    if let Err(e) = inner.start().await {
-                        let _ = tx_res.send(Err(e));
-                        return;
-                    }
-                    // Notify Host that start is successful
-                    let _ = tx_res.send(Ok(()));
-
-                    // B. Start Actor Consumer Loop
-                    use $crate::export::tracing::{debug, warn};
-                    debug!("Plugin actor loop started");
-
-                    loop {
-                        tokio::select! {
-                            // 1. Priority: Handle cancellation
-                            _ = cancel_token.cancelled() => {
-                                debug!("Plugin cancelled, stopping actor loop");
-                                break;
-                            }
-                            // 2. Handle incoming data
-                            maybe_msg = rx.recv() => {
-                                match maybe_msg {
-                                    Some(data) => {
-                                        // High-performance streaming processing
-                                        if let Err(e) = inner.process_data(data).await {
-                                             warn!("Error processing northward data: {}", e);
-                                        }
-                                    }
-                                    None => {
-                                        // Sender closed (Host dropped the plugin)
-                                        debug!("Plugin data channel closed");
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    debug!("Plugin actor loop stopped");
-                    // C. Graceful shutdown: Ensure inner.stop is called
-                    let _ = inner.stop().await;
-                });
-
-                // Wait for inner.start() to complete
-                match rx_res.await {
-                    Ok(res) => res,
-                    Err(_) => Err($crate::NorthwardError::RuntimeError { reason: "Plugin start task cancelled".to_string() }),
-                }
-            }
-
-            fn subscribe_connection_state(&self) -> tokio::sync::watch::Receiver<std::sync::Arc<$crate::ConnectionState>> {
-                self.inner.subscribe_connection_state()
-            }
-
-            async fn process_data(&self, data: std::sync::Arc<$crate::NorthwardData>) -> $crate::NorthwardResult<()> {
-                // Non-blocking enqueue with backpressure
-                match self.tx.try_send(data) {
-                    Ok(_) => Ok(()),
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        Err($crate::NorthwardError::RuntimeError { reason: "Plugin buffer full - backpressure applied".to_string() })
-                    },
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        Err($crate::NorthwardError::NotConnected)
-                    }
-                }
-            }
-
-            async fn stop(&self) -> $crate::NorthwardResult<()> {
-                // Signal cancellation to the actor loop
-                self.cancel_token.cancel();
-                Ok(())
-            }
-        }
-
-        struct RuntimeAwareFactory {
-            inner: Box<dyn $crate::PluginFactory>,
-        }
-
-        impl $crate::PluginFactory for RuntimeAwareFactory {
-            fn create_plugin(&self, ctx: $crate::NorthwardInitContext) -> $crate::NorthwardResult<Box<dyn $crate::Plugin>> {
-                let inner_plugin = self.inner.create_plugin(ctx)?;
-
-                // Create bounded channel for backpressure with user-defined or default capacity
-                let (tx, rx) = tokio::sync::mpsc::channel($cap);
-                let cancel_token = $crate::export::tokio_util::sync::CancellationToken::new();
-
-                Ok(Box::new(RuntimeAwarePlugin {
-                    inner: std::sync::Arc::new(inner_plugin),
-                    tx,
-                    cancel_token,
-                    rx: std::sync::Mutex::new(Some(rx)),
-                }))
-            }
-
-            fn convert_plugin_config(
-                &self,
-                config: $crate::export::serde_json::Value,
-            ) -> $crate::NorthwardResult<std::sync::Arc<dyn $crate::PluginConfig>> {
-                self.inner.convert_plugin_config(config)
-            }
-        }
-
         #[no_mangle]
         pub extern "C" fn create_plugin_factory() -> *mut dyn $crate::PluginFactory {
-            let inner: Box<dyn $crate::PluginFactory> = Box::new(($ctor)());
-            let wrapper: Box<dyn $crate::PluginFactory> = Box::new(RuntimeAwareFactory { inner });
+            let inner: Box<dyn $crate::PluginFactory> =
+                Box::new(<$factory as ::core::default::Default>::default());
+            let rt_handle = NG_RUNTIME.as_ref().map(|rt| rt.handle().clone());
+            let wrapper: Box<dyn $crate::PluginFactory> =
+                Box::new($crate::ffi::RuntimeAwarePluginFactory::new(inner, $cap, rt_handle));
             Box::into_raw(wrapper)
         }
 
         #[doc(hidden)]
-        pub static NG_RUNTIME: $crate::export::once_cell::sync::Lazy<tokio::runtime::Runtime> = {
+        pub static NG_RUNTIME: $crate::export::once_cell::sync::Lazy<Option<tokio::runtime::Runtime>> = {
             use $crate::export::once_cell::sync::Lazy;
             Lazy::new(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .thread_name(concat!($plugin_type, "-plugin"))
                     .build()
-                    .expect("build plugin runtime")
+                    .ok()
             })
         };
 

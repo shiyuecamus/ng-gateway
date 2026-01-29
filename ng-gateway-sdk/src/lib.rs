@@ -1,5 +1,7 @@
 mod bin_inspect;
 mod error;
+#[doc(hidden)]
+pub mod ffi;
 pub mod mqtt;
 pub mod northward;
 mod retry;
