@@ -145,7 +145,7 @@ gateway:
       # Southward communication configuration
       southward:
         # milliseconds
-        startTimeoutMs: 2000
+        startTimeoutMs: 5000
         # Device snapshot TTL GC (point-level baseline eviction).
         #
         # Point baseline TTL in milliseconds. 0 disables eviction.
@@ -161,7 +161,7 @@ gateway:
       northward:
         queueCapacity: 10000
         # milliseconds
-        startTimeoutMs: 2000
+        startTimeoutMs: 5000
       
       # Collector configuration
       collector:

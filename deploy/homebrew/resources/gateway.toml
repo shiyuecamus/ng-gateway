@@ -17,7 +17,7 @@ ca_cert_path = "ca.crt"
 ca_key_path = "ca.key"
 
 [general.southward]
-start_timeout_ms = 2000
+start_timeout_ms = 5000
 device_change_cache_ttl_ms = 600000
 snapshot_gc_interval_ms = 60000
 snapshot_gc_workers = 2
@@ -25,7 +25,7 @@ max_devices_per_snapshot_tick = 256
 
 [general.northward]
 queue_capacity = 10000
-start_timeout_ms = 2000
+start_timeout_ms = 5000
 
 [general.collector]
 collection_timeout_ms = 30000

@@ -18,7 +18,7 @@ ca_key_path = "ca.key"
 
 # Southward communication configuration
 [general.southward]
-start_timeout_ms = 2000
+start_timeout_ms = 5000
 
 # Device snapshot TTL GC (point-level baseline eviction).
 device_change_cache_ttl_ms = 600000
@@ -29,7 +29,7 @@ max_devices_per_snapshot_tick = 256
 # Northward communication configuration
 [general.northward]
 queue_capacity = 10000
-start_timeout_ms = 2000
+start_timeout_ms = 5000
 
 # Collector configuration
 [general.collector]
