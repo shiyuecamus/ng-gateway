@@ -5,6 +5,7 @@ mod handle;
 mod handlers;
 mod metadata;
 mod mqtt;
+mod payload;
 mod provision;
 mod session;
 mod topics;

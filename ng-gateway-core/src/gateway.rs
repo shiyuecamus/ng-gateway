@@ -50,8 +50,8 @@ use ng_gateway_models::{
     PointRuntimeCmd, RealtimeMonitorHub, SouthwardManager,
 };
 use ng_gateway_repository::{
-    get_db_connection, ActionRepository, AppRepository, AppSubRepository, ChannelRepository,
-    DeviceRepository, DriverRepository, PluginRepository, PointRepository,
+    ActionRepository, AppRepository, AppSubRepository, ChannelRepository, DeviceRepository,
+    DriverRepository, PluginRepository, PointRepository,
 };
 use ng_gateway_sdk::{
     validate_and_resolve_action_inputs, AccessMode, ClientRpcResponse, Command, DriverError,
@@ -369,6 +369,7 @@ impl Gateway for NGGateway {
             Arc::clone(&northward_registry),
             Arc::clone(&metrics_hub),
             Arc::clone(&southward_manager),
+            conn.clone(),
         );
 
         // Load and initialize northward topology with global events channel
@@ -377,7 +378,7 @@ impl Gateway for NGGateway {
         })?;
 
         northward_manager
-            .initialize_topology(northward_config, &conn, &northward_events_bus)
+            .initialize_topology(northward_config, &northward_events_bus)
             .await
             .map_err(|e| {
                 InitContextError::Primitive(format!("Failed to initialize northward topology: {e}"))
@@ -1249,15 +1250,14 @@ impl AppRuntimeCmd for NGGateway {
         let ctx = NGAppContext::instance().await;
         let settings = ctx.settings()?;
 
-        let conn = get_db_connection().await?;
-        let created = AppRepository::create(app.into_active_model(), Some(&conn)).await?;
+        let created =
+            AppRepository::create::<DatabaseConnection>(app.into_active_model(), None).await?;
 
         if let Err(e) = self
             .northward_manager
             .create_and_start_app(
                 &created,
                 None,
-                &conn,
                 Arc::clone(&self.northward_events_bus),
                 self.shutdown_token.child_token(),
                 settings.general.northward.start_timeout_ms(),
@@ -1266,7 +1266,7 @@ impl AppRuntimeCmd for NGGateway {
         {
             error!(app_id=%created.id, error=%e, "Failed to start northward app");
             // Update status to Disabled on failure
-            let _ = AppRepository::delete(created.id, Some(&conn)).await?;
+            let _ = AppRepository::delete::<DatabaseConnection>(created.id, None).await?;
             return Err(e);
         }
         Ok(())
@@ -1282,8 +1282,8 @@ impl AppRuntimeCmd for NGGateway {
             None => return Err(NGError::Error("Northward app not found".to_string())),
         };
 
-        let conn = get_db_connection().await?;
-        let updated = AppRepository::update(app.into_active_model(), Some(&conn)).await?;
+        let updated =
+            AppRepository::update::<DatabaseConnection>(app.into_active_model(), None).await?;
 
         match updated.status {
             Status::Disabled => self.northward_manager.stop_and_remove_app(updated.id).await,
@@ -1296,7 +1296,6 @@ impl AppRuntimeCmd for NGGateway {
                     .restart_app(
                         &updated,
                         sub,
-                        &conn,
                         Arc::clone(&self.northward_events_bus),
                         self.shutdown_token.child_token(),
                         settings.general.northward.start_timeout_ms(),
@@ -1305,7 +1304,7 @@ impl AppRuntimeCmd for NGGateway {
                 {
                     let _ = AppRepository::update::<DatabaseConnection>(
                         previous.into_active_model(),
-                        Some(&conn),
+                        None,
                     )
                     .await?;
                     return Err(e);
@@ -1335,14 +1334,12 @@ impl AppRuntimeCmd for NGGateway {
                 self.northward_manager.stop_and_remove_app(app.id).await;
             }
             Status::Enabled => {
-                let conn = get_db_connection().await?;
                 let subs = AppSubRepository::find_by_app_id(app.id).await?;
 
                 self.northward_manager
                     .restart_app(
                         &app,
                         subs,
-                        &conn,
                         Arc::clone(&self.northward_events_bus),
                         self.shutdown_token.child_token(),
                         settings.general.northward.start_timeout_ms(),

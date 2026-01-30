@@ -9,7 +9,7 @@
 use super::{
     super::{
         lifecycle::{start_with_policy, StartPolicy},
-        northward::{NorthwardEventsBus, NorthwardRegistry},
+        northward::{HostExtensionStoreHub, NorthwardEventsBus, NorthwardRegistry},
         southward::manager::NGSouthwardManager,
     },
     actor::AppActor,
@@ -53,6 +53,9 @@ pub struct NGNorthwardManager {
 
     /// Tracker storing per-app subscription reconciliation state.
     pub(super) subscription_tracker: Arc<SubscriptionSyncTracker>,
+
+    /// Host-owned extension store hub (actor-backed).
+    pub(super) extension_store_hub: HostExtensionStoreHub,
 }
 
 impl NGNorthwardManager {
@@ -61,6 +64,7 @@ impl NGNorthwardManager {
         plugin_registry: NorthwardRegistry,
         metrics_hub: Arc<NGMetricsHub>,
         southward_manager: Arc<NGSouthwardManager>,
+        db: DatabaseConnection,
     ) -> Arc<Self> {
         Arc::new(Self {
             plugin_registry,
@@ -69,6 +73,7 @@ impl NGNorthwardManager {
             metrics_hub,
             southward_manager,
             subscription_tracker: Arc::new(SubscriptionSyncTracker::new()),
+            extension_store_hub: HostExtensionStoreHub::new(db),
         })
     }
 
@@ -200,21 +205,13 @@ impl NGNorthwardManager {
         &self,
         app: &AppModel,
         sub: Option<AppSubModel>,
-        db: &DatabaseConnection,
         northward_events_bus: Arc<NorthwardEventsBus>,
         shutdown_token: CancellationToken,
         timeout_ms: u64,
     ) -> NGResult<()> {
         self.stop_and_remove_app(app.id).await;
-        self.create_and_start_app(
-            app,
-            sub,
-            db,
-            northward_events_bus,
-            shutdown_token,
-            timeout_ms,
-        )
-        .await
+        self.create_and_start_app(app, sub, northward_events_bus, shutdown_token, timeout_ms)
+            .await
     }
 
     /// Create and start a new app at runtime
@@ -229,7 +226,6 @@ impl NGNorthwardManager {
     /// # Arguments
     /// * `app` - Application model from database
     /// * `subs` - Subscription models for this app
-    /// * `db` - Database connection for extension manager
     /// * `global_events_tx` - Global event channel sender for forwarding app events
     /// * `shutdown_token` - Cancellation token for graceful shutdown
     /// * `timeout_ms` - Maximum time to wait for connection (default: 30000ms)
@@ -237,7 +233,6 @@ impl NGNorthwardManager {
         &self,
         app: &AppModel,
         sub: Option<AppSubModel>,
-        db: &DatabaseConnection,
         northward_events_bus: Arc<NorthwardEventsBus>,
         shutdown_token: CancellationToken,
         timeout_ms: u64,
@@ -248,9 +243,7 @@ impl NGNorthwardManager {
         }
 
         // Prepare runtime: create actor + update router + compute sync plan
-        let (actor, pending_plan) = self
-            .prepare_app_runtime(app, sub, db, shutdown_token)
-            .await?;
+        let (actor, pending_plan) = self.prepare_app_runtime(app, sub, shutdown_token).await?;
 
         // Start actor with SyncWaitConnected policy (wait for connection)
         match self

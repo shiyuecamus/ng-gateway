@@ -607,11 +607,45 @@ pub(super) fn build_metadata() -> PluginConfigSchemas {
                     when: None,
                 })),
                 Node::Field(Box::new(Field {
+                    path: "communication.max_payload_bytes".into(),
+                    label: ui_text!(en = "Max Payload Bytes", zh = "最大消息体字节数"),
+                    data_type: UiDataType::Integer,
+                    // Default aligns with code: 9KB headroom under common 10KB broker limit.
+                    default_value: Some(json!(9 * 1024)),
+                    order: Some(4),
+                    ui: None,
+                    rules: Some(Rules {
+                        required: Some(RuleValue::WithMessage {
+                            value: true,
+                            message: Some(ui_text!(
+                                en = "Max Payload Bytes is required",
+                                zh = "最大消息体字节数是必填项"
+                            )),
+                        }),
+                        min: Some(RuleValue::WithMessage {
+                            value: 256.0,
+                            message: Some(ui_text!(
+                                en = "Too small; must be >= 256",
+                                zh = "过小；必须 >= 256"
+                            )),
+                        }),
+                        max: Some(RuleValue::WithMessage {
+                            value: 1024.0 * 1024.0,
+                            message: Some(ui_text!(
+                                en = "Too large; must be <= 1 MiB",
+                                zh = "过大；必须 <= 1 MiB"
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    when: None,
+                })),
+                Node::Field(Box::new(Field {
                     path: "communication.keep_alive".into(),
                     label: ui_text!(en = "Keep Alive", zh = "保活"),
                     data_type: UiDataType::Integer,
                     default_value: Some(json!(60)),
-                    order: Some(4),
+                    order: Some(5),
                     ui: None,
                     rules: Some(Rules {
                         required: Some(RuleValue::WithMessage {
@@ -629,7 +663,7 @@ pub(super) fn build_metadata() -> PluginConfigSchemas {
                     label: ui_text!(en = "Clean Session", zh = "清理会话"),
                     data_type: UiDataType::Boolean,
                     default_value: Some(json!(false)),
-                    order: Some(5),
+                    order: Some(6),
                     ui: None,
                     rules: Some(Rules {
                         required: Some(RuleValue::WithMessage {

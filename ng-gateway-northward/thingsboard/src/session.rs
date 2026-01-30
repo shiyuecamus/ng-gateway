@@ -99,6 +99,11 @@ impl Session for ThingsBoardSession {
                             }
                         }
                         Err(e) => {
+                            warn!(
+                                app_id = self.app_id,
+                                error = %e,
+                                "ThingsBoard MQTT event loop stopped with error"
+                            );
                             return Err(NorthwardError::MqttError { reason: e.to_string() });
                         }
                     }

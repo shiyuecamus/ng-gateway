@@ -131,6 +131,16 @@ pub struct CommunicationConfig {
     /// Whether to retain messages
     #[serde(default = "CommunicationConfig::default_retain_messages")]
     pub retain_messages: bool,
+    /// Maximum payload size (bytes) for a single MQTT publish.
+    ///
+    /// Some brokers (including common ThingsBoard deployments) enforce a strict
+    /// maximum packet size. Rumqttc also validates this limit and will fail the
+    /// session if we attempt to publish an oversized packet.
+    ///
+    /// This limit is applied after JSON serialization, so it reflects the real
+    /// bytes sent on the wire (excluding MQTT framing overhead).
+    #[serde(default = "CommunicationConfig::default_max_payload_bytes")]
+    pub max_payload_bytes: usize,
     /// MQTT keep-alive interval in seconds
     #[serde(default = "CommunicationConfig::default_keep_alive")]
     pub keep_alive: u16,
@@ -174,6 +184,11 @@ impl CommunicationConfig {
         false
     }
 
+    fn default_max_payload_bytes() -> usize {
+        // Default to 9KB to stay under common 10KB broker limits with headroom.
+        9 * 1024
+    }
+
     fn default_keep_alive() -> u16 {
         60
     }
@@ -189,6 +204,7 @@ impl Default for CommunicationConfig {
             message_format: CommunicationConfig::default_message_format(),
             qos: CommunicationConfig::default_qos(),
             retain_messages: CommunicationConfig::default_retain_messages(),
+            max_payload_bytes: CommunicationConfig::default_max_payload_bytes(),
             keep_alive: CommunicationConfig::default_keep_alive(),
             clean_session: CommunicationConfig::default_clean_session(),
         }

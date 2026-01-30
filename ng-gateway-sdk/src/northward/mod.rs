@@ -14,7 +14,7 @@ pub(crate) mod types;
 
 use crate::{
     supervision::{NoopObserverFactory, ObserverFactory},
-    ConnectionState, NorthwardResult,
+    ConnectionState, ExtensionStore, NorthwardResult,
 };
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
@@ -51,11 +51,11 @@ use tokio::sync::{broadcast, mpsc, watch};
 ///     let config = ctx.config.downcast_arc::<MyPluginConfig>()?;
 ///     
 ///     // Check for existing credentials
-///     if let Some(creds) = ctx.extension_manager.get("provision_credentials").await? {
+///     if let Some(creds) = ctx.extension_store.get("provision_credentials").await? {
 ///         // Use existing credentials
 ///     } else {
 ///         // Perform provision and store credentials
-///         ctx.extension_manager.set("provision_credentials", &creds).await?;
+///         ctx.extension_store.set("provision_credentials", &creds).await?;
 ///     }
 ///     
 ///     // Use retry policy for connection management
@@ -67,8 +67,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 /// ```
 #[derive(Clone)]
 pub struct NorthwardInitContext {
-    /// Extension manager for plugin-specific persistent data
-    pub extension_manager: Arc<dyn extension::ExtensionManager>,
+    /// Extension store for plugin-specific persistent data (host-owned storage).
+    pub extension_store: Arc<dyn ExtensionStore>,
     /// App ID for logging and metrics
     pub app_id: i32,
     /// App name for identification

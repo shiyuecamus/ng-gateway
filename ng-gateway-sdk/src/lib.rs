@@ -41,7 +41,7 @@ pub use northward::buffer::DeviceBuffers;
 /// Northward envelope protocol types (re-exported at crate root).
 pub use northward::{
     envelope,
-    extension::{ExtensionManager, ExtensionManagerExt},
+    extension::{ExtensionStore, ExtensionStoreExt},
     mapping,
     model::{
         AlarmData, AttributeData, ClientRpcResponse, Command, DeviceConnectedData,

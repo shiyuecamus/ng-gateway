@@ -1,5 +1,5 @@
 use super::config::{ConnectionConfig, ProvisionMethod};
-use ng_gateway_sdk::{ExtensionManager, ExtensionManagerExt, NorthwardError, NorthwardResult};
+use ng_gateway_sdk::{ExtensionStore, ExtensionStoreExt, NorthwardError, NorthwardResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -262,7 +262,7 @@ pub enum ProvisionCredentials {
 /// - `Err(_)` for configuration or I/O errors
 pub async fn load_or_prepare_credentials(
     connection_config: &ConnectionConfig,
-    extension_manager: &Arc<dyn ExtensionManager>,
+    extension_store: &Arc<dyn ExtensionStore>,
 ) -> NorthwardResult<Option<ProvisionCredentials>> {
     match connection_config {
         ConnectionConfig::None { .. } => {
@@ -315,7 +315,7 @@ pub async fn load_or_prepare_credentials(
         ConnectionConfig::Provision { .. } => {
             // Provision mode - try to load from extension manager
             // Returns None if not found (caller should trigger provision)
-            extension_manager
+            extension_store
                 .get::<ProvisionCredentials>(STORAGE_KEY_PROVISION_CREDENTIALS)
                 .await
         }
@@ -329,9 +329,9 @@ pub async fn load_or_prepare_credentials(
 /// * `extension_manager` - Extension manager for persistent storage
 pub async fn store_credentials(
     credentials: &ProvisionCredentials,
-    extension_manager: &Arc<dyn ExtensionManager>,
+    extension_store: &Arc<dyn ExtensionStore>,
 ) -> NorthwardResult<()> {
-    extension_manager
+    extension_store
         .set(STORAGE_KEY_PROVISION_CREDENTIALS, credentials)
         .await
 }

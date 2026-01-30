@@ -22,7 +22,7 @@ use super::{
 use ng_gateway_sdk::{
     mqtt::router::{HandlerResult, MessageHandler, MessageRouter},
     supervision::{Connector, Session, SessionContext},
-    ExtensionManager, FailureKind, FailurePhase, NorthwardError, NorthwardEvent,
+    ExtensionStore, FailureKind, FailurePhase, NorthwardError, NorthwardEvent,
     NorthwardInitContext, NorthwardResult, NorthwardRuntimeApi,
 };
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
@@ -39,7 +39,7 @@ use tracing::{info, warn};
 #[derive(Clone)]
 pub struct ThingsBoardConnector {
     config: Arc<ThingsBoardPluginConfig>,
-    extension_manager: Arc<dyn ExtensionManager>,
+    extension_store: Arc<dyn ExtensionStore>,
     app_id: i32,
     app_name: String,
     runtime: Arc<dyn NorthwardRuntimeApi>,
@@ -59,7 +59,7 @@ impl ThingsBoardConnector {
 
         Ok(Self {
             config,
-            extension_manager: ctx.extension_manager,
+            extension_store: ctx.extension_store,
             app_id: ctx.app_id,
             app_name: ctx.app_name,
             runtime: ctx.runtime,
@@ -166,12 +166,12 @@ impl ThingsBoardConnector {
         &self,
         ctx: &SessionContext,
     ) -> NorthwardResult<ProvisionCredentials> {
-        match load_or_prepare_credentials(&self.config.connection, &self.extension_manager).await? {
+        match load_or_prepare_credentials(&self.config.connection, &self.extension_store).await? {
             Some(creds) => Ok(creds),
             None => {
                 // Provision mode but no stored credentials.
                 let creds = self.perform_provision(ctx).await?;
-                store_credentials(&creds, &self.extension_manager).await?;
+                store_credentials(&creds, &self.extension_store).await?;
                 Ok(creds)
             }
         }

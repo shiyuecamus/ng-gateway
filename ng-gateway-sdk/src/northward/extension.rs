@@ -4,18 +4,23 @@ use downcast_rs::{impl_downcast, DowncastSync};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 
-/// Core extension manager trait for plugin-specific persistent data (object-safe)
+/// Core extension store trait for plugin-specific persistent data (object-safe).
 ///
 /// This trait provides a key-value store interface using raw JSON values.
-/// Use the `ExtensionManagerExt` trait for ergonomic typed access.
+/// Use the `ExtensionStoreExt` trait for ergonomic typed access.
 ///
 /// # Design Philosophy
-/// - **Object-Safe**: Can be used as `Arc<dyn ExtensionManager>`
-/// - **Flexible**: Raw JSON methods for maximum flexibility
-/// - **Efficient**: Database-backed with indexing and caching
-/// - **Isolated**: Each app's extensions are completely isolated
+/// - **Object-Safe**: Can be used as `Arc<dyn ExtensionStore>`
+/// - **Control-plane only**: Intended for low-frequency, non-hot-path operations
+/// - **Host-owned storage**: The gateway host must own all persistence (DB)
+/// - **Isolation**: Each app's extensions are completely isolated
+///
+/// # Best practice (important)
+/// Northward plugins may be loaded as `cdylib` and can run on a separate Tokio runtime.
+/// Therefore, plugin code MUST NOT call into host DB/SQLx directly.
+/// This abstraction is designed so the host can implement it via an actor/RPC bridge.
 #[async_trait]
-pub trait ExtensionManager: DowncastSync + Send + Sync {
+pub trait ExtensionStore: DowncastSync + Send + Sync {
     /// Delete an extension by key
     ///
     /// # Arguments
@@ -24,7 +29,7 @@ pub trait ExtensionManager: DowncastSync + Send + Sync {
     /// # Returns
     /// * `Ok(true)` - Key existed and was deleted
     /// * `Ok(false)` - Key did not exist
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn delete(&self, key: &str) -> NorthwardResult<bool>;
 
     /// Check if a key exists
@@ -35,28 +40,28 @@ pub trait ExtensionManager: DowncastSync + Send + Sync {
     /// # Returns
     /// * `Ok(true)` - Key exists
     /// * `Ok(false)` - Key does not exist
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn exists(&self, key: &str) -> NorthwardResult<bool>;
 
     /// Get all extension keys for this app
     ///
     /// # Returns
     /// * `Ok(Vec<String>)` - List of all keys
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn keys(&self) -> NorthwardResult<Vec<String>>;
 
     /// Clear all extensions for this app
     ///
     /// # Returns
     /// * `Ok(count)` - Number of extensions deleted
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn clear(&self) -> NorthwardResult<u64>;
 
     /// Get the number of extensions for this app
     ///
     /// # Returns
     /// * `Ok(count)` - Number of extensions
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn len(&self) -> NorthwardResult<usize>;
 
     /// Check if there are no extensions for this app
@@ -64,7 +69,7 @@ pub trait ExtensionManager: DowncastSync + Send + Sync {
     /// # Returns
     /// * `Ok(true)` - No extensions exist
     /// * `Ok(false)` - At least one extension exists
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn is_empty(&self) -> NorthwardResult<bool> {
         Ok(self.len().await? == 0)
     }
@@ -77,7 +82,7 @@ pub trait ExtensionManager: DowncastSync + Send + Sync {
     /// # Returns
     /// * `Ok(Some(Value))` - Raw JSON value
     /// * `Ok(None)` - Key not found
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn get_raw(&self, key: &str) -> NorthwardResult<Option<serde_json::Value>>;
 
     /// Set a raw JSON value by key
@@ -90,7 +95,7 @@ pub trait ExtensionManager: DowncastSync + Send + Sync {
     ///
     /// # Returns
     /// * `Ok(())` - Value stored successfully
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn set_raw(&self, key: &str, value: serde_json::Value) -> NorthwardResult<()>;
 
     /// Get multiple raw JSON values by keys
@@ -100,16 +105,16 @@ pub trait ExtensionManager: DowncastSync + Send + Sync {
     ///
     /// # Returns
     /// * `Ok(HashMap)` - Map of key -> raw JSON value (only existing keys)
-    /// * `Err(...)` - Database error
+    /// * `Err(...)` - Storage error
     async fn get_many_raw(
         &self,
         keys: &[&str],
     ) -> NorthwardResult<HashMap<String, serde_json::Value>>;
 }
 
-impl_downcast!(sync ExtensionManager);
+impl_downcast!(sync ExtensionStore);
 
-/// Extension trait providing typed access to ExtensionManager
+/// Extension trait providing typed access to `ExtensionStore`.
 ///
 /// This trait provides ergonomic typed methods with automatic
 /// serialization/deserialization on top of the raw JSON methods.
@@ -117,7 +122,7 @@ impl_downcast!(sync ExtensionManager);
 /// # Examples
 ///
 /// ```ignore
-/// use ng_gateway_sdk::northward::extension::ExtensionManagerExt;
+/// use ng_gateway_sdk::northward::extension::ExtensionStoreExt;
 ///
 /// // Persist provision credentials
 /// #[derive(Serialize, Deserialize)]
@@ -133,7 +138,7 @@ impl_downcast!(sync ExtensionManager);
 /// let data: ProvisionData = ext_mgr.get("provision").await?.unwrap();
 /// ```
 #[async_trait]
-pub trait ExtensionManagerExt: ExtensionManager {
+pub trait ExtensionStoreExt: ExtensionStore {
     /// Get a value by key with automatic deserialization
     ///
     /// # Type Parameters
@@ -213,5 +218,5 @@ pub trait ExtensionManagerExt: ExtensionManager {
     }
 }
 
-// Blanket implementation: any ExtensionManager gets ExtensionManagerExt for free
-impl<T: ExtensionManager + ?Sized> ExtensionManagerExt for T {}
+// Blanket implementation: any ExtensionStore gets ExtensionStoreExt for free
+impl<T: ExtensionStore + ?Sized> ExtensionStoreExt for T {}

@@ -44,10 +44,12 @@ pub enum NGValueCastError {
 /// This only affects `NGValue::Binary`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BinaryJsonEncoding {
-    /// Encode binary as Base64 string (recommended for northbound protocols).
-    #[default]
+    /// Encode binary as Base64 string.
     Base64,
     /// Encode binary as hex string.
+    ///
+    /// This is the **global default** encoding.
+    #[default]
     Hex,
 }
 
@@ -101,6 +103,57 @@ pub enum NGValue {
     String(Arc<str>),
     Binary(Bytes),
     Timestamp(i64),
+}
+
+/// Serialize `NGValue` into JSON with **default** encoding semantics.
+///
+/// # Semantics (must be stable)
+/// This implementation is intentionally aligned with `NGValue::to_json_value(NGValueJsonOptions::default())`:
+/// - `Binary` is encoded as **hex** string
+/// - `Timestamp` is encoded as **Unix milliseconds** number
+/// - Non-finite floats (NaN/Inf) are encoded as **null**
+///
+/// # Why
+/// Northward plugins write JSON on a hot path. Implementing `Serialize` allows
+/// `serde_json::to_writer` to stream values without allocating intermediate
+/// `serde_json::Value` objects.
+impl Serialize for NGValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            NGValue::Boolean(v) => serializer.serialize_bool(*v),
+            NGValue::Int8(v) => serializer.serialize_i8(*v),
+            NGValue::UInt8(v) => serializer.serialize_u8(*v),
+            NGValue::Int16(v) => serializer.serialize_i16(*v),
+            NGValue::UInt16(v) => serializer.serialize_u16(*v),
+            NGValue::Int32(v) => serializer.serialize_i32(*v),
+            NGValue::UInt32(v) => serializer.serialize_u32(*v),
+            NGValue::Int64(v) => serializer.serialize_i64(*v),
+            NGValue::UInt64(v) => serializer.serialize_u64(*v),
+            NGValue::Float32(v) => {
+                if v.is_finite() {
+                    serializer.serialize_f32(*v)
+                } else {
+                    serializer.serialize_unit()
+                }
+            }
+            NGValue::Float64(v) => {
+                if v.is_finite() {
+                    serializer.serialize_f64(*v)
+                } else {
+                    serializer.serialize_unit()
+                }
+            }
+            NGValue::String(v) => serializer.serialize_str(v.as_ref()),
+            NGValue::Binary(v) => {
+                let s = hex::encode(v.as_ref());
+                serializer.serialize_str(&s)
+            }
+            NGValue::Timestamp(v) => serializer.serialize_i64(*v),
+        }
+    }
 }
 
 impl NGValue {
@@ -1232,17 +1285,6 @@ impl TryFrom<NGValue> for Vec<u8> {
             NGValue::Float64(n) => n.to_be_bytes().to_vec(),
             NGValue::Timestamp(ms) => ms.to_be_bytes().to_vec(),
         })
-    }
-}
-
-impl Serialize for NGValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // Default encoding: binary base64 + timestamp unix_ms.
-        let v = self.to_json_value(NGValueJsonOptions::default());
-        v.serialize(serializer)
     }
 }
 

@@ -11,7 +11,6 @@ use super::{
     super::lifecycle::StartPolicy,
     actor::{AppActor, AppActorParams, AppIo, NorthwardAppObserverFactory},
     bus::NorthwardEventsBus,
-    extension::AppExtensionManager,
     manager::NGNorthwardManager,
     runtime_api::CoreNorthwardRuntimeApi,
     subscription_sync::{compute_sync_plan, SyncPlan},
@@ -22,7 +21,6 @@ use ng_gateway_models::{
     enums::common::Status,
 };
 use ng_gateway_sdk::NorthwardInitContext;
-use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -36,12 +34,10 @@ impl NGNorthwardManager {
     ///
     /// # Arguments
     /// * `topology` - Vector of (app, subscriptions) tuples from database
-    /// * `db` - Database connection for extension manager
     /// * `northward_events_bus` - Global bus for forwarding app events to Gateway
     pub async fn initialize_topology(
         &self,
         topology: Vec<(AppModel, Option<AppSubModel>)>,
-        db: &DatabaseConnection,
         northward_events_bus: &Arc<NorthwardEventsBus>,
     ) -> NGResult<()> {
         info!(
@@ -59,7 +55,7 @@ impl NGNorthwardManager {
 
         for (app, sub) in topology {
             match self
-                .prepare_app_runtime(&app, sub, db, CancellationToken::new())
+                .prepare_app_runtime(&app, sub, CancellationToken::new())
                 .await
             {
                 Ok((actor, pending_plan)) => {
@@ -139,12 +135,10 @@ impl NGNorthwardManager {
     ///
     /// # Arguments
     /// * `app` - App model from database
-    /// * `db` - Database connection for extension manager
     /// * `shutdown_token` - Cancellation token for graceful shutdown
     pub async fn create_app_actor(
         &self,
         app: &AppModel,
-        db: &DatabaseConnection,
         shutdown_token: CancellationToken,
     ) -> NGResult<Arc<AppActor>> {
         // Get plugin factory
@@ -164,8 +158,9 @@ impl NGNorthwardManager {
         // Create events channel for business events (RPC, Command, Attribute)
         let (events_tx, events_rx) = mpsc::channel(1024);
 
-        // Create extension manager for this app (with database connection)
-        let extension_manager = Arc::new(AppExtensionManager::new(app.id, db.clone()));
+        // Create extension store client for this app (actor-backed, host-owned DB).
+        // All persistence is centralized in the host actor.
+        let extension_store = self.extension_store_hub.client(app.id);
 
         // Build per-app I/O first so the supervision Observer can flush buffers on Connected.
         let io = AppIo::new(&self.metrics_hub, app.id, app.plugin_id, app.queue_policy)?;
@@ -177,7 +172,7 @@ impl NGNorthwardManager {
 
         // Create initialization context with all dependencies
         let init_ctx = NorthwardInitContext {
-            extension_manager,
+            extension_store,
             app_id: app.id,
             app_name: app.name.clone(),
             config: Arc::clone(&config),
@@ -220,11 +215,10 @@ impl NGNorthwardManager {
         &self,
         app: &AppModel,
         sub: Option<AppSubModel>,
-        db: &DatabaseConnection,
         shutdown_token: CancellationToken,
     ) -> NGResult<(Arc<AppActor>, Option<SyncPlan>)> {
         // Create actor
-        let actor = self.create_app_actor(app, db, shutdown_token).await?;
+        let actor = self.create_app_actor(app, shutdown_token).await?;
 
         let mut pending_plan: Option<SyncPlan> = None;
 

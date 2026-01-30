@@ -3,7 +3,8 @@ use ng_gateway_error::{storage::StorageError, StorageResult};
 use ng_gateway_models::{
     domain::prelude::{AppInfo, AppPageParams, PageResult},
     entities::prelude::{
-        App, AppActiveModel, AppColumn, AppModel, AppSub, AppSubColumn, AppSubModel, Plugin,
+        App, AppActiveModel, AppColumn, AppExt, AppExtColumn, AppModel, AppSub, AppSubColumn,
+        AppSubModel, Plugin,
     },
 };
 use sea_orm::{
@@ -66,6 +67,15 @@ impl AppRepository {
         let conn = get_db_connection().await?;
         conn.transaction::<_, _, StorageError>(|txn| {
             Box::pin(async move {
+                // Ensure plugin-specific extensions are cleaned up to avoid orphaned rows.
+                //
+                // Note: We do not rely on database-level FK cascades here because current
+                // schema initializers do not declare explicit foreign key constraints.
+                AppExt::delete_many()
+                    .filter(AppExtColumn::AppId.eq(id))
+                    .exec(txn)
+                    .await?;
+
                 AppSub::delete_many()
                     .filter(AppSubColumn::AppId.eq(id))
                     .exec(txn)

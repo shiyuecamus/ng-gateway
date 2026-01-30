@@ -146,6 +146,13 @@ pub enum NorthwardError {
     /// Runtime execution error within the plugin environment (e.g. task cancellation)
     #[error("Runtime error: {reason}")]
     RuntimeError { reason: String },
+
+    /// Host-owned storage error (DB, durable KV, etc.).
+    ///
+    /// # Notes
+    /// This is primarily used for control-plane persistence such as northward app extensions.
+    #[error("Storage error: {reason}")]
+    StorageError { reason: String },
 }
 
 impl From<serde_json::Error> for NorthwardError {

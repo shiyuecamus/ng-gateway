@@ -10,7 +10,7 @@ mod topology;
 
 pub use actor::AppActor;
 pub use bus::NorthwardEventsBus;
-pub use extension::AppExtensionManager;
+pub use extension::{HostExtensionStore, HostExtensionStoreHub};
 pub use loader::{NorthwardLoader, NorthwardProbeInfo, NorthwardRegistry};
 pub use manager::NGNorthwardManager;
 pub use router::SubscriptionRouter;
