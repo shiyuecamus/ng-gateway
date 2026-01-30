@@ -3,7 +3,7 @@ pub mod commands;
 pub mod gateway;
 pub mod lifecycle;
 pub mod northward;
-pub mod observability;
+pub mod observer;
 pub mod realtime;
 pub mod southward;
 

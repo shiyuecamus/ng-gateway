@@ -2,9 +2,8 @@ use crate::config::OpcuaServerPluginConfig;
 use crate::node_cache::NodeCache;
 use chrono::{DateTime as ChronoDateTime, Utc};
 use ng_gateway_sdk::{
-    AccessMode, DataType, NGValue, NorthwardError, NorthwardEvent, NorthwardResult,
-    NorthwardRuntimeApi, PointMeta, WritePoint, WritePointErrorKind, WritePointResponse,
-    WritePointStatus,
+    DataType, NGValue, NorthwardError, NorthwardEvent, NorthwardResult, NorthwardRuntimeApi,
+    PointMeta, WritePoint, WritePointErrorKind, WritePointResponse, WritePointStatus,
 };
 use opcua::types::{ByteString, Variant};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -128,11 +127,11 @@ impl WriteDispatcher {
 }
 
 fn ensure_writeable(meta: &PointMeta) -> Result<(), NorthwardError> {
-    if matches!(meta.access_mode, AccessMode::Write | AccessMode::ReadWrite) {
+    if meta.writable() {
         Ok(())
     } else {
         Err(NorthwardError::ValidationFailed {
-            reason: "point is not writeable".to_string(),
+            reason: "point is not writable".to_string(),
         })
     }
 }

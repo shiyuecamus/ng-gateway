@@ -10,7 +10,7 @@
 //! - Avoids allocations on hot paths; minor allocations are acceptable here.
 
 use super::{bus::SouthwardDataBus, index::RuntimeIndex};
-use crate::observability::supervision::{CompositeObserver, CoreObserverFactory};
+use crate::observer::{CompositeObserver, CoreObserverFactory};
 use chrono::Utc;
 use ng_gateway_common::metrics::{southward::SouthwardChannelMetricHandles, NGMetricsHub};
 use ng_gateway_sdk::{
@@ -97,8 +97,8 @@ impl Observer for SouthwardChannelObserver {
 
         // Update manager snapshot state & activity timestamps (best-effort).
         if let Some(mut entry) = self.index.channels.get_mut(&self.channel_id) {
-            entry.state = Arc::new(state.clone());
-            entry.last_activity = Utc::now();
+            entry.set_state(Arc::new(state.clone()));
+            entry.touch_activity(Utc::now());
         }
 
         let is_connected = state.is_connected();

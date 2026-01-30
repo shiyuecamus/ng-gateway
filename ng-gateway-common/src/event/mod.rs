@@ -103,13 +103,9 @@ impl EventBus for NGEventBus {
         {
             let mut lock = dispatcher.write().await;
             lock.add_handler(handler);
+            // Start dispatcher loop (best-effort) without holding the lock across `.await`.
+            lock.start();
         }
-
-        let dispatcher_clone = Arc::clone(&dispatcher);
-        tokio::spawn(async move {
-            let mut lock = dispatcher_clone.write().await;
-            lock.start().await;
-        });
     }
 
     #[inline]
@@ -121,9 +117,11 @@ impl EventBus for NGEventBus {
     {
         let event_type = type_name::<E>();
         let event = Arc::new(event);
-        // Update statistics
-        let mut stats = self.stats.write().await;
-        stats.total_events += 1;
+        // Update statistics (drop lock before any further awaits).
+        {
+            let mut stats = self.stats.write().await;
+            stats.total_events += 1;
+        }
 
         // Send event to all subscribers
         let sender = self.get_channel::<E>().await;
@@ -154,8 +152,9 @@ type EventHandler<E> = Arc<Mutex<dyn FnMut(&E) -> NGResult<()> + Send + Sync>>;
 /// Event dispatcher for handling specific event types
 pub struct EventDispatcher<E: NGEvent> {
     event_bus: Arc<NGEventBus>,
-    receiver: Receiver<Arc<dyn NGEvent>>,
+    receiver: Option<Receiver<Arc<dyn NGEvent>>>,
     handlers: Vec<EventHandler<E>>,
+    started: bool,
     _phantom: PhantomData<E>,
 }
 
@@ -166,8 +165,9 @@ impl<E: NGEvent> EventDispatcher<E> {
 
         Self {
             event_bus,
-            receiver,
+            receiver: Some(receiver),
             handlers: Vec::new(),
+            started: false,
             _phantom: PhantomData,
         }
     }
@@ -189,32 +189,45 @@ impl<E: NGEvent> EventDispatcher<E> {
 
     #[inline]
     /// Starts processing events
-    pub async fn start(&mut self) {
-        let handlers = &self.handlers;
-        let event_bus = &self.event_bus;
+    pub fn start(&mut self) {
+        if self.started {
+            return;
+        }
+        let Some(mut receiver) = self.receiver.take() else {
+            // Already taken by a previous start attempt.
+            self.started = true;
+            return;
+        };
+        self.started = true;
 
-        while let Ok(event) = self.receiver.recv().await {
-            if let Ok(event) = event.downcast_arc::<E>() {
-                let mut successful = 0;
-                let mut failed = 0;
+        // Clone shared state for the background loop.
+        let handlers = self.handlers.clone();
+        let event_bus = Arc::clone(&self.event_bus);
 
-                for handler in handlers {
-                    let mut handler = handler.lock().await;
-                    match handler(&event) {
-                        Ok(_) => successful += 1,
-                        Err(e) => {
-                            warn!(error=%e, "Handler failed");
-                            failed += 1;
+        tokio::spawn(async move {
+            while let Ok(event) = receiver.recv().await {
+                if let Ok(event) = event.downcast_arc::<E>() {
+                    let mut successful = 0;
+                    let mut failed = 0;
+
+                    for handler in handlers.iter() {
+                        let mut handler = handler.lock().await;
+                        match handler(&event) {
+                            Ok(_) => successful += 1,
+                            Err(e) => {
+                                warn!(error=%e, "Handler failed");
+                                failed += 1;
+                            }
                         }
                     }
-                }
 
-                // Update statistics
-                let mut stats = event_bus.stats.write().await;
-                stats.successful_handlers += successful;
-                stats.failed_handlers += failed;
+                    // Update statistics
+                    let mut stats = event_bus.stats.write().await;
+                    stats.successful_handlers += successful;
+                    stats.failed_handlers += failed;
+                }
             }
-        }
+        });
     }
 
     #[inline]

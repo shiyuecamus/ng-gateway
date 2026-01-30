@@ -6,7 +6,7 @@
 //! - Own worker task with CancellationToken control
 //! - Lock-free metrics and config hot-reload
 
-use crate::observability::supervision::{CompositeObserver, CoreObserverFactory};
+use crate::observer::{CompositeObserver, CoreObserverFactory};
 use chrono::{DateTime, Utc};
 use ng_gateway_common::metrics::{
     channel::{bounded, InstrumentedReceiver, InstrumentedSender, QueueObserver},

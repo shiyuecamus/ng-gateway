@@ -4,8 +4,12 @@ use handlebars::{
     RenderErrorReason,
 };
 use once_cell::sync::Lazy;
+use serde::Serialize;
 use serde_json::Value;
-use std::sync::RwLock;
+use std::{
+    hash::{DefaultHasher, Hasher as _},
+    sync::RwLock,
+};
 
 /// Render a topic/key template using **Handlebars** syntax.
 ///
@@ -58,10 +62,53 @@ pub fn render_template(template: &str, data: &Value) -> String {
     hb.render_template(template, data).unwrap_or_default()
 }
 
+/// Render a topic/key template using **Handlebars** syntax from any serde-serializable context.
+///
+/// # Notes
+/// - This avoids forcing callers to allocate a `serde_json::Value` first.
+/// - Internally, Handlebars will still build its JSON context, but callers can pass borrowed
+///   views to avoid intermediate owned structures.
+pub fn render_template_serde<T: Serialize>(template: &str, data: &T) -> String {
+    static HB: Lazy<RwLock<Handlebars<'static>>> = Lazy::new(|| {
+        let mut hb = Handlebars::new();
+        hb.set_strict_mode(false);
+        hb.register_escape_fn(handlebars::no_escape);
+        hb.register_helper("default", Box::new(DefaultHelper));
+        RwLock::new(hb)
+    });
+    static REG: Lazy<DashMap<String, String>> = Lazy::new(DashMap::new); // template -> name
+
+    let name = if let Some(v) = REG.get(template) {
+        v.clone()
+    } else {
+        let processed = template.to_string();
+        let key = format!("t_{:x}", hash64(template.as_bytes()));
+        if let Ok(mut hb) = HB.write() {
+            if hb.get_template(&key).is_none() {
+                let _ = hb.register_template_string(&key, processed);
+            }
+        }
+        REG.insert(template.to_string(), key.clone());
+        key
+    };
+
+    if let Ok(hb) = HB.read() {
+        return hb
+            .render(&name, data)
+            .or(hb.render_template(template, data))
+            .unwrap_or_default();
+    }
+
+    // Lock poisoned: degrade gracefully by building a local renderer (no cache).
+    let mut hb = Handlebars::new();
+    hb.set_strict_mode(false);
+    hb.register_escape_fn(handlebars::no_escape);
+    hb.register_helper("default", Box::new(DefaultHelper));
+    hb.render_template(template, data).unwrap_or_default()
+}
+
 /// Stable, non-cryptographic hash for cache keys.
 fn hash64(bytes: &[u8]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::Hasher;
     let mut h = DefaultHasher::new();
     h.write(bytes);
     h.finish()

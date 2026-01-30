@@ -8,7 +8,11 @@ use ng_gateway_models::{domain::prelude::Claims, rbac::PermRule, PermChecker};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
-type BoxedPermRule = Box<dyn PermRule>;
+/// Shared permission rule handle stored in the registry.
+///
+/// Using `Arc` (instead of `Box`) allows us to clone the rule pointer and drop the
+/// `RwLock` guard before awaiting rule evaluation, preventing deadlocks.
+type BoxedPermRule = Arc<dyn PermRule>;
 
 /// Permission checker for API routes
 ///
@@ -64,7 +68,7 @@ impl PermChecker for NGPermChecker {
             });
         }
 
-        rules.insert(key, Box::new(rule));
+        rules.insert(key, Arc::new(rule));
         Ok(())
     }
 
@@ -86,7 +90,9 @@ impl PermChecker for NGPermChecker {
     ) -> NGResult<bool, RBACError> {
         let key = (method.to_string(), path.to_string());
 
-        if let Some(rule) = self.rules.read().await.get(&key) {
+        // IMPORTANT: never hold `RwLock` guards across `.await`.
+        let rule = self.rules.read().await.get(&key).map(Arc::clone);
+        if let Some(rule) = rule {
             return rule.check(method, path, claims).await;
         }
 

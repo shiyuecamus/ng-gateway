@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
+use std::{
+    fmt::{Display, Formatter},
+    sync::Arc,
+};
 
 /// Stable JSON envelope used by northward plugins for interop.
 ///
@@ -146,9 +149,9 @@ pub struct EnvelopeApp {
     /// App id in gateway.
     pub id: i32,
     /// App name.
-    pub name: String,
+    pub name: Arc<str>,
     /// Plugin type string (e.g. "pulsar").
-    pub plugin_type: String,
+    pub plugin_type: Arc<str>,
 }
 
 /// Device metadata.
@@ -157,15 +160,15 @@ pub struct EnvelopeDevice {
     /// Device id in gateway.
     pub id: i32,
     /// Device name.
-    pub name: String,
+    pub name: Arc<str>,
     /// Optional device type.
     #[serde(default)]
-    pub r#type: Option<String>,
+    pub r#type: Option<Arc<str>>,
 }
 
 /// Channel metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvelopeChannel {
     /// Channel name.
-    pub name: String,
+    pub name: Arc<str>,
 }

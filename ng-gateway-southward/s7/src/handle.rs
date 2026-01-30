@@ -105,7 +105,7 @@ impl SouthwardHandle for S7Handle {
                 let Ok(p) = Arc::clone(p_any).downcast_arc::<S7Point>() else {
                     continue;
                 };
-                if !matches!(p.access_mode(), AccessMode::Read | AccessMode::ReadWrite) {
+                if !p.readable() {
                     continue;
                 }
                 s7_points.push(p);

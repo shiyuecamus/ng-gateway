@@ -105,18 +105,21 @@ impl MessageRouter {
 
     /// Route a message to the appropriate handler
     pub async fn route_message(&self, topic: &str, payload: &[u8]) -> HandlerResult {
-        let routes = self.routes.read().await;
-
-        // Find matching route
-        for (route, handler) in routes.iter() {
-            if mqtt_pattern_matches(&route.pattern, topic) {
-                return handler(topic, payload).await;
-            }
+        // IMPORTANT: never hold `RwLock` guards across `.await`.
+        let matched: Option<MessageHandler> = {
+            let routes = self.routes.read().await;
+            routes
+                .iter()
+                .find(|(route, _)| mqtt_pattern_matches(&route.pattern, topic))
+                .map(|(_, handler)| Arc::clone(handler))
+        };
+        if let Some(handler) = matched {
+            return handler(topic, payload).await;
         }
 
         // Try default handler if no route matched
-        let default_handler = self.default_handler.read().await;
-        if let Some(handler) = default_handler.as_ref() {
+        let default_handler = self.default_handler.read().await.clone();
+        if let Some(handler) = default_handler {
             tracing::debug!("No specific route found for topic '{topic}', using default handler");
             return handler(topic, payload).await;
         }
@@ -127,8 +130,9 @@ impl MessageRouter {
 
     /// Handle connection established event
     pub async fn handle_connected(&self) -> HandlerResult {
-        let connection_handler = self.connection_handler.read().await;
-        if let Some(handler) = connection_handler.as_ref() {
+        // IMPORTANT: never hold `RwLock` guards across `.await`.
+        let handler = self.connection_handler.read().await.clone();
+        if let Some(handler) = handler {
             handler().await
         } else {
             tracing::debug!("Connection established but no connection handler registered");
@@ -138,8 +142,9 @@ impl MessageRouter {
 
     /// Handle connection lost event
     pub async fn handle_disconnected(&self, reason: Option<String>) -> HandlerResult {
-        let disconnection_handler = self.disconnection_handler.read().await;
-        if let Some(handler) = disconnection_handler.as_ref() {
+        // IMPORTANT: never hold `RwLock` guards across `.await`.
+        let handler = self.disconnection_handler.read().await.clone();
+        if let Some(handler) = handler {
             handler(reason).await
         } else {
             tracing::debug!("Connection lost but no disconnection handler registered");

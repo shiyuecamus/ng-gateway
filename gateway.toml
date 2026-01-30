@@ -17,7 +17,7 @@ ca_key_path = "ca.key"
 # Southward communication configuration
 [general.southward]
 # API synchronous start wait timeout for driver connection (milliseconds)
-start_timeout_ms = 2000
+start_timeout_ms = 5000
 
 # Southward device snapshot TTL GC (point-level).
 #
@@ -38,7 +38,7 @@ max_devices_per_snapshot_tick = 256
 # Internal bounded queue capacity for northward manager
 queue_capacity = 10000
 # API synchronous start wait timeout for northward app (milliseconds)
-start_timeout_ms = 2000
+start_timeout_ms = 5000
 # Collector configuration
 [general.collector]
 # Collection timeout for each device (in milliseconds)

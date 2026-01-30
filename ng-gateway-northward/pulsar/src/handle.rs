@@ -8,14 +8,13 @@ use super::config::{EventUplink, PulsarPluginConfig};
 use async_trait::async_trait;
 use ng_gateway_sdk::{
     northward::{
-        payload::{build_context, encode_uplink_payload, UplinkEventKind},
+        payload::{build_context_ref, encode_uplink_payload_ref, UplinkEventKind},
         runtime_api::NorthwardRuntimeApi,
-        template::render_template,
+        template::render_template_serde,
     },
     NorthwardData, NorthwardError, NorthwardHandle, NorthwardResult,
 };
 use pulsar::{producer, SerializeMessage};
-use serde_json::Value;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc;
 
@@ -51,7 +50,8 @@ pub(crate) struct OutboundPublish {
 pub struct PulsarHandle {
     config: Arc<PulsarPluginConfig>,
     app_id: i32,
-    app_name: String,
+    app_name: Arc<str>,
+    plugin_type: Arc<str>,
     runtime: Arc<dyn NorthwardRuntimeApi>,
     outbound_tx: mpsc::Sender<OutboundPublish>,
 }
@@ -68,7 +68,8 @@ impl PulsarHandle {
         Self {
             config,
             app_id,
-            app_name,
+            app_name: Arc::from(app_name),
+            plugin_type: Arc::<str>::from("pulsar"),
             runtime,
             outbound_tx,
         }
@@ -112,10 +113,10 @@ impl NorthwardHandle for PulsarHandle {
             return Ok(());
         }
 
-        let Some(ctx) = build_context(
+        let Some(ctx) = build_context_ref(
             self.app_id,
             &self.app_name,
-            "pulsar",
+            &self.plugin_type,
             event_kind,
             data.as_ref(),
             &self.runtime,
@@ -123,25 +124,25 @@ impl NorthwardHandle for PulsarHandle {
             return Ok(());
         };
 
-        let tmpl_data = serde_json::to_value(&ctx).unwrap_or(Value::Null);
-        let topic = render_template(mapping.topic.as_str(), &tmpl_data);
-        let key_rendered = render_template(mapping.key.as_str(), &tmpl_data);
+        let topic = render_template_serde(mapping.topic.as_str(), &ctx);
+        let key_rendered = render_template_serde(mapping.key.as_str(), &ctx);
         let key = if key_rendered.trim().is_empty() {
             None
         } else {
             Some(key_rendered)
         };
 
-        let payload = encode_uplink_payload(&mapping.payload, &ctx, data.as_ref(), &self.runtime)
-            .map_err(|e| NorthwardError::SerializationError {
-            reason: e.to_string(),
-        })?;
+        let payload =
+            encode_uplink_payload_ref(&mapping.payload, &ctx, data.as_ref(), &self.runtime)
+                .map_err(|e| NorthwardError::SerializationError {
+                    reason: e.to_string(),
+                })?;
 
         let ts = ctx.ts.timestamp_millis() as u64;
         let msg = OutboundMessage {
             payload,
             partition_key: key,
-            properties: ctx.into(),
+            properties: ctx.to_properties_map(),
             event_time: Some(ts),
         };
 

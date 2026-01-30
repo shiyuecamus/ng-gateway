@@ -633,4 +633,14 @@ impl PointMeta {
     pub fn logical_data_type(&self) -> DataType {
         self.transform.resolve_logical_datatype(self.data_type)
     }
+
+    #[inline]
+    pub fn readable(&self) -> bool {
+        matches!(self.access_mode, AccessMode::Read | AccessMode::ReadWrite)
+    }
+
+    #[inline]
+    pub fn writable(&self) -> bool {
+        matches!(self.access_mode, AccessMode::Write | AccessMode::ReadWrite)
+    }
 }

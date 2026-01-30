@@ -670,6 +670,11 @@ pub trait RuntimeChannel: DowncastSync + Send + Sync + Debug {
     fn connection_policy(&self) -> &ConnectionPolicy;
     /// Get the channel's configuration
     fn config(&self) -> &dyn DriverConfig;
+    /// Check if the channel is collectable
+    #[inline]
+    fn collectable(&self) -> bool {
+        matches!(self.collection_type(), CollectionType::Collection)
+    }
 }
 
 pub trait RuntimeDevice: DowncastSync + Send + Sync + Debug {
@@ -742,6 +747,21 @@ pub trait RuntimePoint: DowncastSync + Send + Sync + Debug {
     #[inline]
     fn logical_data_type(&self) -> DataType {
         self.transform().resolve_logical_datatype(self.data_type())
+    }
+
+    /// Check if the point is readable (Read/ReadWrite)
+    #[inline]
+    fn readable(&self) -> bool {
+        matches!(self.access_mode(), AccessMode::Read | AccessMode::ReadWrite)
+    }
+
+    /// Check if the point is writable (Write/ReadWrite)
+    #[inline]
+    fn writable(&self) -> bool {
+        matches!(
+            self.access_mode(),
+            AccessMode::Write | AccessMode::ReadWrite
+        )
     }
 }
 

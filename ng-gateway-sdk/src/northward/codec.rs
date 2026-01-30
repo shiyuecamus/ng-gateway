@@ -81,9 +81,9 @@ pub enum DecodeError {
 ///   fallback JSON object rather than an error, to keep configs tolerant.
 pub fn encode_uplink(
     format: NorthwardUplinkFormat,
-    plugin_type: &str,
+    plugin_type: &Arc<str>,
     app_id: i32,
-    app_name: &str,
+    app_name: &Arc<str>,
     data: &NorthwardData,
     runtime: &dyn NorthwardRuntimeApi,
 ) -> Result<Vec<u8>, EncodeError> {
@@ -148,29 +148,34 @@ pub fn decode_downlink_envelope(
 }
 
 fn build_envelope_meta(
-    plugin_type: &str,
+    plugin_type: &Arc<str>,
     app_id: i32,
-    app_name: &str,
+    app_name: &Arc<str>,
     data: &NorthwardData,
 ) -> EnvelopeMeta {
     let (device_id, device_name, device_type) = match data {
         NorthwardData::DeviceConnected(d) => (
             d.device_id,
-            d.device_name.clone(),
-            Some(d.device_type.clone()),
+            Arc::<str>::from(d.device_name.as_str()),
+            Some(Arc::<str>::from(d.device_type.as_str())),
         ),
         NorthwardData::DeviceDisconnected(d) => (
             d.device_id,
-            d.device_name.clone(),
-            Some(d.device_type.clone()),
+            Arc::<str>::from(d.device_name.as_str()),
+            Some(Arc::<str>::from(d.device_type.as_str())),
         ),
-        NorthwardData::Telemetry(t) => (t.device_id, t.device_name.clone(), None),
-        NorthwardData::Attributes(a) => (a.device_id, a.device_name.clone(), None),
-        NorthwardData::Alarm(a) => (a.device_id, a.device_name.clone(), None),
-        NorthwardData::RpcResponse(r) => {
-            (r.device_id, r.device_name.clone().unwrap_or_default(), None)
+        NorthwardData::Telemetry(t) => {
+            (t.device_id, Arc::<str>::from(t.device_name.as_str()), None)
         }
-        NorthwardData::WritePointResponse(r) => (r.device_id, String::new(), None),
+        NorthwardData::Attributes(a) => {
+            (a.device_id, Arc::<str>::from(a.device_name.as_str()), None)
+        }
+        NorthwardData::Alarm(a) => (a.device_id, Arc::<str>::from(a.device_name.as_str()), None),
+        NorthwardData::RpcResponse(r) => {
+            let name = r.device_name.as_deref().unwrap_or_default();
+            (r.device_id, Arc::<str>::from(name), None)
+        }
+        NorthwardData::WritePointResponse(r) => (r.device_id, Arc::<str>::from(""), None),
     };
 
     let ts_ms = match data {
@@ -188,8 +193,8 @@ fn build_envelope_meta(
         ts_ms,
         app: EnvelopeApp {
             id: app_id,
-            name: app_name.to_string(),
-            plugin_type: plugin_type.to_string(),
+            name: Arc::clone(app_name),
+            plugin_type: Arc::clone(plugin_type),
         },
         device: EnvelopeDevice {
             id: device_id,

@@ -30,7 +30,7 @@ use ng_gateway_sdk::{
 use opcua::{
     client::Session,
     types::{
-        constants as opcua_constants, DataValue, NodeId, ReadValueId, StatusCode,
+        constants::MAX_ARRAY_LENGTH, DataValue, NodeId, ReadValueId, StatusCode,
         TimestampsToReturn, WriteValue,
     },
 };
@@ -172,9 +172,17 @@ impl OpcUaHandle {
         _inner: &Arc<OpcUaChannel>,
         ctx: &ng_gateway_sdk::SouthwardInitContext,
     ) -> Arc<ArcSwap<PointSnapshot>> {
-        let mut node_to_meta = HashMap::new();
-        let mut point_id_to_node = HashMap::new();
-        let mut device_to_nodes: HashMap<i32, Vec<NodeId>> = HashMap::new();
+        // Cold-path init: pre-allocate to reduce HashMap rehashing and Vec growth.
+        let approx_total_points = ctx
+            .points_by_device
+            .values()
+            .map(|ps| ps.len())
+            .sum::<usize>();
+
+        let mut node_to_meta = HashMap::with_capacity(approx_total_points);
+        let mut point_id_to_node = HashMap::with_capacity(approx_total_points);
+        let mut device_to_nodes: HashMap<i32, Vec<NodeId>> =
+            HashMap::with_capacity(ctx.points_by_device.len());
 
         let devices = ctx
             .devices
@@ -192,21 +200,32 @@ impl OpcUaHandle {
             .collect();
 
         // Parse NodeId without cache at init time (cold path).
-        ctx.points_by_device
-            .values()
-            .flat_map(|ps| ps.iter())
-            .filter_map(|p_any| Arc::clone(p_any).downcast_arc::<OpcUaPoint>().ok())
-            .filter(|p| matches!(p.access_mode(), AccessMode::Read | AccessMode::ReadWrite))
-            .filter_map(|p| NodeId::from_str(&p.node_id).ok().map(|id| (p, id)))
-            .for_each(|(p, id)| {
+        // Keep `device_to_nodes` grouped and pre-sized by device to reduce reallocations.
+        for (dev_id, ps) in ctx.points_by_device.iter() {
+            let mut nodes = Vec::with_capacity(ps.len());
+            for p_any in ps.iter() {
+                let Ok(p) = Arc::clone(p_any).downcast_arc::<OpcUaPoint>() else {
+                    continue;
+                };
+                if !p.readable() {
+                    continue;
+                }
+                let Ok(id) = NodeId::from_str(&p.node_id) else {
+                    continue;
+                };
+
                 let meta = PointMeta {
                     device_id: p.device_id,
                     point: Arc::clone(&p),
                 };
                 node_to_meta.insert(id.clone(), meta);
                 point_id_to_node.insert(p.id, id.clone());
-                device_to_nodes.entry(p.device_id).or_default().push(id);
-            });
+                nodes.push(id);
+            }
+            if !nodes.is_empty() {
+                device_to_nodes.insert(*dev_id, nodes);
+            }
+        }
 
         Arc::new(ArcSwap::from_pointee(PointSnapshot {
             node_to_meta,
@@ -262,7 +281,7 @@ impl OpcUaHandle {
             .iter()
             .filter_map(|p| Arc::clone(p).downcast_arc::<OpcUaPoint>().ok())
         {
-            if !matches!(p.access_mode, AccessMode::Read | AccessMode::ReadWrite) {
+            if !p.readable() {
                 continue;
             }
             if let Some(dm) = devices.get(&p.device_id) {
@@ -303,7 +322,7 @@ impl OpcUaHandle {
                         point_id_to_node.insert(p.id, new_id.clone());
                         if let Some(list) = device_to_nodes.get_mut(&p.device_id) {
                             if let Some(pos) = list.iter().position(|n| *n == old_id) {
-                                let _ = list.remove(pos);
+                                list.swap_remove(pos);
                             }
                             list.push(new_id.clone());
                         }
@@ -329,7 +348,7 @@ impl OpcUaHandle {
                 let _ = node_to_meta.remove(&id);
                 if let Some(list) = device_to_nodes.get_mut(&p.device_id) {
                     if let Some(pos) = list.iter().position(|n| *n == id) {
-                        let _ = list.remove(pos);
+                        list.swap_remove(pos);
                     }
                 }
             }
@@ -381,7 +400,7 @@ impl SouthwardHandle for OpcUaHandle {
                 let Ok(p) = Arc::clone(p_any).downcast_arc::<OpcUaPoint>() else {
                     continue;
                 };
-                if !matches!(p.access_mode(), AccessMode::Read | AccessMode::ReadWrite) {
+                if !p.readable() {
                     continue;
                 }
                 let Some(id) = self.parse_node_id_cached(&p.node_id) else {
@@ -397,7 +416,7 @@ impl SouthwardHandle for OpcUaHandle {
         }
 
         let max_read_nodes_per_call = match self.read_chunk_size.load(Ordering::Acquire) {
-            0 => opcua_constants::MAX_ARRAY_LENGTH.max(1),
+            0 => MAX_ARRAY_LENGTH.max(1),
             n => (n as usize).max(1),
         };
 

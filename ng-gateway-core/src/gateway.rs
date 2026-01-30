@@ -2055,8 +2055,12 @@ impl NGGateway {
 
     async fn handle_gateway_commands(cmd: Command) -> ClientRpcResponse {
         let registry = gateway_command_registry();
-        if let Some(handler) = registry.get(cmd.key.as_str()) {
-            match handler.value().handle(&cmd).await {
+        // IMPORTANT: never hold DashMap guards across `.await`.
+        let handler = registry
+            .get(cmd.key.as_str())
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(handler) = handler {
+            match handler.handle(&cmd).await {
                 Ok(value) => ClientRpcResponse::success(
                     cmd.command_id,
                     cmd.target_type,

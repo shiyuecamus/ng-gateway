@@ -6,6 +6,7 @@ mod manager;
 mod router;
 mod runtime_api;
 mod subscription_sync;
+mod topology;
 
 pub use actor::AppActor;
 pub use bus::NorthwardEventsBus;

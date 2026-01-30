@@ -9,8 +9,8 @@ use ng_gateway_common::metrics::{
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{core::metrics::CollectorMetricsSnapshot, settings::Collector};
 use ng_gateway_sdk::{
-    CollectItem, CollectionGroupKey, CollectionType, Driver, NorthwardData, RetryController,
-    RetryDecision, RetryPolicy, RuntimeDevice, RuntimePoint,
+    CollectItem, CollectionGroupKey, Driver, NorthwardData, RetryController, RetryDecision,
+    RetryPolicy, RuntimeDevice, RuntimePoint,
 };
 use std::{
     collections::HashMap,
@@ -198,7 +198,7 @@ impl NGCollector {
                     "Channel {channel_id} not found"
                 )))?;
 
-        if channel.config.collection_type() != CollectionType::Collection {
+        if !channel.config.collectable() {
             return Ok(());
         }
 

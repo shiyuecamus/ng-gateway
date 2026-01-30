@@ -18,21 +18,6 @@ impl CoreNorthwardRuntimeApi {
     pub fn new(southward: Arc<NGSouthwardManager>) -> Self {
         Self { southward }
     }
-
-    #[inline]
-    fn make_path_key(channel_name: &str, device_name: &str, point_key: &str) -> String {
-        // NOTE: This is not a hot path. Prefer `get_point_meta(point_id)` for telemetry encoding.
-        // We use a unit separator character to reduce collision risks.
-        const SEP: char = '\u{1f}';
-        let mut s =
-            String::with_capacity(channel_name.len() + device_name.len() + point_key.len() + 2);
-        s.push_str(channel_name);
-        s.push(SEP);
-        s.push_str(device_name);
-        s.push(SEP);
-        s.push_str(point_key);
-        s
-    }
 }
 
 #[async_trait]
@@ -54,8 +39,7 @@ impl NorthwardRuntimeApi for CoreNorthwardRuntimeApi {
         point_key: &str,
     ) -> Option<Arc<PointMeta>> {
         let index = self.southward.runtime_index();
-        let key = Self::make_path_key(channel_name, device_name, point_key);
-        let point_id = index.point_id_by_path.get(&key).map(|e| *e.value())?;
+        let point_id = index.find_point_id_by_path_parts(channel_name, device_name, point_key)?;
         index
             .point_entries_by_id
             .get(&point_id)
