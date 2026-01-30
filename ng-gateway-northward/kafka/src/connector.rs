@@ -25,6 +25,7 @@ use ng_gateway_sdk::{
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 /// Kafka supervised connector (constructed from init context, no I/O).
 #[derive(Clone)]
@@ -93,8 +94,21 @@ impl Connector for KafkaConnector {
 
         // Attempt-scoped bounded queue for send-path side effects.
         // Keep this bounded to apply backpressure and avoid unbounded memory growth.
-        let outbound_capacity = 100usize;
-        let (outbound_tx, outbound_rx) = mpsc::channel(outbound_capacity);
+        const MAX_OUTBOUND_QUEUE_CAPACITY: u32 = 1_000_000;
+        let mut outbound_capacity = self.config.uplink.outbound_queue_capacity;
+        if outbound_capacity == 0 {
+            outbound_capacity = 1;
+        }
+        if outbound_capacity > MAX_OUTBOUND_QUEUE_CAPACITY {
+            warn!(
+                app_id = self.app_id,
+                configured = outbound_capacity,
+                capped = MAX_OUTBOUND_QUEUE_CAPACITY,
+                "kafka outbound queue capacity too large, capping"
+            );
+            outbound_capacity = MAX_OUTBOUND_QUEUE_CAPACITY;
+        }
+        let (outbound_tx, outbound_rx) = mpsc::channel(outbound_capacity as usize);
 
         Ok(KafkaSession::new(KafkaSessionArgs {
             handle: Arc::new(KafkaHandle::new(

@@ -74,7 +74,7 @@ pub struct PulsarProducerConfig {
 
 impl PulsarProducerConfig {
     fn default_batching_enabled() -> bool {
-        false
+        true
     }
 
     /// Default batch max messages for gateway uplink (only used when batching is enabled).

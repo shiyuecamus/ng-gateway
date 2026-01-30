@@ -259,6 +259,21 @@ pub struct UplinkConfig {
     /// NOTE: Defaults to `true` for backward compatibility.
     #[serde(default = "default_enabled_true")]
     pub enabled: bool,
+    /// Capacity of the internal outbound publish queue (handle -> publisher task).
+    ///
+    /// # Why this exists
+    /// The gateway core already applies backpressure on the "Gateway -> Plugin" queue
+    /// via `QueuePolicy.capacity`, but the Kafka plugin has its own internal queue to keep
+    /// `process_data()` CPU-only and non-blocking.
+    ///
+    /// If this value is too small, high-throughput uplink may hit `try_send` failures and report
+    /// `outbound queue rejected`.
+    ///
+    /// # Notes
+    /// - This queue is **bounded** and intended as a short burst buffer only.
+    /// - Values `<= 0` are treated as `1` by the connector.
+    #[serde(default = "UplinkConfig::default_outbound_queue_capacity")]
+    pub outbound_queue_capacity: u32,
     /// Producer settings for uplink publish.
     #[serde(default)]
     pub producer: KafkaProducerConfig,
@@ -276,12 +291,25 @@ impl Default for UplinkConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            outbound_queue_capacity: UplinkConfig::default_outbound_queue_capacity(),
             producer: KafkaProducerConfig::default(),
             device_connected: EventUplink::default_device_connected(),
             device_disconnected: EventUplink::default_device_disconnected(),
             telemetry: EventUplink::default_telemetry(),
             attributes: EventUplink::default_attributes(),
         }
+    }
+}
+
+impl UplinkConfig {
+    /// Default outbound queue capacity for the Kafka plugin.
+    ///
+    /// NOTE: This is a reasonable default for gateway workloads. Tune via config when:
+    /// - you have many dynamic topics, or
+    /// - the platform is temporarily slow and you want to absorb short bursts.
+    #[inline]
+    fn default_outbound_queue_capacity() -> u32 {
+        1024
     }
 }
 

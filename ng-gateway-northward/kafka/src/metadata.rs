@@ -346,6 +346,39 @@ fn build_uplink_group() -> Node {
                 }),
                 when: None,
             })),
+            Node::Field(Box::new(Field {
+                path: "uplink.outboundQueueCapacity".into(),
+                label: ui_text!(en = "Outbound Queue Capacity", zh = "出站队列容量"),
+                data_type: UiDataType::Integer,
+                default_value: Some(json!(1024)),
+                order: Some(2),
+                ui: Some(UiProps {
+                    help: Some(ui_text!(
+                        en = "Internal bounded queue capacity (handle -> publisher task). Increase this for high throughput or many topics to reduce `outbound queue rejected`.",
+                        zh = "插件内部有界队列容量（handle -> publisher task）。高吞吐或 topic 很多时可适当增大，减少 `outbound queue rejected`。"
+                    )),
+                    ..Default::default()
+                }),
+                rules: Some(Rules {
+                    required: Some(RuleValue::Value(true)),
+                    min: Some(RuleValue::Value(1.0)),
+                    ..Default::default()
+                }),
+                when: Some(vec![
+                    When {
+                        target: "uplink.enabled".into(),
+                        operator: Operator::Eq,
+                        value: json!(true),
+                        effect: WhenEffect::Visible,
+                    },
+                    When {
+                        target: "uplink.enabled".into(),
+                        operator: Operator::Eq,
+                        value: json!(false),
+                        effect: WhenEffect::Invisible,
+                    },
+                ]),
+            })),
             build_uplink_producer_group(),
             build_uplink_event_group(
                 "deviceConnected",
