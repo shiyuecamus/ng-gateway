@@ -4,7 +4,6 @@ pub(crate) mod internal;
 mod lifecycle;
 pub mod loader;
 pub mod manager;
-pub mod observability;
 pub mod observer;
 mod publisher;
 mod queries;

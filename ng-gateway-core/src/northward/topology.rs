@@ -9,9 +9,10 @@
 
 use super::{
     super::lifecycle::StartPolicy,
-    actor::{AppActor, AppActorParams, AppIo, NorthwardAppObserverFactory},
+    actor::{AppActor, AppActorParams, AppIo},
     bus::NorthwardEventsBus,
     manager::NGNorthwardManager,
+    observer::NorthwardAppObserverFactory,
     runtime_api::CoreNorthwardRuntimeApi,
     subscription_sync::{compute_sync_plan, SyncPlan},
 };

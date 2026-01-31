@@ -3,6 +3,7 @@ mod bus;
 mod extension;
 pub mod loader;
 mod manager;
+pub(crate) mod observer;
 mod router;
 mod runtime_api;
 mod subscription_sync;

@@ -12,10 +12,9 @@
 
 use super::{
     super::southward::{ChannelInitEntry, DeviceInitTriple, SouthwardDataBus},
-    observability::ChannelBoundTransportMeter,
-    observer::SouthwardChannelObserverFactory,
+    observer::{ChannelBoundTransportMeter, SouthwardChannelObserverFactory},
     publisher::MpscNorthwardPublisher,
-    ChannelInstance, NGSouthwardManager, DeviceInstance,
+    ChannelInstance, DeviceInstance, NGSouthwardManager,
 };
 use chrono::Utc;
 use futures::stream::{self, StreamExt};

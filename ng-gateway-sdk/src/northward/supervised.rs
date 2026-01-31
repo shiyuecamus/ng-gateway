@@ -10,7 +10,7 @@
 
 use crate::{
     supervision::{Connector, SupervisorHandle, SupervisorLoop},
-    ConnectionState, NorthwardError, NorthwardResult, Plugin,
+    ConnectionState, NorthwardData, NorthwardError, NorthwardResult, Plugin,
 };
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
@@ -23,7 +23,7 @@ use tokio::sync::{watch, Mutex};
 /// Data-plane handle contract for supervised northward plugins.
 #[async_trait]
 pub trait NorthwardHandle: DowncastSync + Send + Sync + 'static {
-    async fn process_data(&self, data: Arc<crate::NorthwardData>) -> NorthwardResult<()>;
+    async fn process_data(&self, data: Arc<NorthwardData>) -> NorthwardResult<()>;
 
     async fn ping(&self) -> NorthwardResult<std::time::Duration> {
         Err(NorthwardError::NotConnected)
@@ -89,7 +89,7 @@ where
         self.supervisor.subscribe_state()
     }
 
-    async fn process_data(&self, data: Arc<crate::NorthwardData>) -> NorthwardResult<()> {
+    async fn process_data(&self, data: Arc<NorthwardData>) -> NorthwardResult<()> {
         let h = self.load_handle()?;
         h.process_data(data).await
     }
