@@ -6,8 +6,7 @@ use super::{
     },
     types::{Iec104Action, Iec104Channel, Iec104Device, Iec104Parameter, Iec104Point},
 };
-use arc_swap::ArcSwap;
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;

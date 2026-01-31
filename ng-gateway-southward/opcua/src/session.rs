@@ -6,7 +6,10 @@
 //! `Session::init()` waits until the underlying event loop reports the first active state,
 //! then probes server capabilities and (optionally) starts subscription management.
 
-use super::{capacity::probe_capacity, handle::OpcUaHandle, subscribe::SubscriptionCommand};
+use super::{
+    capacity::probe_capacity, connector::MeteredTcpConnector, handle::OpcUaHandle,
+    subscribe::SubscriptionCommand,
+};
 use futures::{pin_mut, StreamExt};
 use ng_gateway_sdk::{
     supervision::{RunOutcome, Session, SessionContext},
@@ -28,12 +31,16 @@ enum LoopEvent {
 pub struct OpcUaSession {
     handle: Arc<OpcUaHandle>,
     session: Arc<UaSession>,
-    ev: Option<SessionEventLoop>,
+    ev: Option<SessionEventLoop<MeteredTcpConnector>>,
     rx: Option<mpsc::Receiver<LoopEvent>>,
 }
 
 impl OpcUaSession {
-    pub fn new(handle: Arc<OpcUaHandle>, session: Arc<UaSession>, ev: SessionEventLoop) -> Self {
+    pub(crate) fn new(
+        handle: Arc<OpcUaHandle>,
+        session: Arc<UaSession>,
+        ev: SessionEventLoop<MeteredTcpConnector>,
+    ) -> Self {
         Self {
             handle,
             session,

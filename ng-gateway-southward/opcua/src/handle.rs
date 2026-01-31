@@ -36,7 +36,7 @@ use opcua::{
 };
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -643,6 +643,91 @@ impl SouthwardHandle for OpcUaHandle {
         let Some(mgr) = mgr_opt else { return Ok(()) };
 
         match delta {
+            RuntimeDelta::DevicesChanged {
+                added,
+                updated,
+                removed,
+                status_changed,
+            } => {
+                // Update device metadata in the snapshot and map enable/disable to subscription membership.
+                let old = snapshot_arc.load();
+                let mut snap = (**old).clone();
+
+                let mut creates: Vec<NodeId> = Vec::new();
+                let mut deletes: Vec<NodeId> = Vec::new();
+
+                let mut upsert_device = |d: &OpcUaDevice| {
+                    snap.devices.insert(
+                        d.id,
+                        DeviceMeta {
+                            name: d.device_name.clone(),
+                            status: d.status(),
+                        },
+                    );
+                };
+
+                // Added/updated devices: keep metadata in sync (name/status).
+                for d_any in added.iter().chain(updated.iter()) {
+                    if let Some(d) = d_any.downcast_ref::<OpcUaDevice>() {
+                        upsert_device(d);
+                    }
+                }
+
+                // Removed devices: drop metadata and unsubscribe all its nodes.
+                for d_any in removed.iter() {
+                    if let Some(d) = d_any.downcast_ref::<OpcUaDevice>() {
+                        snap.devices.remove(&d.id);
+                        if let Some(nodes) = snap.device_to_nodes.remove(&d.id) {
+                            deletes.extend(nodes.iter().cloned());
+                            for n in nodes.iter() {
+                                let _ = snap.node_to_meta.remove(n);
+                            }
+                            // Remove any point_id -> node mappings that refer to removed nodes.
+                            let nodes_set: HashSet<NodeId> = nodes.into_iter().collect();
+                            snap.point_id_to_node.retain(|_, v| !nodes_set.contains(v));
+                        }
+                    }
+                }
+
+                // Device status transitions: enable -> subscribe, disable -> unsubscribe.
+                for (d_any, new_status) in status_changed.iter() {
+                    if let Some(d) = d_any.downcast_ref::<OpcUaDevice>() {
+                        let prev = snap.devices.get(&d.id).map(|m| m.status);
+                        // Update snapshot status (and name, in case it drifted).
+                        snap.devices.insert(
+                            d.id,
+                            DeviceMeta {
+                                name: d.device_name.clone(),
+                                status: *new_status,
+                            },
+                        );
+
+                        if prev == Some(*new_status) {
+                            continue;
+                        }
+
+                        if let Some(nodes) = snap.device_to_nodes.get(&d.id) {
+                            match *new_status {
+                                Status::Enabled => creates.extend(nodes.iter().cloned()),
+                                _ => deletes.extend(nodes.iter().cloned()),
+                            }
+                        }
+                    }
+                }
+
+                // Publish updated snapshot first so callbacks see fresh device metadata.
+                snapshot_arc.store(Arc::new(snap));
+
+                // Apply subscription changes.
+                if !deletes.is_empty() {
+                    mgr.send_command(SubscriptionCommand::DeleteNodes(deletes))
+                        .await;
+                }
+                if !creates.is_empty() {
+                    mgr.send_command(SubscriptionCommand::CreateNodes(creates))
+                        .await;
+                }
+            }
             RuntimeDelta::PointsChanged {
                 added,
                 updated,
@@ -659,11 +744,6 @@ impl SouthwardHandle for OpcUaHandle {
                     mgr.send_command(SubscriptionCommand::CreateNodes(creates))
                         .await;
                 }
-            }
-            RuntimeDelta::DevicesChanged { .. } => {
-                // Keep semantics minimal: device delta affects subscription eligibility.
-                // For correctness, a full implementation should map device enable/disable to
-                // CreateNodes/DeleteNodes. Current deployments mostly change points.
             }
             _ => {}
         }
