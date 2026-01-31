@@ -6,8 +6,14 @@
 
 use dashmap::DashMap;
 use libloading::{Library, Symbol};
+use ng_gateway_common::log::{
+    control::{self as log_control},
+    plugin::{create_sink, ensure_ingest_started, HostPluginLogSinkHandle},
+};
+use ng_gateway_models::domain::prelude::LogLevel;
 use ng_gateway_sdk::{
     ensure_current_platform_from_path, inspect_binary,
+    log::LogSinkV1,
     northward::PluginFactory,
     sdk::{sdk_api_version, SDK_VERSION},
     BinaryArch, BinaryOsType, NorthwardError, PluginConfigSchemas,
@@ -22,6 +28,12 @@ use std::{
 
 /// Northward registry for managing all available plugin factories, keyed by plugin id.
 pub type NorthwardRegistry = Arc<DashMap<i32, Arc<dyn PluginFactory + Send + Sync>>>;
+
+/// Exported function pointer for setting plugin max log level.
+///
+/// Level mapping:
+/// - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
+type PluginSetMaxLevelFn = unsafe extern "C" fn(u8) -> u32;
 
 /// Summary information about a northward library discovered via FFI symbols.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +61,10 @@ pub struct NorthwardProbeInfo {
 pub struct NorthwardLoader {
     registry: NorthwardRegistry,
     libraries: Arc<DashMap<i32, Arc<Library>>>,
+    /// Keep host sink contexts alive for FFI callbacks.
+    log_sinks: Arc<DashMap<i32, HostPluginLogSinkHandle>>,
+    /// Optional exported setter for dynamic plugin log level control.
+    max_level_setters: Arc<DashMap<i32, PluginSetMaxLevelFn>>,
 }
 
 impl NorthwardLoader {
@@ -57,6 +73,8 @@ impl NorthwardLoader {
         Self {
             registry,
             libraries: Arc::new(DashMap::new()),
+            log_sinks: Arc::new(DashMap::new()),
+            max_level_setters: Arc::new(DashMap::new()),
         }
     }
 
@@ -81,7 +99,34 @@ impl NorthwardLoader {
     pub async fn unregister(&self, id: i32) {
         let _ = self.registry.remove(&id);
         let _ = self.libraries.remove(&id);
+        let _ = self.log_sinks.remove(&id);
+        let _ = self.max_level_setters.remove(&id);
         tracing::info!("Unregistered northward factory: id={}", id);
+    }
+
+    /// Best-effort set plugin max log level via exported symbol.
+    ///
+    /// Returns `true` if the plugin exported the symbol and returned success.
+    pub fn set_max_level(&self, id: i32, level: u8) -> bool {
+        let Some(f) = self.max_level_setters.get(&id) else {
+            return false;
+        };
+        let rc = unsafe { (*f)(level) };
+        rc == 0
+    }
+
+    /// Best-effort set max log level for all loaded plugins.
+    ///
+    /// Returns number of plugins updated successfully.
+    pub fn set_max_level_all(&self, level: u8) -> usize {
+        let mut ok: usize = 0;
+        for e in self.max_level_setters.iter() {
+            let rc = unsafe { (*e.value())(level) };
+            if rc == 0 {
+                ok += 1;
+            }
+        }
+        ok
     }
 
     /// Load and register plugins from provided (id, absolute path) pairs.
@@ -113,52 +158,106 @@ impl NorthwardLoader {
         ensure_current_platform_from_path(path)
             .map_err(|e| NorthwardError::LoadError(e.to_string()))?;
 
+        // Ensure host ingest loop is running (idempotent).
+        ensure_ingest_started();
+
         let path_buf = path.to_path_buf();
-        let (library, probe_info, factory_box) = tokio::task::spawn_blocking(move || {
-            let library = unsafe { Library::new(&path_buf) }.map_err(|e| {
-                NorthwardError::LoadError(format!(
-                    "Failed to load library {}: {e}",
-                    path_buf.display()
+        let (library, probe_info, factory_box, log_sink_handle, set_max_level_fn) =
+            tokio::task::spawn_blocking(move || {
+                let library = unsafe { Library::new(&path_buf) }.map_err(|e| {
+                    NorthwardError::LoadError(format!(
+                        "Failed to load library {}: {e}",
+                        path_buf.display()
+                    ))
+                })?;
+
+                // Register log sink + init tracing BEFORE calling any other exported symbols.
+                let log_sink_handle = match unsafe {
+                    library.get::<unsafe extern "C" fn(LogSinkV1) -> u32>(b"ng_plugin_set_log_sink")
+                } {
+                    Ok(set_sink_fn) => {
+                        let handle = create_sink(id, "unknown".into());
+                        let rc = unsafe { set_sink_fn(handle.sink()) };
+                        if rc != 0 {
+                            tracing::warn!(
+                                plugin_id = id,
+                                rc = rc,
+                                "Plugin did not accept log sink registration"
+                            );
+                        }
+                        Some(handle)
+                    }
+                    Err(_) => None,
+                };
+
+                // Initialize tracing in the plugin (bridge-only).
+                let init_tracing_fn: Symbol<unsafe extern "C" fn(bool)> =
+                    unsafe { library.get(b"ng_plugin_init_tracing") }.map_err(|e| {
+                        NorthwardError::LoadError(format!(
+                            "Failed to find 'ng_plugin_init_tracing' symbol in {}: {e}",
+                            path_buf.display()
+                        ))
+                    })?;
+                unsafe { init_tracing_fn(cfg!(debug_assertions)) };
+
+                // Optional: dynamic log level control.
+                let set_max_level_fn: Option<PluginSetMaxLevelFn> = match unsafe {
+                    library.get::<unsafe extern "C" fn(u8) -> u32>(b"ng_plugin_set_max_level")
+                } {
+                    Ok(f) => Some(*f),
+                    Err(_) => None,
+                };
+
+                let probe_info = extract_probe_info(&library, &path_buf)?;
+                if let Some(ref h) = log_sink_handle {
+                    h.set_plugin_type(probe_info.plugin_type.clone());
+                }
+
+                let create_factory_fn: Symbol<unsafe extern "C" fn() -> *mut dyn PluginFactory> =
+                    unsafe { library.get(b"create_plugin_factory") }.map_err(|e| {
+                        NorthwardError::LoadError(format!(
+                            "Failed to find 'create_plugin_factory' symbol in {}: {e}",
+                            path_buf.display()
+                        ))
+                    })?;
+
+                let factory_ptr = unsafe { create_factory_fn() };
+                if factory_ptr.is_null() {
+                    return Err(NorthwardError::LoadError(format!(
+                        "Factory pointer was null from {}",
+                        path_buf.display()
+                    )));
+                }
+                let factory_box: Box<dyn PluginFactory> = unsafe { Box::from_raw(factory_ptr) };
+
+                Ok((
+                    library,
+                    probe_info,
+                    factory_box,
+                    log_sink_handle,
+                    set_max_level_fn,
                 ))
-            })?;
-
-            let probe_info = extract_probe_info(&library, &path_buf)?;
-
-            let create_factory_fn: Symbol<unsafe extern "C" fn() -> *mut dyn PluginFactory> =
-                unsafe { library.get(b"create_plugin_factory") }.map_err(|e| {
-                    NorthwardError::LoadError(format!(
-                        "Failed to find 'create_plugin_factory' symbol in {}: {e}",
-                        path_buf.display()
-                    ))
-                })?;
-
-            let factory_ptr = unsafe { create_factory_fn() };
-            if factory_ptr.is_null() {
-                return Err(NorthwardError::LoadError(format!(
-                    "Factory pointer was null from {}",
-                    path_buf.display()
-                )));
-            }
-            let factory_box: Box<dyn PluginFactory> = unsafe { Box::from_raw(factory_ptr) };
-
-            // Init tracing inside plugin (best-effort).
-            let init_tracing_fn: Symbol<unsafe extern "C" fn(bool)> =
-                unsafe { library.get(b"ng_plugin_init_tracing") }.map_err(|e| {
-                    NorthwardError::LoadError(format!(
-                        "Failed to find 'ng_plugin_init_tracing' symbol in {}: {e}",
-                        path_buf.display()
-                    ))
-                })?;
-            unsafe { init_tracing_fn(cfg!(debug_assertions)) };
-
-            Ok((library, probe_info, factory_box))
-        })
-        .await
-        .map_err(|e| NorthwardError::LoadError(format!("Join error: {}", e)))??;
+            })
+            .await
+            .map_err(|e| NorthwardError::LoadError(format!("Join error: {}", e)))??;
 
         let factory: Arc<dyn PluginFactory> = Arc::from(factory_box);
         self.register_factory(id, factory).await?;
         self.libraries.insert(id, Arc::new(library));
+        if let Some(h) = log_sink_handle {
+            self.log_sinks.insert(id, h);
+        }
+        if let Some(f) = set_max_level_fn {
+            self.max_level_setters.insert(id, f);
+
+            // Best-effort: align plugin max level to current effective global level.
+            if let Some(rt) = log_control::global() {
+                let desired: u8 = rt.overrides().effective_global_level().into();
+                let _ = self.set_max_level(id, desired);
+            } else {
+                let _ = self.set_max_level(id, u8::from(LogLevel::Info));
+            }
+        }
 
         tracing::info!(
             "Successfully loaded northward plugin: id={} name={}",

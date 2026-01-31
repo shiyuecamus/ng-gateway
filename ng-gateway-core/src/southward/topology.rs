@@ -15,7 +15,7 @@ use super::{
     observability::ChannelBoundTransportMeter,
     observer::SouthwardChannelObserverFactory,
     publisher::MpscNorthwardPublisher,
-    NGSouthwardManager,
+    ChannelInstance, NGSouthwardManager, DeviceInstance,
 };
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
@@ -129,7 +129,7 @@ impl NGSouthwardManager {
         &self,
         config: &ChannelModel,
         southward_data_bus: &Arc<SouthwardDataBus>,
-    ) -> NGResult<super::ChannelInstance> {
+    ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id.
         let driver_factory = self
             .southward_registry
@@ -169,7 +169,7 @@ impl NGSouthwardManager {
 
         let now = Utc::now();
         let status = config.status();
-        Ok(super::ChannelInstance {
+        Ok(ChannelInstance {
             driver,
             driver_factory,
             config,
@@ -188,7 +188,7 @@ impl NGSouthwardManager {
         config: &ChannelModel,
         dev_triples: &[DeviceInitTriple],
         southward_data_bus: &Arc<SouthwardDataBus>,
-    ) -> NGResult<super::ChannelInstance> {
+    ) -> NGResult<ChannelInstance> {
         // Get driver factory by driver_id.
         let driver_factory = self
             .southward_registry
@@ -244,7 +244,7 @@ impl NGSouthwardManager {
             devices,
             points_by_device,
             runtime_channel: Arc::clone(&runtime_channel),
-            publisher: Arc::new(super::publisher::MpscNorthwardPublisher::new(
+            publisher: Arc::new(MpscNorthwardPublisher::new(
                 Arc::clone(southward_data_bus),
                 Arc::clone(&prom),
             )),
@@ -269,7 +269,7 @@ impl NGSouthwardManager {
         let connection_state = ConnectionState::arc_now(Phase::Disconnected, 0);
         let now = Utc::now();
         let status = runtime_channel.status();
-        Ok(super::ChannelInstance {
+        Ok(ChannelInstance {
             driver,
             driver_factory,
             config: runtime_channel,
@@ -306,7 +306,7 @@ impl NGSouthwardManager {
             };
             let device_id = runtime_device.id();
             let device_name: Arc<str> = Arc::from(runtime_device.device_name());
-            let instance = super::DeviceInstance {
+            let instance = DeviceInstance {
                 config: Arc::clone(&runtime_device),
                 state: ng_gateway_sdk::DeviceState::Active,
                 status: runtime_device.status(),

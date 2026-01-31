@@ -4,12 +4,16 @@ use crate::{
 };
 use actix_web::{http::Method, web};
 use actix_web_validator::{Json, Path, Query};
-use ng_gateway_common::casbin::NGPermChecker;
+use ng_gateway_common::{
+    casbin::NGPermChecker,
+    log::control::{self as log_control, LogOverrideScope},
+};
 use ng_gateway_error::{rbac::RBACError, web::WebError, WebResult};
 use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE,
     domain::prelude::{
-        AppInfo, AppPageParams, ChangeAppStatus, NewApp, PageResult, PathId, UpdateApp,
+        AppInfo, AppLogLevelView, AppLogOverrideView, AppPageParams, ChangeAppStatus, NewApp,
+        PageResult, PathId, SetAppLogLevelRequest, TtlRange, UpdateApp,
     },
     enums::common::{EntityType, Operation},
     rbac::PermRule,
@@ -31,7 +35,10 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/page", web::get().to(page))
         .route("/detail/{id}", web::get().to(get_by_id))
         .route("/change-status", web::put().to(change_status))
-        .route("/{id}", web::delete().to(delete));
+        .route("/{id}", web::delete().to(delete))
+        .route("/{id}/log-level", web::get().to(get_app_log_level))
+        .route("/{id}/log-level", web::put().to(set_app_log_level))
+        .route("/{id}/log-level", web::delete().to(clear_app_log_level));
 }
 
 /// Initialize RBAC rules for northward app module
@@ -89,6 +96,27 @@ pub(crate) async fn init_rbac_rules(
         (
             Method::PUT,
             format!("{router_prefix}{ROUTER_PREFIX}/change-status"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(EntityType::App, Operation::Write)?)
+                .or(has_scope("northward-app:write")?),
+        ),
+        (
+            Method::GET,
+            format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/log-level"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(EntityType::App, Operation::Read)?)
+                .or(has_scope("northward-app:read")?),
+        ),
+        (
+            Method::PUT,
+            format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/log-level"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(EntityType::App, Operation::Write)?)
+                .or(has_scope("northward-app:write")?),
+        ),
+        (
+            Method::DELETE,
+            format!("{router_prefix}{ROUTER_PREFIX}/{{id}}/log-level"),
             has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
                 .or(has_resource_operation(EntityType::App, Operation::Write)?)
                 .or(has_scope("northward-app:write")?),
@@ -216,4 +244,84 @@ pub async fn change_status(
         Ok(_) => Ok(WebResponse::ok(true)),
         Err(e) => Ok(WebResponse::error(&e.to_string())),
     }
+}
+
+#[inline]
+async fn build_app_log_level_view(id: i32) -> Result<AppLogLevelView, WebError> {
+    // Validate app exists.
+    AppRepository::find_by_id(id)
+        .await?
+        .ok_or(WebError::NotFound(EntityType::App.to_string()))?;
+
+    let rt = log_control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
+    let overrides = rt.overrides();
+    let effective = overrides.effective_app_level(id);
+    let lease = overrides.active_scope_lease(LogOverrideScope::App(id));
+    let s = rt.settings();
+
+    Ok(AppLogLevelView {
+        app_id: id,
+        effective,
+        r#override: lease.map(|l| AppLogOverrideView {
+            level: l.level,
+            ttl_ms: l.ttl_ms,
+            expires_at_ms: l.expires_at_ms,
+        }),
+        ttl: TtlRange {
+            min_ms: s.override_min_ttl_ms,
+            max_ms: s.override_max_ttl_ms,
+            default_ms: s.override_default_ttl_ms,
+        },
+    })
+}
+
+#[instrument(name = "get-app-log-level", skip_all)]
+pub async fn get_app_log_level(params: Path<PathId>) -> WebResult<WebResponse<AppLogLevelView>> {
+    let id = params.id;
+    Ok(WebResponse::ok(build_app_log_level_view(id).await?))
+}
+
+#[instrument(name = "set-app-log-level", skip_all)]
+pub async fn set_app_log_level(
+    params: Path<PathId>,
+    req: web::Json<SetAppLogLevelRequest>,
+) -> WebResult<WebResponse<AppLogLevelView>> {
+    let id = params.id;
+    let req = req.into_inner();
+
+    // Validate app exists (avoid leaking overrides for invalid ids).
+    AppRepository::find_by_id(id)
+        .await?
+        .ok_or(WebError::NotFound(EntityType::App.to_string()))?;
+
+    let rt = log_control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
+    let s = rt.settings();
+    let ttl = req.ttl_ms.unwrap_or(s.override_default_ttl_ms);
+    s.validate_override_ttl_ms(ttl)
+        .map_err(|e| WebError::BadRequest(e.to_string()))?;
+
+    rt.overrides()
+        .set_temporary_override(LogOverrideScope::App(id), req.level, ttl);
+
+    Ok(WebResponse::ok(build_app_log_level_view(id).await?))
+}
+
+#[instrument(name = "clear-app-log-level", skip_all)]
+pub async fn clear_app_log_level(params: Path<PathId>) -> WebResult<WebResponse<AppLogLevelView>> {
+    let id = params.id;
+
+    AppRepository::find_by_id(id)
+        .await?
+        .ok_or(WebError::NotFound(EntityType::App.to_string()))?;
+
+    let rt = log_control::global().ok_or(WebError::InternalError(
+        "Log control runtime is not initialized".to_string(),
+    ))?;
+    rt.overrides().clear_scope(LogOverrideScope::App(id));
+
+    Ok(WebResponse::ok(build_app_log_level_view(id).await?))
 }

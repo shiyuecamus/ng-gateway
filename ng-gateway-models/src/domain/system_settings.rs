@@ -99,8 +99,8 @@ pub struct GlobalLogLevelView {
     pub baseline: LogLevel,
     /// Effective global level (baseline + any global overrides).
     pub effective: LogLevel,
-    /// TTL policy for channel overrides.
-    pub channel_override_ttl: TtlRange,
+    /// TTL policy for all override scopes (channel/app/...).
+    pub override_ttl: TtlRange,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -131,6 +131,33 @@ pub struct ChannelLogLevelView {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetChannelLogLevelRequest {
+    pub level: LogLevel,
+    #[serde(default)]
+    pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLogOverrideView {
+    pub level: LogLevel,
+    /// TTL in ms used when setting this override. Enables accurate countdown progress in UI.
+    pub ttl_ms: u64,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLogLevelView {
+    pub app_id: i32,
+    pub effective: LogLevel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#override: Option<AppLogOverrideView>,
+    pub ttl: TtlRange,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAppLogLevelRequest {
     pub level: LogLevel,
     #[serde(default)]
     pub ttl_ms: Option<u64>,
@@ -237,11 +264,11 @@ pub enum RuntimeSettingKey {
     GeneralCollectorRetryPolicyMaxElapsedTimeMs,
     GeneralCollectorOutboundQueueCapacity,
     GeneralNorthwardQueueCapacity,
-    LoggingControlChannelOverrideDefaultTtlMs,
-    LoggingControlChannelOverrideMinTtlMs,
-    LoggingControlChannelOverrideMaxTtlMs,
+    LoggingControlOverrideDefaultTtlMs,
+    LoggingControlOverrideMinTtlMs,
+    LoggingControlOverrideMaxTtlMs,
     LoggingControlOverrideCleanupIntervalMs,
-    LoggingControlDriverIngestQueueCapacity,
+    LoggingControlIngestQueueCapacity,
     LoggingOutputFormat,
     LoggingOutputIncludeSpanFields,
     LoggingOutputFileEnabled,
@@ -311,13 +338,13 @@ pub struct SystemSettingsOverviewView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoggingControlSettingsView {
-    pub channel_override_default_ttl_ms: SettingField<u64>,
-    pub channel_override_min_ttl_ms: SettingField<u64>,
-    pub channel_override_max_ttl_ms: SettingField<u64>,
+    pub override_default_ttl_ms: SettingField<u64>,
+    pub override_min_ttl_ms: SettingField<u64>,
+    pub override_max_ttl_ms: SettingField<u64>,
     /// Cleanup tick interval in milliseconds for expiring override leases.
     pub override_cleanup_interval_ms: SettingField<u64>,
-    /// Driver->host ingest queue capacity for driver logs (bounded, drop-old-keep-new).
-    pub driver_ingest_queue_capacity: SettingField<u64>,
+    /// Unified `cdylib -> host` ingest queue capacity (driver + plugin).
+    pub ingest_queue_capacity: SettingField<u64>,
 }
 
 /// Logging control settings patch (partial update).
@@ -327,25 +354,25 @@ pub struct LoggingControlSettingsView {
 pub struct PatchLoggingControlSettingsRequest {
     #[serde(default)]
     #[validate(range(min = 1))]
-    pub channel_override_default_ttl_ms: Option<u64>,
+    pub override_default_ttl_ms: Option<u64>,
     #[serde(default)]
     #[validate(range(min = 1))]
-    pub channel_override_min_ttl_ms: Option<u64>,
+    pub override_min_ttl_ms: Option<u64>,
     #[serde(default)]
     #[validate(range(min = 1))]
-    pub channel_override_max_ttl_ms: Option<u64>,
+    pub override_max_ttl_ms: Option<u64>,
     /// Cleanup tick interval in milliseconds for expiring override leases.
     ///
     /// Recommended range: [200, 300_000].
     #[serde(default)]
     #[validate(range(min = 200, max = 300_000))]
     pub override_cleanup_interval_ms: Option<u64>,
-    /// Driver->host ingest queue capacity for driver logs (bounded, drop-old-keep-new).
+    /// Unified `cdylib -> host` ingest queue capacity (driver + plugin).
     ///
     /// Recommended range: [1, 1_000_000].
     #[serde(default)]
     #[validate(range(min = 1, max = 1_000_000))]
-    pub driver_ingest_queue_capacity: Option<u64>,
+    pub ingest_queue_capacity: Option<u64>,
 }
 
 /// Cross-field validation for logging control patch requests.
@@ -362,23 +389,17 @@ fn validate_logging_control_patch(
     v: &PatchLoggingControlSettingsRequest,
 ) -> Result<(), ValidationError> {
     // TTL relationship checks (best-effort for partial patches).
-    if let (Some(min), Some(max)) = (v.channel_override_min_ttl_ms, v.channel_override_max_ttl_ms) {
+    if let (Some(min), Some(max)) = (v.override_min_ttl_ms, v.override_max_ttl_ms) {
         if max < min {
             return Err(ValidationError::new("ttl_range_invalid"));
         }
     }
-    if let (Some(default_ttl), Some(min)) = (
-        v.channel_override_default_ttl_ms,
-        v.channel_override_min_ttl_ms,
-    ) {
+    if let (Some(default_ttl), Some(min)) = (v.override_default_ttl_ms, v.override_min_ttl_ms) {
         if default_ttl < min {
             return Err(ValidationError::new("ttl_default_below_min"));
         }
     }
-    if let (Some(default_ttl), Some(max)) = (
-        v.channel_override_default_ttl_ms,
-        v.channel_override_max_ttl_ms,
-    ) {
+    if let (Some(default_ttl), Some(max)) = (v.override_default_ttl_ms, v.override_max_ttl_ms) {
         if default_ttl > max {
             return Err(ValidationError::new("ttl_default_above_max"));
         }

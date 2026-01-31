@@ -89,20 +89,20 @@ data:
   {{- if $config.logging }}
   {{- if $config.logging.control }}
   {{- if $runtimeEnvEnabled }}
-  {{- if hasKey $config.logging.control "channelOverrideDefaultTtlMs" }}
-  NG__LOGGING__CONTROL__CHANNEL_OVERRIDE_DEFAULT_TTL_MS: {{ $config.logging.control.channelOverrideDefaultTtlMs | quote }}
+  {{- if hasKey $config.logging.control "overrideDefaultTtlMs" }}
+  NG__LOGGING__CONTROL__OVERRIDE_DEFAULT_TTL_MS: {{ $config.logging.control.overrideDefaultTtlMs | quote }}
   {{- end }}
-  {{- if hasKey $config.logging.control "channelOverrideMinTtlMs" }}
-  NG__LOGGING__CONTROL__CHANNEL_OVERRIDE_MIN_TTL_MS: {{ $config.logging.control.channelOverrideMinTtlMs | quote }}
+  {{- if hasKey $config.logging.control "overrideMinTtlMs" }}
+  NG__LOGGING__CONTROL__OVERRIDE_MIN_TTL_MS: {{ $config.logging.control.overrideMinTtlMs | quote }}
   {{- end }}
-  {{- if hasKey $config.logging.control "channelOverrideMaxTtlMs" }}
-  NG__LOGGING__CONTROL__CHANNEL_OVERRIDE_MAX_TTL_MS: {{ $config.logging.control.channelOverrideMaxTtlMs | quote }}
+  {{- if hasKey $config.logging.control "overrideMaxTtlMs" }}
+  NG__LOGGING__CONTROL__OVERRIDE_MAX_TTL_MS: {{ $config.logging.control.overrideMaxTtlMs | quote }}
   {{- end }}
   {{- if hasKey $config.logging.control "overrideCleanupIntervalMs" }}
   NG__LOGGING__CONTROL__OVERRIDE_CLEANUP_INTERVAL_MS: {{ $config.logging.control.overrideCleanupIntervalMs | quote }}
   {{- end }}
-  {{- if hasKey $config.logging.control "driverIngestQueueCapacity" }}
-  NG__LOGGING__CONTROL__DRIVER_INGEST_QUEUE_CAPACITY: {{ $config.logging.control.driverIngestQueueCapacity | quote }}
+  {{- if hasKey $config.logging.control "ingestQueueCapacity" }}
+  NG__LOGGING__CONTROL__INGEST_QUEUE_CAPACITY: {{ $config.logging.control.ingestQueueCapacity | quote }}
   {{- end }}
   {{- end }}
   {{- end }}

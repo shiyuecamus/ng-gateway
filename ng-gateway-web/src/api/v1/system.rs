@@ -230,10 +230,10 @@ pub async fn get_system_settings_overview() -> WebResult<WebResponse<SystemSetti
     let logging_runtime = GlobalLogLevelView {
         baseline,
         effective,
-        channel_override_ttl: TtlRange {
-            min_ms: s.channel_override_min_ttl_ms,
-            max_ms: s.channel_override_max_ttl_ms,
-            default_ms: s.channel_override_default_ttl_ms,
+        override_ttl: TtlRange {
+            min_ms: s.override_min_ttl_ms,
+            max_ms: s.override_max_ttl_ms,
+            default_ms: s.override_default_ttl_ms,
         },
     };
     let logging_control =
@@ -380,10 +380,10 @@ pub async fn get_logging_runtime() -> WebResult<WebResponse<GlobalLogLevelView>>
     Ok(WebResponse::ok(GlobalLogLevelView {
         baseline,
         effective,
-        channel_override_ttl: TtlRange {
-            min_ms: s.channel_override_min_ttl_ms,
-            max_ms: s.channel_override_max_ttl_ms,
-            default_ms: s.channel_override_default_ttl_ms,
+        override_ttl: TtlRange {
+            min_ms: s.override_min_ttl_ms,
+            max_ms: s.override_max_ttl_ms,
+            default_ms: s.override_default_ttl_ms,
         },
     }))
 }

@@ -420,7 +420,7 @@ macro_rules! ng_driver_factory {
         /// flushing bridged logs immediately after initialization.
         #[no_mangle]
         pub extern "C" fn ng_driver_set_log_sink(sink: $crate::log::LogSinkV1) -> u32 {
-            $crate::log::set_log_sink(sink)
+          $crate::southward::log::set_log_sink(sink)
         }
 
         /// Set the driver's runtime max log level (dynamic).
@@ -429,13 +429,13 @@ macro_rules! ng_driver_factory {
         /// - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
         #[no_mangle]
         pub extern "C" fn ng_driver_set_max_level(level: u8) -> u32 {
-            $crate::log::set_max_level(level)
+            $crate::southward::log::set_max_level(level)
         }
 
         /// Get the driver's current runtime max log level (dynamic).
         #[no_mangle]
         pub extern "C" fn ng_driver_get_max_level() -> u8 {
-            $crate::log::get_max_level()
+            $crate::southward::log::get_max_level()
         }
 
 

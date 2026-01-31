@@ -58,20 +58,20 @@ fn key_path_segments(key: RuntimeSettingKey) -> &'static [&'static str] {
         RuntimeSettingKey::GeneralNorthwardQueueCapacity => {
             &["general", "northward", "queue_capacity"]
         }
-        RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs => {
-            &["logging", "control", "channel_override_default_ttl_ms"]
+        RuntimeSettingKey::LoggingControlOverrideDefaultTtlMs => {
+            &["logging", "control", "override_default_ttl_ms"]
         }
-        RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs => {
-            &["logging", "control", "channel_override_min_ttl_ms"]
+        RuntimeSettingKey::LoggingControlOverrideMinTtlMs => {
+            &["logging", "control", "override_min_ttl_ms"]
         }
-        RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs => {
-            &["logging", "control", "channel_override_max_ttl_ms"]
+        RuntimeSettingKey::LoggingControlOverrideMaxTtlMs => {
+            &["logging", "control", "override_max_ttl_ms"]
         }
         RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs => {
             &["logging", "control", "override_cleanup_interval_ms"]
         }
-        RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity => {
-            &["logging", "control", "driver_ingest_queue_capacity"]
+        RuntimeSettingKey::LoggingControlIngestQueueCapacity => {
+            &["logging", "control", "ingest_queue_capacity"]
         }
         RuntimeSettingKey::LoggingOutputFormat => &["logging", "output", "format"],
         RuntimeSettingKey::LoggingOutputIncludeSpanFields => {
@@ -748,30 +748,30 @@ pub fn build_logging_control_view(
 ) -> NGResult<LoggingControlSettingsView> {
     let doc = read_gateway_toml_doc(settings.config_path())?;
     Ok(LoggingControlSettingsView {
-        channel_override_default_ttl_ms: setting_field_u64(
+        override_default_ttl_ms: setting_field_u64(
             &doc,
-            RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs,
-            current.channel_override_default_ttl_ms,
+            RuntimeSettingKey::LoggingControlOverrideDefaultTtlMs,
+            current.override_default_ttl_ms,
         ),
-        channel_override_min_ttl_ms: setting_field_u64(
+        override_min_ttl_ms: setting_field_u64(
             &doc,
-            RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs,
-            current.channel_override_min_ttl_ms,
+            RuntimeSettingKey::LoggingControlOverrideMinTtlMs,
+            current.override_min_ttl_ms,
         ),
-        channel_override_max_ttl_ms: setting_field_u64(
+        override_max_ttl_ms: setting_field_u64(
             &doc,
-            RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs,
-            current.channel_override_max_ttl_ms,
+            RuntimeSettingKey::LoggingControlOverrideMaxTtlMs,
+            current.override_max_ttl_ms,
         ),
         override_cleanup_interval_ms: setting_field_u64(
             &doc,
             RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs,
             current.override_cleanup_interval_ms,
         ),
-        driver_ingest_queue_capacity: setting_field_u64(
+        ingest_queue_capacity: setting_field_u64(
             &doc,
-            RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity,
-            current.driver_ingest_queue_capacity as u64,
+            RuntimeSettingKey::LoggingControlIngestQueueCapacity,
+            current.ingest_queue_capacity as u64,
         ),
     })
 }
@@ -787,23 +787,23 @@ pub fn apply_logging_control_settings(
 ) -> NGResult<ApplySystemSettingsResult> {
     // Filter out env-controlled fields.
     let mut blocked_by_env = Vec::new();
-    if req.channel_override_default_ttl_ms.is_some()
-        && env_overridden(RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs)
+    if req.override_default_ttl_ms.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlOverrideDefaultTtlMs)
     {
-        blocked_by_env.push(RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs);
-        req.channel_override_default_ttl_ms = None;
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlOverrideDefaultTtlMs);
+        req.override_default_ttl_ms = None;
     }
-    if req.channel_override_min_ttl_ms.is_some()
-        && env_overridden(RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs)
+    if req.override_min_ttl_ms.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlOverrideMinTtlMs)
     {
-        blocked_by_env.push(RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs);
-        req.channel_override_min_ttl_ms = None;
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlOverrideMinTtlMs);
+        req.override_min_ttl_ms = None;
     }
-    if req.channel_override_max_ttl_ms.is_some()
-        && env_overridden(RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs)
+    if req.override_max_ttl_ms.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlOverrideMaxTtlMs)
     {
-        blocked_by_env.push(RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs);
-        req.channel_override_max_ttl_ms = None;
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlOverrideMaxTtlMs);
+        req.override_max_ttl_ms = None;
     }
     if req.override_cleanup_interval_ms.is_some()
         && env_overridden(RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs)
@@ -811,19 +811,19 @@ pub fn apply_logging_control_settings(
         blocked_by_env.push(RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs);
         req.override_cleanup_interval_ms = None;
     }
-    if req.driver_ingest_queue_capacity.is_some()
-        && env_overridden(RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity)
+    if req.ingest_queue_capacity.is_some()
+        && env_overridden(RuntimeSettingKey::LoggingControlIngestQueueCapacity)
     {
-        blocked_by_env.push(RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity);
-        req.driver_ingest_queue_capacity = None;
+        blocked_by_env.push(RuntimeSettingKey::LoggingControlIngestQueueCapacity);
+        req.ingest_queue_capacity = None;
     }
 
     // No-op fast path.
-    if req.channel_override_default_ttl_ms.is_none()
-        && req.channel_override_min_ttl_ms.is_none()
-        && req.channel_override_max_ttl_ms.is_none()
+    if req.override_default_ttl_ms.is_none()
+        && req.override_min_ttl_ms.is_none()
+        && req.override_max_ttl_ms.is_none()
         && req.override_cleanup_interval_ms.is_none()
-        && req.driver_ingest_queue_capacity.is_none()
+        && req.ingest_queue_capacity.is_none()
     {
         return Ok(ApplySystemSettingsResult {
             applied: true,
@@ -845,34 +845,34 @@ pub fn apply_logging_control_settings(
     let cur = rt.settings();
     let mut next = cur;
 
-    if let Some(v) = req.channel_override_default_ttl_ms {
-        next.channel_override_default_ttl_ms = v;
+    if let Some(v) = req.override_default_ttl_ms {
+        next.override_default_ttl_ms = v;
     }
-    if let Some(v) = req.channel_override_min_ttl_ms {
-        next.channel_override_min_ttl_ms = v;
+    if let Some(v) = req.override_min_ttl_ms {
+        next.override_min_ttl_ms = v;
     }
-    if let Some(v) = req.channel_override_max_ttl_ms {
-        next.channel_override_max_ttl_ms = v;
+    if let Some(v) = req.override_max_ttl_ms {
+        next.override_max_ttl_ms = v;
     }
     if let Some(v) = req.override_cleanup_interval_ms {
         next.override_cleanup_interval_ms = v;
     }
-    if let Some(v) = req.driver_ingest_queue_capacity {
+    if let Some(v) = req.ingest_queue_capacity {
         // Avoid usize overflow on 32-bit targets (defensive).
-        next.driver_ingest_queue_capacity = (v.min(usize::MAX as u64)) as usize;
+        next.ingest_queue_capacity = (v.min(usize::MAX as u64)) as usize;
     }
 
     // Cross-field validation (keep policy coherent).
-    if next.channel_override_max_ttl_ms < next.channel_override_min_ttl_ms {
+    if next.override_max_ttl_ms < next.override_min_ttl_ms {
         return Err(NGError::from(
-            "channel_override_max_ttl_ms must be >= channel_override_min_ttl_ms",
+            "override_max_ttl_ms must be >= override_min_ttl_ms",
         ));
     }
-    if next.channel_override_default_ttl_ms < next.channel_override_min_ttl_ms
-        || next.channel_override_default_ttl_ms > next.channel_override_max_ttl_ms
+    if next.override_default_ttl_ms < next.override_min_ttl_ms
+        || next.override_default_ttl_ms > next.override_max_ttl_ms
     {
         return Err(NGError::from(
-            "channel_override_default_ttl_ms must be within [min, max]",
+            "override_default_ttl_ms must be within [min, max]",
         ));
     }
 
@@ -881,20 +881,20 @@ pub fn apply_logging_control_settings(
 
     // Track changed keys.
     let mut changed_keys: Vec<RuntimeSettingKey> = Vec::new();
-    if cur.channel_override_default_ttl_ms != next.channel_override_default_ttl_ms {
-        changed_keys.push(RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs);
+    if cur.override_default_ttl_ms != next.override_default_ttl_ms {
+        changed_keys.push(RuntimeSettingKey::LoggingControlOverrideDefaultTtlMs);
     }
-    if cur.channel_override_min_ttl_ms != next.channel_override_min_ttl_ms {
-        changed_keys.push(RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs);
+    if cur.override_min_ttl_ms != next.override_min_ttl_ms {
+        changed_keys.push(RuntimeSettingKey::LoggingControlOverrideMinTtlMs);
     }
-    if cur.channel_override_max_ttl_ms != next.channel_override_max_ttl_ms {
-        changed_keys.push(RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs);
+    if cur.override_max_ttl_ms != next.override_max_ttl_ms {
+        changed_keys.push(RuntimeSettingKey::LoggingControlOverrideMaxTtlMs);
     }
     if cur.override_cleanup_interval_ms != next.override_cleanup_interval_ms {
         changed_keys.push(RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs);
     }
-    if cur.driver_ingest_queue_capacity != next.driver_ingest_queue_capacity {
-        changed_keys.push(RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity);
+    if cur.ingest_queue_capacity != next.ingest_queue_capacity {
+        changed_keys.push(RuntimeSettingKey::LoggingControlIngestQueueCapacity);
     }
 
     // Persist changed keys only.
@@ -904,25 +904,25 @@ pub fn apply_logging_control_settings(
         let mut doc = read_gateway_toml_doc(settings.config_path())?;
         for key in &changed_keys {
             match key {
-                RuntimeSettingKey::LoggingControlChannelOverrideDefaultTtlMs => {
+                RuntimeSettingKey::LoggingControlOverrideDefaultTtlMs => {
                     toml_set_int(
                         &mut doc,
                         key_path_segments(*key),
-                        next.channel_override_default_ttl_ms.min(i64::MAX as u64) as i64,
+                        next.override_default_ttl_ms.min(i64::MAX as u64) as i64,
                     );
                 }
-                RuntimeSettingKey::LoggingControlChannelOverrideMinTtlMs => {
+                RuntimeSettingKey::LoggingControlOverrideMinTtlMs => {
                     toml_set_int(
                         &mut doc,
                         key_path_segments(*key),
-                        next.channel_override_min_ttl_ms.min(i64::MAX as u64) as i64,
+                        next.override_min_ttl_ms.min(i64::MAX as u64) as i64,
                     );
                 }
-                RuntimeSettingKey::LoggingControlChannelOverrideMaxTtlMs => {
+                RuntimeSettingKey::LoggingControlOverrideMaxTtlMs => {
                     toml_set_int(
                         &mut doc,
                         key_path_segments(*key),
-                        next.channel_override_max_ttl_ms.min(i64::MAX as u64) as i64,
+                        next.override_max_ttl_ms.min(i64::MAX as u64) as i64,
                     );
                 }
                 RuntimeSettingKey::LoggingControlOverrideCleanupIntervalMs => {
@@ -932,11 +932,11 @@ pub fn apply_logging_control_settings(
                         next.override_cleanup_interval_ms.min(i64::MAX as u64) as i64,
                     );
                 }
-                RuntimeSettingKey::LoggingControlDriverIngestQueueCapacity => {
+                RuntimeSettingKey::LoggingControlIngestQueueCapacity => {
                     toml_set_int(
                         &mut doc,
                         key_path_segments(*key),
-                        (next.driver_ingest_queue_capacity as u64).min(i64::MAX as u64) as i64,
+                        (next.ingest_queue_capacity as u64).min(i64::MAX as u64) as i64,
                     );
                 }
                 _ => {}

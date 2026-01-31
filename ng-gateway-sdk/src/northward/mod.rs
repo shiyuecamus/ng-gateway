@@ -3,6 +3,7 @@ pub mod codec;
 pub mod downlink;
 pub mod envelope;
 pub mod extension;
+pub mod log;
 pub mod mapping;
 pub(crate) mod model;
 pub mod payload;
@@ -406,6 +407,25 @@ macro_rules! ng_plugin_factory {
             $crate::ffi::write_slice_ptr_len(out_ptr, out_len, &NG_PLUGIN_METADATA_JSON);
         }
 
+        /// Register host log sink into this plugin library.
+        ///
+        /// # Returns
+        /// - 0: ok
+        /// - 1: abi mismatch
+        #[no_mangle]
+        pub extern "C" fn ng_plugin_set_log_sink(sink: $crate::log::LogSinkV1) -> u32 {
+            $crate::northward::log::set_log_sink(sink)
+        }
+
+        /// Best-effort dynamic max log level control for this plugin library.
+        ///
+        /// Level mapping:
+        /// - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
+        #[no_mangle]
+        pub extern "C" fn ng_plugin_set_max_level(level: u8) -> u32 {
+            $crate::northward::log::set_max_level(level)
+        }
+
         #[no_mangle]
         pub extern "C" fn create_plugin_factory() -> *mut dyn $crate::PluginFactory {
             let inner: Box<dyn $crate::PluginFactory> =
@@ -425,23 +445,17 @@ macro_rules! ng_plugin_factory {
         /// Initialize tracing for this northward plugin library.
         #[no_mangle]
         pub extern "C" fn ng_plugin_init_tracing(debug: bool) {
-            use $crate::export::tracing::Level;
-            use $crate::export::tracing_subscriber::fmt;
-
-            if debug {
-                let _ = fmt()
-                    .pretty()
-                    .with_line_number(true)
-                    .with_file(true)
-                    .with_max_level(Level::DEBUG)
-                    .try_init();
-            } else {
-                let _ = fmt()
-                    .with_line_number(false)
-                    .with_file(false)
-                    .with_max_level(Level::INFO)
-                    .try_init();
-            };
+            // Install the plugin->host bridge subscriber (NOT a local fmt subscriber).
+            //
+            // This ensures plugin logs enter the unified host logging pipeline and are
+            // governed by runtime log-control policies (global/channel/app overrides).
+            let handle = NG_RUNTIME
+                .as_ref()
+                .map(|rt| rt.handle().clone())
+                .or_else(|| tokio::runtime::Handle::try_current().ok());
+            if let Some(h) = handle {
+                $crate::northward::log::init_plugin_tracing(h, debug);
+            }
         }
     };
 }

@@ -1,17 +1,13 @@
-//! Driver <-> host log bridge utilities.
+//! Northward plugin <-> host log bridge utilities.
 //!
-//! This module provides:
-//! - A stable C ABI `LogSinkV1` so the host can register a callback sink into a `cdylib` driver.
-//! - A driver-side `tracing_subscriber::Layer` that captures events and flushes them to the sink
-//!   asynchronously in batches (to avoid blocking hot paths).
-//! - A host-side sink implementation that ingests JSON/JSONL payloads and re-emits them as host
-//!   `tracing` events, so they naturally flow into the unified host logger.
+//! This is the northward-plugin counterpart to `southward::log`:
+//! - A plugin-side `tracing_subscriber::Layer` that captures events and flushes them to a host sink
+//! - A stable C ABI `LogSinkV1` (re-used from `crate::log`) registered by the host loader
 //!
-//! # Safety contract (FFI)
-//! - The driver MUST treat sink callbacks as "best-effort, non-blocking".
-//! - The host sink callbacks MUST return quickly: copy + enqueue only.
+//! # Design notes
+//! - The sink is **per dynamic library**, not per plugin instance.
+//! - We MUST propagate `app_id` via span inheritance so app-level overrides work reliably.
 
-use crate::log::{fields, LogSinkV1, LOG_SINK_ABI_V1};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -23,7 +19,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use tokio::{runtime::Handle, sync::Notify};
+use tokio::runtime::Handle;
 use tracing::{
     field::{Field, Visit},
     span::{Attributes, Id, Record},
@@ -37,9 +33,11 @@ use tracing_subscriber::{
     Layer,
 };
 
-/// Driver-side log bridge configuration.
+use crate::log::{fields, LogSinkV1, LOG_SINK_ABI_V1};
+
+/// Plugin-side log bridge configuration.
 #[derive(Debug, Clone, Copy)]
-pub struct DriverLogBridgeConfig {
+pub struct PluginLogBridgeConfig {
     /// Max number of queued events before dropping oldest.
     pub queue_capacity: usize,
     /// Max bytes per log message (truncate beyond).
@@ -50,7 +48,7 @@ pub struct DriverLogBridgeConfig {
     pub batch_max_bytes: usize,
 }
 
-impl Default for DriverLogBridgeConfig {
+impl Default for PluginLogBridgeConfig {
     fn default() -> Self {
         Self {
             queue_capacity: 10_000,
@@ -61,36 +59,34 @@ impl Default for DriverLogBridgeConfig {
     }
 }
 
-/// Internal driver-side shared state.
-struct DriverLogState {
+struct PluginLogState {
     sink: Mutex<Option<LogSinkV1>>,
     max_level: AtomicU8,
-    cfg: DriverLogBridgeConfig,
-    queue: Mutex<VecDeque<DriverWireEvent>>,
-    notify: Notify,
+    cfg: PluginLogBridgeConfig,
+    queue: Mutex<VecDeque<PluginWireEvent>>,
+    notify: tokio::sync::Notify,
     flush_started: AtomicBool,
 }
 
-static DRIVER_LOG_STATE: OnceCell<Arc<DriverLogState>> = OnceCell::new();
+static PLUGIN_LOG_STATE: OnceCell<Arc<PluginLogState>> = OnceCell::new();
 
-/// Initialize driver-side log bridge state (idempotent).
-fn driver_state(cfg: DriverLogBridgeConfig) -> Arc<DriverLogState> {
-    DRIVER_LOG_STATE
+fn plugin_state(cfg: PluginLogBridgeConfig) -> Arc<PluginLogState> {
+    PLUGIN_LOG_STATE
         .get_or_init(|| {
-            Arc::new(DriverLogState {
+            Arc::new(PluginLogState {
                 sink: Mutex::new(None),
                 // Default to INFO.
-                max_level: AtomicU8::new(level_to_u8(&tracing::Level::INFO)),
+                max_level: AtomicU8::new(level_to_u8(&Level::INFO)),
                 cfg,
                 queue: Mutex::new(VecDeque::new()),
-                notify: Notify::new(),
+                notify: tokio::sync::Notify::new(),
                 flush_started: AtomicBool::new(false),
             })
         })
         .clone()
 }
 
-/// Set the driver log sink (host registers this after loading the library).
+/// Set the plugin log sink (host registers this after loading the library).
 ///
 /// # Returns
 /// - 0: ok
@@ -99,40 +95,36 @@ pub fn set_log_sink(sink: LogSinkV1) -> u32 {
     if sink.abi_version != LOG_SINK_ABI_V1 {
         return 1;
     }
-    let st = driver_state(DriverLogBridgeConfig::default());
+    let st = plugin_state(PluginLogBridgeConfig::default());
     let mut guard = st.sink.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(sink);
     0
 }
 
-/// Set the max log level for this driver (dynamic).
+/// Set the max log level for this plugin library (dynamic).
 ///
 /// Level mapping:
 /// - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
 pub fn set_max_level(level: u8) -> u32 {
-    let st = driver_state(DriverLogBridgeConfig::default());
+    let st = plugin_state(PluginLogBridgeConfig::default());
     st.max_level.store(level.min(4), Ordering::Relaxed);
     0
 }
 
-/// Get the current driver max level (dynamic).
+/// Get the current plugin max level (dynamic).
 pub fn get_max_level() -> u8 {
-    let st = driver_state(DriverLogBridgeConfig::default());
+    let st = plugin_state(PluginLogBridgeConfig::default());
     st.max_level.load(Ordering::Relaxed)
 }
 
-/// Initialize tracing in the driver `cdylib` and install the bridge layer.
+/// Initialize tracing in the plugin `cdylib` and install the bridge layer.
 ///
 /// # Important
-/// This function must be called by the host loader. It should not block.
-pub fn init_driver_tracing(handle: Handle, debug: bool) {
-    let st = driver_state(DriverLogBridgeConfig::default());
-    // Initialize max level according to debug flag (best-effort).
-    let init_level = if debug {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
+/// This function is called by the host loader. It should not block.
+pub fn init_plugin_tracing(handle: Handle, debug: bool) {
+    let st = plugin_state(PluginLogBridgeConfig::default());
+
+    let init_level = if debug { Level::DEBUG } else { Level::INFO };
     st.max_level
         .store(level_to_u8(&init_level), Ordering::Relaxed);
 
@@ -140,42 +132,39 @@ pub fn init_driver_tracing(handle: Handle, debug: bool) {
     let _ = LogTracer::init();
 
     // Install a lightweight subscriber that only captures and bridges events.
-    let layer = DriverBridgeLayer {
-        st: Arc::clone(&st),
-    };
+    let layer = PluginBridgeLayer { st: st.clone() };
     let subscriber = tracing_subscriber::registry().with(layer);
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     // Start the flush task once.
     if !st.flush_started.swap(true, Ordering::SeqCst) {
-        handle.spawn(driver_flush_loop(st));
+        handle.spawn(plugin_flush_loop(st));
     }
 }
 
-/// Driver bridge layer: capture events and enqueue into an internal bounded queue.
-struct DriverBridgeLayer {
-    st: Arc<DriverLogState>,
+struct PluginBridgeLayer {
+    st: Arc<PluginLogState>,
 }
 
-/// Span extension: cached `channel_id` for host-side filtering.
+/// Span extension: cached `app_id` for host-side filtering.
 #[derive(Debug, Clone, Copy, Default)]
-struct ChannelIdExt(Option<i32>);
+struct AppIdExt(Option<i32>);
 
 #[derive(Default)]
-struct ChannelIdVisitor {
-    channel_id: Option<i32>,
+struct AppIdVisitor {
+    app_id: Option<i32>,
 }
 
-impl Visit for ChannelIdVisitor {
+impl Visit for AppIdVisitor {
     fn record_i64(&mut self, field: &Field, value: i64) {
-        if field.name() == fields::CHANNEL_ID {
-            self.channel_id = Some(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+        if field.name() == fields::APP_ID {
+            self.app_id = Some(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         }
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        if field.name() == fields::CHANNEL_ID {
-            self.channel_id = Some((value.min(i32::MAX as u64)) as i32);
+        if field.name() == fields::APP_ID {
+            self.app_id = Some((value.min(i32::MAX as u64)) as i32);
         }
     }
 
@@ -184,17 +173,17 @@ impl Visit for ChannelIdVisitor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DriverWireSpan {
+struct PluginWireSpan {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    channel_id: Option<i32>,
+    app_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fields: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DriverWireEvent {
+struct PluginWireEvent {
     ts: i64,
     /// Backward compatible string level (older hosts).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,10 +198,10 @@ struct DriverWireEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     fields: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    span: Option<DriverWireSpan>,
+    span: Option<PluginWireSpan>,
 }
 
-impl<S> Layer<S> for DriverBridgeLayer
+impl<S> Layer<S> for PluginBridgeLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
@@ -223,17 +212,17 @@ where
 
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else { return };
-        let mut v = ChannelIdVisitor::default();
+        let mut v = AppIdVisitor::default();
         attrs.record(&mut v);
 
-        // Inherit `channel_id` from ancestors so host-side per-channel filtering stays reliable
+        // Inherit `app_id` from ancestors so host-side per-app filtering stays reliable
         // even when dependencies create nested spans that don't repeat the field.
-        if v.channel_id.is_none() {
+        if v.app_id.is_none() {
             let mut p = span.parent();
             while let Some(ps) = p {
-                if let Some(ext) = ps.extensions().get::<ChannelIdExt>() {
+                if let Some(ext) = ps.extensions().get::<AppIdExt>() {
                     if ext.0.is_some() {
-                        v.channel_id = ext.0;
+                        v.app_id = ext.0;
                         break;
                     }
                 }
@@ -241,26 +230,25 @@ where
             }
         }
 
-        span.extensions_mut().insert(ChannelIdExt(v.channel_id));
+        span.extensions_mut().insert(AppIdExt(v.app_id));
     }
 
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else { return };
-        let mut v = ChannelIdVisitor::default();
+        let mut v = AppIdVisitor::default();
         values.record(&mut v);
-        if v.channel_id.is_none() {
+        if v.app_id.is_none() {
             return;
         }
         let mut exts = span.extensions_mut();
-        if let Some(ext) = exts.get_mut::<ChannelIdExt>() {
-            ext.0 = v.channel_id;
+        if let Some(ext) = exts.get_mut::<AppIdExt>() {
+            ext.0 = v.app_id;
         } else {
-            exts.insert(ChannelIdExt(v.channel_id));
+            exts.insert(AppIdExt(v.app_id));
         }
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        // Fast-path filter (in case enabled() wasn't checked by registry for some callsites).
         let meta = event.metadata();
         let max = self.st.max_level.load(Ordering::Relaxed);
         if level_to_u8(meta.level()) > max {
@@ -270,8 +258,6 @@ where
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
 
-        // Best practice: `message` is the event body, it MUST NOT be duplicated inside `fields`.
-        // We extract it and remove it from the structured map to keep payload small and semantics clear.
         let message = visitor
             .fields
             .remove(fields::MESSAGE)
@@ -281,10 +267,10 @@ where
 
         let current_span: Option<SpanRef<'_, S>> = ctx.lookup_current();
         let span = current_span.as_ref().map(|s| {
-            let channel_id = s.extensions().get::<ChannelIdExt>().and_then(|e| e.0);
-            DriverWireSpan {
+            let app_id = s.extensions().get::<AppIdExt>().and_then(|e| e.0);
+            PluginWireSpan {
                 name: s.metadata().name().to_string(),
-                channel_id,
+                app_id,
                 fields: None,
             }
         });
@@ -295,7 +281,7 @@ where
             Some(visitor.fields)
         };
 
-        let wire = DriverWireEvent {
+        let wire = PluginWireEvent {
             ts: chrono::Utc::now().timestamp_millis(),
             level: None,
             level_u8: Some(level_to_u8(meta.level())),
@@ -305,7 +291,6 @@ where
             span,
         };
 
-        // Enqueue (drop-old-keep-new).
         let mut q = self.st.queue.lock().unwrap_or_else(|e| e.into_inner());
         q.push_back(wire);
         while q.len() > self.st.cfg.queue_capacity {
@@ -316,10 +301,8 @@ where
     }
 }
 
-/// Background flush loop in driver runtime.
-async fn driver_flush_loop(st: Arc<DriverLogState>) {
+async fn plugin_flush_loop(st: Arc<PluginLogState>) {
     loop {
-        // Wait for new logs (or periodic wakeup).
         tokio::select! {
             _ = st.notify.notified() => {}
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
@@ -331,21 +314,18 @@ async fn driver_flush_loop(st: Arc<DriverLogState>) {
         };
         let Some(sink) = sink else { continue };
 
-        // Drain queue into a batch.
-        let mut batch: Vec<DriverWireEvent> = Vec::new();
+        let mut batch: Vec<PluginWireEvent> = Vec::new();
         let mut bytes_budget = st.cfg.batch_max_bytes;
         {
             let mut q = st.queue.lock().unwrap_or_else(|e| e.into_inner());
             while batch.len() < st.cfg.batch_max_events {
                 let Some(ev) = q.pop_front() else { break };
-                // Rough byte budget: message + target + overhead
                 let approx = ev
                     .message
                     .len()
                     .saturating_add(ev.target.len())
                     .saturating_add(256);
                 if approx > bytes_budget && !batch.is_empty() {
-                    // Put back and flush current batch.
                     q.push_front(ev);
                     break;
                 }
@@ -359,7 +339,6 @@ async fn driver_flush_loop(st: Arc<DriverLogState>) {
         }
 
         if let Some(emit_batch) = sink.emit_batch_json {
-            // JSON Lines batch.
             let mut buf: Vec<u8> = Vec::with_capacity(st.cfg.batch_max_bytes.min(1024 * 1024));
             for ev in batch.iter() {
                 let _ = serde_json::to_writer(&mut buf, ev);
@@ -369,7 +348,6 @@ async fn driver_flush_loop(st: Arc<DriverLogState>) {
                 emit_batch(sink.user_data, buf.as_ptr(), buf.len());
             }
         } else {
-            // Fallback: emit per event.
             for ev in batch.iter() {
                 let mut buf: Vec<u8> = Vec::with_capacity(512);
                 let _ = serde_json::to_writer(&mut buf, ev);

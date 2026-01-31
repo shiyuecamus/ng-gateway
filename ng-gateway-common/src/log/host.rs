@@ -7,8 +7,8 @@
 
 use super::{
     control,
-    span_ext::{ChannelIdExt, ChannelIdLayer},
-    DriverFileRegistry, DriverTypeExtractorLayer, SplitFileLayer,
+    span_ext::{AppIdExt, AppIdLayer, ChannelIdExt, ChannelIdLayer},
+    LogRouteExtractorLayer, SplitFileLayer, SplitFileRegistry,
 };
 use arc_swap::ArcSwapOption;
 use ng_gateway_error::{NGError, NGResult};
@@ -77,6 +77,15 @@ where
                 };
                 if let Some(channel_id) = channel_id {
                     effective = overrides.effective_channel_level(channel_id).into();
+                } else {
+                    // If no channel scope applies, fall back to app scope.
+                    let app_id = {
+                        let exts = span.extensions();
+                        exts.get::<AppIdExt>().and_then(|e| e.0)
+                    };
+                    if let Some(app_id) = app_id {
+                        effective = overrides.effective_app_level(app_id).into();
+                    }
                 }
             }
         }
@@ -101,7 +110,7 @@ pub struct Logger {
     // Mapping uses `ng_gateway_models::domain::system_settings::LogLevel`:
     // - 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE
     level: Arc<AtomicU8>,
-    split_file_registry: ArcSwapOption<DriverFileRegistry>,
+    split_file_registry: ArcSwapOption<SplitFileRegistry>,
     file_layer_handle: Option<FileLayerHandle>,
     filter: Option<LogFilter>,
 }
@@ -121,7 +130,7 @@ impl Logger {
     }
 
     /// Get the split file registry for listing log files.
-    pub fn split_file_registry(&self) -> Option<Arc<DriverFileRegistry>> {
+    pub fn split_file_registry(&self) -> Option<Arc<SplitFileRegistry>> {
         self.split_file_registry.load_full()
     }
 
@@ -195,12 +204,14 @@ impl Logger {
         // Subsequent `.with(...)` calls wrap it, and the reload layer does not need to implement
         // `Layer<Layered<...>>`.
         let subscriber = Registry::default()
-            // Split file layer: logs are routed to host.log or {driver_type}.log
+            // Split file layer: logs are routed to host.log / driver_*.log / plugin_*.log
             .with(file_layer)
             // Install a tiny span layer to cache `channel_id` for the filter.
             .with(ChannelIdLayer)
-            // Install driver_type extractor layer to cache driver_type in spans.
-            .with(DriverTypeExtractorLayer)
+            // Install a tiny span layer to cache `app_id` for per-app filtering.
+            .with(AppIdLayer)
+            // Install routing extractor layer to cache `source` + type labels in spans.
+            .with(LogRouteExtractorLayer)
             // Console layer: all logs go to console
             .with(console_layer);
 

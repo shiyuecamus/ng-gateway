@@ -192,11 +192,11 @@ gateway:
 
       # Logging runtime configuration
       logging:
-        channelOverrideDefaultTtlMs: 300000
-        channelOverrideMinTtlMs: 10000
-        channelOverrideMaxTtlMs: 1800000
+        overrideDefaultTtlMs: 300000
+        overrideMinTtlMs: 10000
+        overrideMaxTtlMs: 1800000
         overrideCleanupIntervalMs: 5000
-        driverIngestQueueCapacity: 10000
+        ingestQueueCapacity: 10000
     
     # Web configuration
     web:

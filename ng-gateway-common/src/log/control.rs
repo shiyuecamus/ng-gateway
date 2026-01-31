@@ -24,6 +24,7 @@ use uuid::Uuid;
 pub enum LogOverrideScope {
     Global,
     Channel(i32),
+    App(i32),
 }
 
 /// A single override lease.
@@ -65,26 +66,29 @@ fn notify_change(scope: LogOverrideScope, level_u8: u8) {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LogControlSettings {
-    /// Default TTL for channel overrides in milliseconds.
-    pub channel_override_default_ttl_ms: u64,
+    /// Default TTL for all override scopes in milliseconds.
+    pub override_default_ttl_ms: u64,
     /// Minimum allowed TTL (ms) to avoid abusive rapid toggling.
-    pub channel_override_min_ttl_ms: u64,
+    pub override_min_ttl_ms: u64,
     /// Maximum allowed TTL (ms) to avoid "permanent debug".
-    pub channel_override_max_ttl_ms: u64,
+    pub override_max_ttl_ms: u64,
     /// Cleanup tick interval (ms) for expiring leases.
     pub override_cleanup_interval_ms: u64,
-    /// Driver->host ingest queue capacity (bounded, drop-old-keep-new).
-    pub driver_ingest_queue_capacity: usize,
+    /// Unified `cdylib -> host` ingest queue capacity (driver + plugin).
+    ///
+    /// This is a bounded queue at the FFI boundary; when it fills up, the oldest items are dropped
+    /// to ensure new logs can still enter.
+    pub ingest_queue_capacity: usize,
 }
 
 impl Default for LogControlSettings {
     fn default() -> Self {
         Self {
-            channel_override_default_ttl_ms: 5 * 60 * 1000,
-            channel_override_min_ttl_ms: 10 * 1000,
-            channel_override_max_ttl_ms: 30 * 60 * 1000,
+            override_default_ttl_ms: 5 * 60 * 1000,
+            override_min_ttl_ms: 10 * 1000,
+            override_max_ttl_ms: 30 * 60 * 1000,
             override_cleanup_interval_ms: 5_000,
-            driver_ingest_queue_capacity: 10_000,
+            ingest_queue_capacity: 10_000,
         }
     }
 }
@@ -92,27 +96,27 @@ impl Default for LogControlSettings {
 impl From<LoggingControl> for LogControlSettings {
     fn from(v: LoggingControl) -> Self {
         Self {
-            channel_override_default_ttl_ms: v.channel_override_default_ttl_ms,
-            channel_override_min_ttl_ms: v.channel_override_min_ttl_ms,
-            channel_override_max_ttl_ms: v.channel_override_max_ttl_ms,
+            override_default_ttl_ms: v.override_default_ttl_ms,
+            override_min_ttl_ms: v.override_min_ttl_ms,
+            override_max_ttl_ms: v.override_max_ttl_ms,
             override_cleanup_interval_ms: v.override_cleanup_interval_ms,
-            driver_ingest_queue_capacity: v.driver_ingest_queue_capacity,
+            ingest_queue_capacity: v.ingest_queue_capacity,
         }
     }
 }
 
 impl LogControlSettings {
     #[inline]
-    pub fn clamp_channel_ttl_ms(&self, ttl_ms: u64) -> u64 {
-        let min = self.channel_override_min_ttl_ms.max(1);
-        let max = self.channel_override_max_ttl_ms.max(min);
+    pub fn clamp_override_ttl_ms(&self, ttl_ms: u64) -> u64 {
+        let min = self.override_min_ttl_ms.max(1);
+        let max = self.override_max_ttl_ms.max(min);
         ttl_ms.clamp(min, max)
     }
 
     #[inline]
-    pub fn validate_channel_ttl_ms(&self, ttl_ms: u64) -> NGResult<()> {
-        let min = self.channel_override_min_ttl_ms.max(1);
-        let max = self.channel_override_max_ttl_ms.max(min);
+    pub fn validate_override_ttl_ms(&self, ttl_ms: u64) -> NGResult<()> {
+        let min = self.override_min_ttl_ms.max(1);
+        let max = self.override_max_ttl_ms.max(min);
         if ttl_ms < min || ttl_ms > max {
             return Err(NGError::from(format!(
                 "Invalid ttlMs: must be within [{min}, {max}] ms"
@@ -131,6 +135,7 @@ pub struct LogOverrideManager {
     base_level: AtomicU8,
     global_level: AtomicU8,
     channel_levels: DashMap<i32, u8>,
+    app_levels: DashMap<i32, u8>,
     leases: DashMap<Uuid, LogOverrideLease>,
 
     cleanup_interval_ms: AtomicU64,
@@ -144,6 +149,7 @@ impl LogOverrideManager {
             base_level: AtomicU8::new(base),
             global_level: AtomicU8::new(base),
             channel_levels: DashMap::new(),
+            app_levels: DashMap::new(),
             leases: DashMap::new(),
             cleanup_interval_ms: AtomicU64::new(settings.override_cleanup_interval_ms),
             cleanup_started: AtomicBool::new(false),
@@ -159,6 +165,7 @@ impl LogOverrideManager {
     pub fn clear_all(&self) {
         self.leases.clear();
         self.channel_levels.clear();
+        self.app_levels.clear();
         self.recompute_global();
     }
 
@@ -167,6 +174,7 @@ impl LogOverrideManager {
         self.base_level.store(level.into(), Ordering::Relaxed);
         self.recompute_global();
         self.recompute_all_channels();
+        self.recompute_all_apps();
     }
 
     /// Effective global max level.
@@ -179,6 +187,15 @@ impl LogOverrideManager {
     #[inline]
     pub fn effective_channel_level(&self, channel_id: i32) -> LogLevel {
         if let Some(v) = self.channel_levels.get(&channel_id) {
+            return LogLevel::from(*v);
+        }
+        self.effective_global_level()
+    }
+
+    /// Effective max level for an app (fallback to global).
+    #[inline]
+    pub fn effective_app_level(&self, app_id: i32) -> LogLevel {
+        if let Some(v) = self.app_levels.get(&app_id) {
             return LogLevel::from(*v);
         }
         self.effective_global_level()
@@ -299,6 +316,7 @@ impl LogOverrideManager {
         match scope {
             LogOverrideScope::Global => self.recompute_global(),
             LogOverrideScope::Channel(id) => self.recompute_channel(id),
+            LogOverrideScope::App(id) => self.recompute_app(id),
         }
     }
 
@@ -343,6 +361,32 @@ impl LogOverrideManager {
         }
     }
 
+    fn recompute_app(&self, app_id: i32) {
+        let old: u8 = self.effective_app_level(app_id).into();
+
+        // Semantics: app override **overrides** global level for this app
+        // (it can both raise and lower verbosity). If no lease exists, fall back to global.
+        let global: u8 = self.global_level.load(Ordering::Relaxed);
+        let mut chosen: Option<u8> = None;
+        for e in self.leases.iter() {
+            if matches!(e.scope, LogOverrideScope::App(id) if id == app_id) {
+                let v = u8::from(e.level);
+                chosen = Some(chosen.map_or(v, |prev| prev.max(v)));
+            }
+        }
+
+        let new = chosen.unwrap_or(global);
+        if new == global {
+            self.app_levels.remove(&app_id);
+        } else {
+            self.app_levels.insert(app_id, new);
+        }
+
+        if new != old {
+            notify_change(LogOverrideScope::App(app_id), new);
+        }
+    }
+
     fn recompute_all_channels(&self) {
         let channel_ids: Vec<i32> = self
             .leases
@@ -354,6 +398,20 @@ impl LogOverrideManager {
             .collect();
         for id in channel_ids {
             self.recompute_channel(id);
+        }
+    }
+
+    fn recompute_all_apps(&self) {
+        let app_ids: Vec<i32> = self
+            .leases
+            .iter()
+            .filter_map(|e| match e.scope {
+                LogOverrideScope::App(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        for id in app_ids {
+            self.recompute_app(id);
         }
     }
 }

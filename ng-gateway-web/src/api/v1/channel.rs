@@ -512,9 +512,9 @@ async fn build_channel_log_level_view(id: i32) -> Result<ChannelLogLevelView, We
             expires_at_ms: l.expires_at_ms,
         }),
         ttl: TtlRange {
-            min_ms: s.channel_override_min_ttl_ms,
-            max_ms: s.channel_override_max_ttl_ms,
-            default_ms: s.channel_override_default_ttl_ms,
+            min_ms: s.override_min_ttl_ms,
+            max_ms: s.override_max_ttl_ms,
+            default_ms: s.override_default_ttl_ms,
         },
     })
 }
@@ -544,8 +544,8 @@ pub async fn set_channel_log_level(
         "Log control runtime is not initialized".to_string(),
     ))?;
     let s = rt.settings();
-    let ttl = req.ttl_ms.unwrap_or(s.channel_override_default_ttl_ms);
-    s.validate_channel_ttl_ms(ttl)
+    let ttl = req.ttl_ms.unwrap_or(s.override_default_ttl_ms);
+    s.validate_override_ttl_ms(ttl)
         .map_err(|e| WebError::BadRequest(e.to_string()))?;
 
     rt.overrides()

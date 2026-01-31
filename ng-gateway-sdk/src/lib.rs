@@ -2,10 +2,11 @@ mod bin_inspect;
 mod error;
 #[doc(hidden)]
 pub mod ffi;
+pub mod log;
 pub mod mqtt;
 pub mod northward;
 mod retry;
-mod southward;
+pub mod southward;
 pub mod supervision;
 mod transform;
 mod ui_schema;
@@ -18,15 +19,6 @@ pub mod export {
     pub use tokio_util;
     pub use tracing;
     pub use tracing_subscriber;
-}
-
-/// Public log bridge API (used by both host loader and `cdylib` drivers).
-///
-/// # Notes
-/// This is intentionally re-exported at crate root so the `ng_driver_factory!` macro
-/// can reference a stable path (`$crate::log::*`) from external driver crates.
-pub mod log {
-    pub use crate::southward::log::*;
 }
 
 pub type DriverResult<T> = Result<T, DriverError>;

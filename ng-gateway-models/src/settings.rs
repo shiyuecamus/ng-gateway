@@ -256,44 +256,51 @@ pub struct Logging {
 /// Log control runtime configuration (global + per-channel overrides).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LoggingControl {
-    #[serde(default = "LoggingControl::channel_override_default_ttl_ms_default")]
-    pub channel_override_default_ttl_ms: u64,
-    #[serde(default = "LoggingControl::channel_override_min_ttl_ms_default")]
-    pub channel_override_min_ttl_ms: u64,
-    #[serde(default = "LoggingControl::channel_override_max_ttl_ms_default")]
-    pub channel_override_max_ttl_ms: u64,
+    /// Default TTL for all override scopes (channel/app/...), in milliseconds.
+    #[serde(default = "LoggingControl::override_default_ttl_ms_default")]
+    pub override_default_ttl_ms: u64,
+    /// Minimum allowed TTL for overrides (guardrail), in milliseconds.
+    #[serde(default = "LoggingControl::override_min_ttl_ms_default")]
+    pub override_min_ttl_ms: u64,
+    /// Maximum allowed TTL for overrides (guardrail), in milliseconds.
+    #[serde(default = "LoggingControl::override_max_ttl_ms_default")]
+    pub override_max_ttl_ms: u64,
     #[serde(default = "LoggingControl::override_cleanup_interval_ms_default")]
     pub override_cleanup_interval_ms: u64,
-    #[serde(default = "LoggingControl::driver_ingest_queue_capacity_default")]
-    pub driver_ingest_queue_capacity: usize,
+    /// Unified `cdylib -> host` ingest queue capacity (driver + plugin).
+    ///
+    /// This is a bounded queue at the FFI boundary; when it fills up, the oldest items are dropped
+    /// to ensure new logs can still enter.
+    #[serde(default = "LoggingControl::ingest_queue_capacity_default")]
+    pub ingest_queue_capacity: usize,
 }
 
 impl Default for LoggingControl {
     fn default() -> Self {
         Self {
-            channel_override_default_ttl_ms: Self::channel_override_default_ttl_ms_default(),
-            channel_override_min_ttl_ms: Self::channel_override_min_ttl_ms_default(),
-            channel_override_max_ttl_ms: Self::channel_override_max_ttl_ms_default(),
+            override_default_ttl_ms: Self::override_default_ttl_ms_default(),
+            override_min_ttl_ms: Self::override_min_ttl_ms_default(),
+            override_max_ttl_ms: Self::override_max_ttl_ms_default(),
             override_cleanup_interval_ms: Self::override_cleanup_interval_ms_default(),
-            driver_ingest_queue_capacity: Self::driver_ingest_queue_capacity_default(),
+            ingest_queue_capacity: Self::ingest_queue_capacity_default(),
         }
     }
 }
 
 impl LoggingControl {
-    fn channel_override_default_ttl_ms_default() -> u64 {
+    fn override_default_ttl_ms_default() -> u64 {
         5 * 60 * 1000
     }
-    fn channel_override_min_ttl_ms_default() -> u64 {
+    fn override_min_ttl_ms_default() -> u64 {
         10 * 1000
     }
-    fn channel_override_max_ttl_ms_default() -> u64 {
+    fn override_max_ttl_ms_default() -> u64 {
         30 * 60 * 1000
     }
     fn override_cleanup_interval_ms_default() -> u64 {
         5_000
     }
-    fn driver_ingest_queue_capacity_default() -> usize {
+    fn ingest_queue_capacity_default() -> usize {
         10_000
     }
 }

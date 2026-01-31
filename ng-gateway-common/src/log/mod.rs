@@ -9,13 +9,14 @@ pub mod cleanup;
 pub mod control;
 pub mod driver;
 pub mod host;
+pub mod plugin;
 pub mod span_ext;
 pub mod split_file;
 
 pub use cleanup::{cleanup_logs_once, spawn_cleanup_worker, CleanupReport};
 pub use host::Logger;
-pub use span_ext::{ChannelIdExt, ChannelIdLayer};
-pub use split_file::{DriverFileRegistry, DriverTypeExtractorLayer, SplitFileLayer};
+pub use span_ext::{AppIdExt, AppIdLayer, ChannelIdExt, ChannelIdLayer};
+pub use split_file::{LogRouteExtractorLayer, SplitFileLayer, SplitFileRegistry};
 
 use ng_gateway_error::NGResult;
 use ng_gateway_models::settings::Settings;

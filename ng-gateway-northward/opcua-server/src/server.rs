@@ -8,7 +8,8 @@
 use crate::{config::OpcuaServerPluginConfig, write_dispatch::WriteDispatcher};
 use base64::Engine;
 use ng_gateway_sdk::{
-    AccessMode, DataType, NorthwardError, NorthwardResult, NorthwardRuntimeApi, PointMeta,
+    log::fields as log_fields, AccessMode, DataType, NorthwardError, NorthwardResult,
+    NorthwardRuntimeApi, PointMeta,
 };
 use opcua::{
     crypto::SecurityPolicy,
@@ -28,9 +29,10 @@ use opcua::{
         Variant,
     },
 };
+use std::time::Instant;
 use std::{net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 type NgGatewayNodeManager = InMemoryNodeManager<NgGatewayNodeManagerImpl>;
 
@@ -168,6 +170,7 @@ impl OpcuaServerRuntime {
         write_dispatch: Arc<WriteDispatcher>,
         shutdown: CancellationToken,
     ) -> NorthwardResult<Self> {
+        let t0 = Instant::now();
         if config.port == 0 {
             return Err(NorthwardError::ConfigurationError {
                 message: "invalid port: must be in range 1..=65535".to_string(),
@@ -178,10 +181,33 @@ impl OpcuaServerRuntime {
         // PKI directory is not user-configurable by design:
         // use a stable, per-installed-plugin layout.
         let pki_dir = format!("./pki/plugin/{plugin_id}");
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            plugin_id,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = plugin_id,
+            host = %config.host,
+            port = config.port,
+            namespace_uri = %config.namespace_uri,
+            pki_dir = %pki_dir,
+            "opcua-server runtime: building server"
+        );
 
         // Materialize configured trusted client certificates into PKI trust store
         // so native `CertificateStore` validation can pick them up.
+        let t_pki = Instant::now();
         materialize_trusted_client_certs(&pki_dir, &config.trusted_client_certs)?;
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            plugin_id,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = plugin_id,
+            pki_prepare_ms = t_pki.elapsed().as_millis() as u64,
+            trusted_client_certs = config.trusted_client_certs.len(),
+            "opcua-server runtime: PKI prepared"
+        );
 
         let endpoint_path = "/";
         let config_for_nm = Arc::clone(&config);
@@ -257,9 +283,19 @@ impl OpcuaServerRuntime {
         // IMPORTANT:
         // `async-opcua-server` uses `tokio::spawn` in a few sync helpers (e.g. SyncSampler),
         // so we must ensure we are inside *our* Tokio runtime context here.
+        let t_build = Instant::now();
         let (server, handle) = builder
             .build()
             .map_err(|e| NorthwardError::GatewayError { reason: e })?;
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            plugin_id,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = plugin_id,
+            build_ms = t_build.elapsed().as_millis() as u64,
+            "opcua-server runtime: ServerBuilder.build completed"
+        );
 
         // Find our node manager
         let node_manager = handle
@@ -279,6 +315,16 @@ impl OpcuaServerRuntime {
         tokio::spawn(async move {
             let _ = server.run().await;
         });
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            plugin_id,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = plugin_id,
+            namespace_index = namespace_index,
+            total_start_ms = t0.elapsed().as_millis() as u64,
+            "opcua-server runtime: server task spawned"
+        );
 
         Ok(Self {
             handle,

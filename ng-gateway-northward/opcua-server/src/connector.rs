@@ -12,11 +12,14 @@ use super::{
     write_dispatch::WriteDispatcher,
 };
 use ng_gateway_sdk::{
+    log::fields as log_fields,
     supervision::{Connector, FailureKind, FailurePhase, Session, SessionContext},
     NorthwardError, NorthwardEvent, NorthwardInitContext, NorthwardResult, NorthwardRuntimeApi,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
+use tracing::info;
 
 /// OPC UA Server connector.
 #[derive(Clone)]
@@ -64,6 +67,20 @@ impl Connector for OpcuaServerConnector {
         &self,
         ctx: SessionContext,
     ) -> Result<Self::Session, <Self::Session as Session>::Error> {
+        let _enter = ctx.span.enter();
+        let t0 = Instant::now();
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            attempt = ctx.attempt,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = self.plugin_id,
+            host = %self.config.host,
+            port = self.config.port,
+            namespace_uri = %self.config.namespace_uri,
+            "opcua-server connect: starting (build server + bind/listen)"
+        );
+
         let (update_tx, update_rx) =
             create_update_queue(self.config.update_queue_capacity, self.config.drop_policy);
         let (node_build_tx, node_build_rx) = mpsc::channel::<i32>(4096);
@@ -85,6 +102,7 @@ impl Connector for OpcuaServerConnector {
         ));
 
         // Starting the server is the "connect" step (bind/listen + runtime init).
+        let t_server = Instant::now();
         let server = OpcuaServerRuntime::start(
             self.plugin_id,
             Arc::clone(&self.config),
@@ -94,6 +112,16 @@ impl Connector for OpcuaServerConnector {
             ctx.cancel.child_token(),
         )
         .await?;
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            attempt = ctx.attempt,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = self.plugin_id,
+            server_start_ms = t_server.elapsed().as_millis() as u64,
+            total_connect_ms = t0.elapsed().as_millis() as u64,
+            "opcua-server connect: runtime ready"
+        );
 
         Ok(OpcuaServerSession::new(
             handle,

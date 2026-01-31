@@ -45,7 +45,7 @@ mod tests {
     use tracing::Level;
 
     #[tokio::test]
-    #[cfg_attr(not(debug_assertions), ignore)]
+    #[ignore]
     /// Integration test that:
     /// 1) Waits for session to become Active
     /// 2) Spawns a background task to continuously read and print incoming ASDUs for 60 seconds

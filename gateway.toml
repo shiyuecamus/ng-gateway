@@ -65,24 +65,24 @@ max_elapsed_time_ms = 5000
 
 # Logging (top-level)
 [logging.control]
-# Default TTL for channel overrides in milliseconds.
-channel_override_default_ttl_ms = 300000
-# Minimum allowed TTL for channel overrides in milliseconds.
-channel_override_min_ttl_ms = 10000
-# Maximum allowed TTL for channel overrides in milliseconds.
-channel_override_max_ttl_ms = 1800000
+# Default TTL for override leases in milliseconds (applies to channel/app/... scopes).
+override_default_ttl_ms = 300000
+# Minimum allowed TTL for override leases in milliseconds.
+override_min_ttl_ms = 11000
+# Maximum allowed TTL for override leases in milliseconds.
+override_max_ttl_ms = 1800000
 # Background cleanup interval (ms) for expiring override leases.
 #
 # Notes:
 # - Effective interval is clamped to >= 200ms by runtime.
 # - Too small increases background overhead; too large delays expiry effects.
 override_cleanup_interval_ms = 5000
-# Driver->host ingest queue capacity for driver logs (bounded, drop-old-keep-new).
+# Unified `cdylib -> host` ingest queue capacity (driver + plugin) (bounded, drop-old-keep-new).
 #
 # Notes:
 # - This is a bounded queue used at the FFI boundary; if it fills up, oldest items are dropped
 #   to ensure new logs can still enter.
-driver_ingest_queue_capacity = 10000
+ingest_queue_capacity = 10000
 
 [logging.output]
 format = "text"               # text | json

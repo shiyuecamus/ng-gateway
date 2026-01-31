@@ -1,12 +1,14 @@
-//! Driver -> host log bridge (host side).
+//! Plugin -> host log bridge (host side).
 //!
-//! This module implements the host-side log sink for dynamically loaded `cdylib` drivers:
+//! This module implements the host-side log sink for dynamically loaded `cdylib` northward
+//! plugins:
 //! - FFI callback functions that **only copy + enqueue** (never block)
 //! - A background ingest loop that parses JSON/JSONL and re-emits as host `tracing` events
 //!
-//! # Why this lives in `ng-gateway-common::log`
-//! Driver logs are part of the gateway's single authoritative logging system:
-//! they must go through the same console/file pipeline as host logs.
+//! # Notes
+//! - Unlike drivers, a northward plugin library may serve multiple app instances.
+//!   Therefore we rely on `app_id` propagated through spans by the plugin-side bridge.
+//! - Queue capacity is governed by unified `logging.control.ingest_queue_capacity`.
 
 use crate::log::control;
 use arc_swap::ArcSwap;
@@ -27,48 +29,38 @@ use tokio::sync::Notify;
 use tracing::Span;
 
 /// Host-side sink handle that keeps the callback context alive.
-pub struct HostLogSinkHandle {
-    ctx: Box<HostSinkContext>,
+pub struct HostPluginLogSinkHandle {
+    ctx: Box<HostPluginSinkContext>,
 }
 
-impl HostLogSinkHandle {
-    /// Build a `LogSinkV1` struct to register into a driver.
+impl HostPluginLogSinkHandle {
     pub fn sink(&self) -> LogSinkV1 {
         LogSinkV1 {
             abi_version: LOG_SINK_ABI_V1,
-            user_data: (&*self.ctx) as *const HostSinkContext as *mut c_void,
+            user_data: (&*self.ctx) as *const HostPluginSinkContext as *mut c_void,
             emit_json: host_emit_json,
             emit_batch_json: Some(host_emit_batch_json),
             flush: None,
         }
     }
 
-    /// Update the driver type label (best-effort).
-    ///
-    /// This enables the loader to register the log sink **before** probing metadata,
-    /// while still ending up with a correct `driver_type` label for re-emitted events.
-    pub fn set_driver_type(&self, driver_type: String) {
-        // Update label atomically and clear cached spans so the next event rebuilds spans
-        // with the updated `driver_type` field.
-        self.ctx.driver_type.store(Arc::new(driver_type));
+    /// Update the plugin type label (best-effort).
+    pub fn set_plugin_type(&self, plugin_type: String) {
+        self.ctx.plugin_type.store(Arc::new(plugin_type));
         self.ctx.span_cache.clear();
     }
 }
 
 #[derive(Clone)]
-struct HostSinkContext {
-    driver_id: i32,
-    /// Driver type label stored in an `ArcSwap<String>` for lock-free reads.
-    ///
-    /// We intentionally store `String` (Sized) rather than `str` to keep `arc-swap`
-    /// trait bounds simple and portable.
-    driver_type: Arc<ArcSwap<String>>,
-    /// Cached spans keyed by channel id (and a sentinel for no-channel events).
+struct HostPluginSinkContext {
+    plugin_id: i32,
+    plugin_type: Arc<ArcSwap<String>>,
+    /// Cached spans keyed by app id (and a sentinel for no-app events).
     span_cache: Arc<DashMap<i32, Span>>,
 }
 
 struct HostIngestItem {
-    ctx: HostSinkContext,
+    ctx: HostPluginSinkContext,
     bytes: Vec<u8>,
 }
 
@@ -80,11 +72,6 @@ struct HostBridge {
 
 static HOST_BRIDGE: OnceCell<Arc<HostBridge>> = OnceCell::new();
 
-/// Resolve current driver ingest queue capacity from runtime settings.
-///
-/// # Semantics
-/// - If log-control runtime is not initialized, falls back to a safe default.
-/// - Always returns a value >= 1.
 #[inline]
 fn current_queue_capacity() -> usize {
     control::global()
@@ -118,13 +105,13 @@ pub fn ensure_ingest_started() {
     tokio::spawn(async move { host_ingest_loop(b).await });
 }
 
-/// Create a host log sink handle for a specific driver.
-pub fn create_sink(driver_id: i32, driver_type: String) -> HostLogSinkHandle {
+/// Create a host log sink handle for a specific plugin library.
+pub fn create_sink(plugin_id: i32, plugin_type: String) -> HostPluginLogSinkHandle {
     let _ = host_bridge();
-    HostLogSinkHandle {
-        ctx: Box::new(HostSinkContext {
-            driver_id,
-            driver_type: Arc::new(ArcSwap::from(Arc::new(driver_type))),
+    HostPluginLogSinkHandle {
+        ctx: Box::new(HostPluginSinkContext {
+            plugin_id,
+            plugin_type: Arc::new(ArcSwap::from(Arc::new(plugin_type))),
             span_cache: Arc::new(DashMap::new()),
         }),
     }
@@ -142,10 +129,9 @@ fn host_enqueue(user_data: *mut c_void, ptr: *const u8, len: usize) {
     if user_data.is_null() || ptr.is_null() || len == 0 {
         return;
     }
-    let ctx = unsafe { &*(user_data as *const HostSinkContext) };
+    let ctx = unsafe { &*(user_data as *const HostPluginSinkContext) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
 
-    // Copy immediately (FFI boundary).
     let mut payload = Vec::with_capacity(len.min(1024 * 1024));
     payload.extend_from_slice(bytes);
 
@@ -169,7 +155,7 @@ struct HostWireSpan {
     #[allow(unused)]
     name: String,
     #[serde(default)]
-    channel_id: Option<i32>,
+    app_id: Option<i32>,
     #[serde(default)]
     fields: Map<String, Value>,
 }
@@ -212,7 +198,7 @@ async fn host_ingest_loop(bridge: Arc<HostBridge>) {
     }
 }
 
-fn ingest_one_payload(ctx: &HostSinkContext, bytes: &[u8]) {
+fn ingest_one_payload(ctx: &HostPluginSinkContext, bytes: &[u8]) {
     for mut line in bytes.split(|&b| b == b'\n') {
         if line.is_empty() {
             continue;
@@ -230,100 +216,97 @@ fn ingest_one_payload(ctx: &HostSinkContext, bytes: &[u8]) {
     }
 }
 
-fn reemit_as_tracing(ctx: &HostSinkContext, ev: HostWireEvent) {
+fn reemit_as_tracing(ctx: &HostPluginSinkContext, ev: HostWireEvent) {
     let level = ev
         .level_u8
         .and_then(parse_level_u8)
         .or(ev.level.as_deref().and_then(parse_level))
         .unwrap_or(tracing::Level::INFO);
-    let channel_id = ev.span.as_ref().and_then(|s| {
-        s.channel_id
-            .or(log_fields::map_i32(&s.fields, log_fields::CHANNEL_ID))
+
+    let app_id = ev.span.as_ref().and_then(|s| {
+        s.app_id
+            .or(log_fields::map_i32(&s.fields, log_fields::APP_ID))
     });
 
-    // Use a sentinel key to avoid span allocation for no-channel events.
-    // Channel ids are expected to be positive; this sentinel is reserved for "no channel".
-    const NO_CHANNEL_KEY: i32 = i32::MIN;
-    let key = channel_id.unwrap_or(NO_CHANNEL_KEY);
+    // Use a sentinel key to avoid span allocation for no-app events.
+    const NO_APP_KEY: i32 = i32::MIN;
+    let key = app_id.unwrap_or(NO_APP_KEY);
 
-    // Avoid allocating a new span per log event (hot path).
     let span = ctx
         .span_cache
         .get(&key)
         .map(|s| s.clone())
         .unwrap_or_else(|| {
-            let dt = ctx.driver_type.load();
-            let dt_str: &str = dt.as_str();
-
-            let span = if key == NO_CHANNEL_KEY {
+            let pt = ctx.plugin_type.load();
+            let pt_str: &str = pt.as_str();
+            let span = if key == NO_APP_KEY {
                 tracing::info_span!(
-                    log_fields::SPAN_DRIVER_LOG,
-                    source = log_fields::SOURCE_DRIVER,
-                    driver_id = ctx.driver_id,
-                    driver_type = dt_str
+                    log_fields::SPAN_PLUGIN_LOG,
+                    source = log_fields::SOURCE_PLUGIN,
+                    plugin_id = ctx.plugin_id,
+                    plugin_type = pt_str
                 )
             } else {
                 tracing::info_span!(
-                    log_fields::SPAN_DRIVER_LOG,
-                    source = log_fields::SOURCE_DRIVER,
-                    driver_id = ctx.driver_id,
-                    driver_type = dt_str,
-                    channel_id = key
+                    log_fields::SPAN_PLUGIN_LOG,
+                    source = log_fields::SOURCE_PLUGIN,
+                    plugin_id = ctx.plugin_id,
+                    plugin_type = pt_str,
+                    app_id = key
                 )
             };
             ctx.span_cache.insert(key, span.clone());
             span
         });
+
     let _enter = span.enter();
-    emit_driver_event(level, &ev, ctx);
+    emit_plugin_event(level, &ev, ctx);
 }
 
-fn emit_driver_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostSinkContext) {
-    // Keep a stable callsite target and attach original driver target as a field.
-    // Avoid pre-serializing JSON fields on the hot path; formatting only happens if enabled.
+fn emit_plugin_event(level: tracing::Level, ev: &HostWireEvent, ctx: &HostPluginSinkContext) {
     match level {
         tracing::Level::ERROR => tracing::error!(
-            target: log_fields::TARGET_DRIVER,
-            source = log_fields::SOURCE_DRIVER,
-            driver_id = ctx.driver_id,
-            driver_target = %ev.target,
-            driver_fields = ?ev.fields,
+            target: log_fields::TARGET_PLUGIN,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_id = ctx.plugin_id,
+            plugin_target = %ev.target,
+            plugin_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::WARN => tracing::warn!(
-            target: log_fields::TARGET_DRIVER,
-            source = log_fields::SOURCE_DRIVER,
-            driver_id = ctx.driver_id,
-            driver_target = %ev.target,
-            driver_fields = ?ev.fields,
+            target: log_fields::TARGET_PLUGIN,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_id = ctx.plugin_id,
+            plugin_target = %ev.target,
+            plugin_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::INFO => tracing::info!(
-            target: log_fields::TARGET_DRIVER,
-            source = log_fields::SOURCE_DRIVER,
-            driver_id = ctx.driver_id,
-            driver_target = %ev.target,
-            driver_fields = ?ev.fields,
+            target: log_fields::TARGET_PLUGIN,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_id = ctx.plugin_id,
+            plugin_target = %ev.target,
+            plugin_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::DEBUG => tracing::debug!(
-            target: log_fields::TARGET_DRIVER,
-            source = log_fields::SOURCE_DRIVER,
-            driver_id = ctx.driver_id,
-            driver_target = %ev.target,
-            driver_fields = ?ev.fields,
+            target: log_fields::TARGET_PLUGIN,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_id = ctx.plugin_id,
+            plugin_target = %ev.target,
+            plugin_fields = ?ev.fields,
             "{}",
             ev.message
         ),
         tracing::Level::TRACE => tracing::trace!(
-            target: log_fields::TARGET_DRIVER,
-            source = log_fields::SOURCE_DRIVER,
-            driver_id = ctx.driver_id,
-            driver_target = %ev.target,
-            driver_fields = ?ev.fields,
+            target: log_fields::TARGET_PLUGIN,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_id = ctx.plugin_id,
+            plugin_target = %ev.target,
+            plugin_fields = ?ev.fields,
             "{}",
             ev.message
         ),

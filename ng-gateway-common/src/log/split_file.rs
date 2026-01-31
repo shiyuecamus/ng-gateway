@@ -1,10 +1,11 @@
-//! Split file logging layer that routes logs to different files based on driver_type.
+//! Split file logging layer that routes logs to different files based on `source`.
 //!
 //! This module implements a custom tracing layer that:
 //! - Routes host logs (no driver_type) to `host.log`
-//! - Routes driver logs (with driver_type) to `{driver_type}.log`
+//! - Routes driver logs (`source=driver` + `driver_type`) to `driver_<driver_type>.log`
+//! - Routes plugin logs (`source=plugin` + `plugin_type`) to `plugin_<plugin_type>.log`
 //! - Uses rolling file appenders for each log file
-//! - Maintains thread-safe writer handles for each driver type
+//! - Maintains thread-safe writer handles for each route key
 
 use super::span_ext::ChannelIdExt;
 use dashmap::{DashMap, Entry};
@@ -27,10 +28,10 @@ use tracing::{
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
-/// Sanitize a driver type label into a safe file stem.
+/// Sanitize a log label into a safe file stem component.
 ///
 /// # Security
-/// Driver type can originate from external plugins/drivers. We must prevent:
+/// `driver_type` / `plugin_type` can originate from external `cdylib`s. We must prevent:
 /// - path traversal (`../`)
 /// - path separators (`/`, `\`)
 /// - control characters
@@ -38,9 +39,10 @@ use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 /// # Rules
 /// - Keep only ASCII `[a-z0-9_-]` (lowercased)
 /// - Replace other characters with `_`
+/// - Trim `_` on both ends
 /// - Trim to a reasonable length to avoid filesystem/path issues
 #[inline]
-fn sanitize_driver_type(raw: &str) -> Arc<str> {
+fn sanitize_file_stem_label(raw: &str) -> Arc<str> {
     const MAX_LEN: usize = 64;
     let mut out = String::with_capacity(raw.len().min(MAX_LEN));
     for ch in raw.chars() {
@@ -62,25 +64,43 @@ fn sanitize_driver_type(raw: &str) -> Arc<str> {
     }
 }
 
-/// Extension to store driver_type in span extensions for efficient lookup.
-#[derive(Debug, Clone, Default)]
-struct DriverTypeExt(Option<Arc<str>>);
-
-/// Visitor to extract driver_type from event fields.
-#[derive(Default)]
-struct DriverTypeVisitor {
-    driver_type: Option<Arc<str>>,
-    is_driver_source: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogSource {
+    Driver,
+    Plugin,
 }
 
-impl Visit for DriverTypeVisitor {
+/// Extension to store routing info in span extensions for efficient lookup.
+#[derive(Debug, Clone, Default)]
+struct LogRouteExt {
+    source: Option<LogSource>,
+    driver_type: Option<Arc<str>>,
+    plugin_type: Option<Arc<str>>,
+}
+
+/// Visitor to extract `source` + (`driver_type`/`plugin_type`) from span/event fields.
+#[derive(Default)]
+struct LogRouteVisitor {
+    source: Option<LogSource>,
+    driver_type: Option<Arc<str>>,
+    plugin_type: Option<Arc<str>>,
+}
+
+impl Visit for LogRouteVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
         match field.name() {
             log_fields::DRIVER_TYPE => {
-                self.driver_type = Some(sanitize_driver_type(value));
+                self.driver_type = Some(sanitize_file_stem_label(value));
+            }
+            log_fields::PLUGIN_TYPE => {
+                self.plugin_type = Some(sanitize_file_stem_label(value));
             }
             log_fields::SOURCE => {
-                self.is_driver_source = value == log_fields::SOURCE_DRIVER;
+                if value == log_fields::SOURCE_DRIVER {
+                    self.source = Some(LogSource::Driver);
+                } else if value == log_fields::SOURCE_PLUGIN {
+                    self.source = Some(LogSource::Plugin);
+                }
             }
             _ => {}
         }
@@ -96,7 +116,16 @@ impl Visit for DriverTypeVisitor {
                     s = s[1..s.len() - 1].to_string();
                 }
                 if !s.is_empty() {
-                    self.driver_type = Some(sanitize_driver_type(&s));
+                    self.driver_type = Some(sanitize_file_stem_label(&s));
+                }
+            }
+            log_fields::PLUGIN_TYPE => {
+                let mut s = format!("{value:?}");
+                if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                    s = s[1..s.len() - 1].to_string();
+                }
+                if !s.is_empty() {
+                    self.plugin_type = Some(sanitize_file_stem_label(&s));
                 }
             }
             log_fields::SOURCE => {
@@ -104,18 +133,22 @@ impl Visit for DriverTypeVisitor {
                 if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
                     s = s[1..s.len() - 1].to_string();
                 }
-                self.is_driver_source = s == log_fields::SOURCE_DRIVER;
+                if s == log_fields::SOURCE_DRIVER {
+                    self.source = Some(LogSource::Driver);
+                } else if s == log_fields::SOURCE_PLUGIN {
+                    self.source = Some(LogSource::Plugin);
+                }
             }
             _ => {}
         }
     }
 }
 
-/// Layer that extracts driver_type from spans and caches it.
+/// Layer that extracts `source` and routing labels from spans and caches them.
 #[derive(Default)]
-pub struct DriverTypeExtractorLayer;
+pub struct LogRouteExtractorLayer;
 
-impl<S> Layer<S> for DriverTypeExtractorLayer
+impl<S> Layer<S> for LogRouteExtractorLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
@@ -123,11 +156,17 @@ where
         let Some(span) = ctx.span(id) else {
             return;
         };
-        let mut visitor = DriverTypeVisitor::default();
+        let mut visitor = LogRouteVisitor::default();
         attrs.record(&mut visitor);
-        if visitor.driver_type.is_some() || visitor.is_driver_source {
-            span.extensions_mut()
-                .insert(DriverTypeExt(visitor.driver_type));
+        if visitor.source.is_some()
+            || visitor.driver_type.is_some()
+            || visitor.plugin_type.is_some()
+        {
+            span.extensions_mut().insert(LogRouteExt {
+                source: visitor.source,
+                driver_type: visitor.driver_type,
+                plugin_type: visitor.plugin_type,
+            });
         }
     }
 
@@ -135,28 +174,43 @@ where
         let Some(span) = ctx.span(id) else {
             return;
         };
-        let mut visitor = DriverTypeVisitor::default();
+        let mut visitor = LogRouteVisitor::default();
         values.record(&mut visitor);
-        if visitor.driver_type.is_some() || visitor.is_driver_source {
+        if visitor.source.is_some()
+            || visitor.driver_type.is_some()
+            || visitor.plugin_type.is_some()
+        {
             let mut exts = span.extensions_mut();
-            if let Some(ext) = exts.get_mut::<DriverTypeExt>() {
-                ext.0 = visitor.driver_type;
+            if let Some(ext) = exts.get_mut::<LogRouteExt>() {
+                if visitor.source.is_some() {
+                    ext.source = visitor.source;
+                }
+                if visitor.driver_type.is_some() {
+                    ext.driver_type = visitor.driver_type;
+                }
+                if visitor.plugin_type.is_some() {
+                    ext.plugin_type = visitor.plugin_type;
+                }
             } else {
-                exts.insert(DriverTypeExt(visitor.driver_type));
+                exts.insert(LogRouteExt {
+                    source: visitor.source,
+                    driver_type: visitor.driver_type,
+                    plugin_type: visitor.plugin_type,
+                });
             }
         }
     }
 }
 
-/// Thread-safe registry of file writers for different driver types.
-pub struct DriverFileRegistry {
+/// Thread-safe registry of file writers for different log routes.
+pub struct SplitFileRegistry {
     writers: DashMap<Arc<str>, NonBlocking>,
     guards: DashMap<Arc<str>, WorkerGuard>,
     log_dir: PathBuf,
     rotation: LoggingFileRotation,
 }
 
-impl DriverFileRegistry {
+impl SplitFileRegistry {
     fn new(log_dir: PathBuf, rotation: LoggingFileRotation) -> Self {
         // Ensure log directory exists (best-effort). This avoids surprising runtime failures
         // when the logger initializes before runtime directories are created.
@@ -169,15 +223,15 @@ impl DriverFileRegistry {
         }
     }
 
-    /// Get or create a writer for a specific driver type.
-    fn get_or_create_writer(&self, driver_type: Arc<str>) -> NonBlocking {
-        match self.writers.entry(Arc::clone(&driver_type)) {
+    #[inline]
+    fn get_or_create_writer(&self, key: Arc<str>, file_name: String) -> NonBlocking {
+        match self.writers.entry(Arc::clone(&key)) {
             Entry::Occupied(o) => o.get().clone(),
             Entry::Vacant(v) => {
-                // Create new writer exactly once per driver type.
+                // Create new writer exactly once per route.
                 let appender = RotatingFileAppender::new(
                     self.log_dir.clone(),
-                    format!("{}.log", &*driver_type),
+                    file_name,
                     self.rotation.clone(),
                 );
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
@@ -188,6 +242,20 @@ impl DriverFileRegistry {
                 non_blocking
             }
         }
+    }
+
+    /// Get or create a writer for a specific driver type.
+    fn get_or_create_driver_writer(&self, driver_type: Arc<str>) -> NonBlocking {
+        let file = format!("driver_{}.log", &*driver_type);
+        let key: Arc<str> = Arc::<str>::from(format!("driver::{driver_type}"));
+        self.get_or_create_writer(key, file)
+    }
+
+    /// Get or create a writer for a specific plugin type.
+    fn get_or_create_plugin_writer(&self, plugin_type: Arc<str>) -> NonBlocking {
+        let file = format!("plugin_{}.log", &*plugin_type);
+        let key: Arc<str> = Arc::<str>::from(format!("plugin::{plugin_type}"));
+        self.get_or_create_writer(key, file)
     }
 
     /// Get the host log writer (host.log).
@@ -473,7 +541,7 @@ impl Visit for EventFieldsFormatter {
 
 /// Split file layer that routes logs to different files based on driver_type.
 pub struct SplitFileLayer {
-    registry: Arc<DriverFileRegistry>,
+    registry: Arc<SplitFileRegistry>,
     format: LoggingFormat,
     include_span_fields: bool,
 }
@@ -482,7 +550,7 @@ impl SplitFileLayer {
     /// Create a new split file layer.
     pub fn new(log_dir: PathBuf, rotation: LoggingFileRotation) -> Self {
         Self {
-            registry: Arc::new(DriverFileRegistry::new(log_dir, rotation)),
+            registry: Arc::new(SplitFileRegistry::new(log_dir, rotation)),
             format: LoggingFormat::Text,
             include_span_fields: true,
         }
@@ -499,7 +567,7 @@ impl SplitFileLayer {
     }
 
     /// Get the registry for listing log files.
-    pub fn registry(&self) -> Arc<DriverFileRegistry> {
+    pub fn registry(&self) -> Arc<SplitFileRegistry> {
         Arc::clone(&self.registry)
     }
 }
@@ -509,27 +577,42 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        // Determine which file to write to
-        // Driver logs should hit the fast path: driver_type lives in span extensions as `Arc<str>`.
-        let driver_type: Option<Arc<str>> = ctx
+        // Determine which file to write to.
+        //
+        // Hot path: routing info is cached in span extensions.
+        let route_ext: Option<LogRouteExt> = ctx
             .lookup_current()
-            .and_then(|span| {
-                span.extensions()
-                    .get::<DriverTypeExt>()
-                    .and_then(|ext| ext.0.as_ref().map(Arc::clone))
-            })
-            .or_else(|| {
-                // Fallback: check event fields directly
-                let mut visitor = DriverTypeVisitor::default();
-                event.record(&mut visitor);
-                visitor.driver_type
-            });
+            .and_then(|span| span.extensions().get::<LogRouteExt>().cloned())
+            .or(None);
+
+        let mut source: Option<LogSource> = route_ext.as_ref().and_then(|e| e.source);
+        let mut driver_type: Option<Arc<str>> = route_ext
+            .as_ref()
+            .and_then(|e| e.driver_type.as_ref().map(Arc::clone));
+        let mut plugin_type: Option<Arc<str>> = route_ext
+            .as_ref()
+            .and_then(|e| e.plugin_type.as_ref().map(Arc::clone));
+
+        // Fallback: if extensions are missing/incomplete, parse event fields directly.
+        if source.is_none() || (driver_type.is_none() && plugin_type.is_none()) {
+            let mut v = LogRouteVisitor::default();
+            event.record(&mut v);
+            if source.is_none() {
+                source = v.source;
+            }
+            if driver_type.is_none() {
+                driver_type = v.driver_type;
+            }
+            if plugin_type.is_none() {
+                plugin_type = v.plugin_type;
+            }
+        }
 
         // Get appropriate writer
-        let mut writer = if let Some(dt) = driver_type {
-            self.registry.get_or_create_writer(dt)
-        } else {
-            self.registry.get_host_writer()
+        let mut writer = match (source, driver_type, plugin_type) {
+            (Some(LogSource::Driver), Some(dt), _) => self.registry.get_or_create_driver_writer(dt),
+            (Some(LogSource::Plugin), _, Some(pt)) => self.registry.get_or_create_plugin_writer(pt),
+            _ => self.registry.get_host_writer(),
         };
 
         // Format and write the event

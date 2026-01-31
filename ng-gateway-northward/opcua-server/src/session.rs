@@ -14,12 +14,15 @@ use super::{
 };
 use async_trait::async_trait;
 use ng_gateway_sdk::{
+    log::fields as log_fields,
     supervision::{RunOutcome, Session, SessionContext},
     NorthwardError, NorthwardRuntimeApi, RuntimeDelta,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 /// OPC UA Server session for a single supervision attempt.
 pub struct OpcuaServerSession {
@@ -168,6 +171,8 @@ impl Session for OpcuaServerSession {
     }
 
     async fn init(&mut self, ctx: &SessionContext) -> Result<(), Self::Error> {
+        let _enter = ctx.span.enter();
+        let t0 = Instant::now();
         let namespace_index = self.server.namespace_index();
 
         let Some(node_build_rx) = self.node_build_rx.take() else {
@@ -224,6 +229,13 @@ impl Session for OpcuaServerSession {
             .await
         });
 
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            attempt = ctx.attempt,
+            namespace_index = namespace_index,
+            init_ms = t0.elapsed().as_millis() as u64,
+            "opcua-server init: background tasks spawned"
+        );
         Ok(())
     }
 

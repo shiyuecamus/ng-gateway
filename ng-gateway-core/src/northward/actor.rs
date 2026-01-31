@@ -37,7 +37,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument, Span};
 
 /// Type alias for buffer queue storing (data, timestamp) pairs
 ///
@@ -216,6 +216,8 @@ pub struct AppActor {
     app_id: i32,
     app_name: String,
     plugin_id: i32,
+    /// Per-app tracing span to make per-app log overrides reliable.
+    span: Span,
 
     // === Plugin instance ===
     plugin: Arc<dyn Plugin>,
@@ -307,6 +309,11 @@ impl AppActor {
             app_id: params.app_id,
             app_name: params.app_name,
             plugin_id: params.plugin_id,
+            span: tracing::info_span!(
+                "northward-app",
+                app_id = params.app_id,
+                plugin_id = params.plugin_id
+            ),
             plugin: Arc::from(params.plugin),
             config: params.config,
             queue_policy: params.queue_policy,
@@ -395,6 +402,7 @@ impl AppActor {
     /// - `Ok(false)` if data was dropped (Discard policy)
     /// - `Err` if app is not running or channel closed
     pub async fn send_data(&self, data: Arc<NorthwardData>) -> NGResult<bool> {
+        let _enter = self.span.enter();
         let state = self.state();
         if state != AppActorState::Running {
             return Err(NGError::InvalidStateError(format!(
@@ -480,6 +488,7 @@ impl AppActor {
     /// - `Ok(true)` if data was buffered successfully
     /// - `Ok(false)` if buffer is full and oldest item was dropped (FIFO)
     async fn buffer_data(&self, data: Arc<NorthwardData>) -> NGResult<bool> {
+        let _enter = self.span.enter();
         let mut buffer = self.buffer_queue.lock().unwrap();
         let now = Instant::now();
 
@@ -639,6 +648,7 @@ impl AppActor {
     /// This mirrors the southbound `wait_for_final` behavior and is used by
     /// lifecycle helpers to provide a unified "start + wait" semantic.
     pub async fn wait_for_connected(&self, timeout_ms: u64) -> NGResult<()> {
+        let _enter = self.span.enter();
         let mut rx = self.plugin.subscribe_connection_state();
 
         match timeout(Duration::from_millis(timeout_ms), async move {
@@ -681,6 +691,7 @@ impl AppActor {
         let plugin = Arc::clone(&self.plugin);
         let prom = Arc::clone(&self.prom);
         let token = self.shutdown_token.clone();
+        let span = self.span.clone();
 
         // Take the receiver (can only be done once)
         let mut rx = match self.data_rx.lock().unwrap().take() {
@@ -745,7 +756,8 @@ impl AppActor {
                 }
             }
             info!("App {} worker task stopped", app_id);
-        });
+        }
+        .instrument(span));
     }
 
     // === Lifecycle management ===
@@ -768,6 +780,7 @@ impl AppActor {
     /// - AppActor subscribes to connection state changes (observer pattern)
     /// - Fully aligned with southbound Driver + ChannelMonitor design
     pub async fn start(&self) -> NGResult<()> {
+        let _enter = self.span.enter();
         let current_state = self.state();
         if current_state != AppActorState::Uninitialized && current_state != AppActorState::Stopped
         {
@@ -789,11 +802,15 @@ impl AppActor {
         {
             let plugin = Arc::clone(&self.plugin);
             let app_id = self.app_id;
-            tokio::spawn(async move {
-                if let Err(e) = plugin.start().await {
-                    error!("App {} plugin start failed: {}", app_id, e);
+            let span = self.span.clone();
+            tokio::spawn(
+                async move {
+                    if let Err(e) = plugin.start().await {
+                        error!("App {} plugin start failed: {}", app_id, e);
+                    }
                 }
-            });
+                .instrument(span),
+            );
         }
 
         // 1. Spawn data worker task
@@ -818,6 +835,7 @@ impl AppActor {
     /// 2. Stop the plugin (cancels internal supervisor, disconnects)
     /// 3. Transition to Stopped state
     pub async fn stop(&self) {
+        let _enter = self.span.enter();
         let current_state = self.state();
         if current_state == AppActorState::Stopped || current_state == AppActorState::Uninitialized
         {

@@ -13,7 +13,7 @@ use crate::{
     lifecycle::StartPolicy,
     northward::{NGNorthwardManager, NorthwardEventsBus, NorthwardLoader},
     realtime::NGRealtimeMonitorHub,
-    southward::{NGSouthwardManager, SouthwardDataBus, SouthwardLoader},
+    southward::{NGSouthwardManager, RuntimeIndex, SouthwardDataBus, SouthwardLoader},
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -81,17 +81,19 @@ type Shared<T> = Arc<RwLock<T>>;
 type SharedReceiver = Shared<Option<DataReceiver>>;
 type SharedEventsReceiver = Shared<Option<EventsReceiver>>;
 
-/// Host-side bridge: propagate effective override levels to `cdylib` drivers.
+/// Host-side bridge: propagate effective override levels to `cdylib` libraries (driver + plugin).
 ///
 /// # Notes
 /// - This is best-effort and MUST be non-blocking.
 /// - It closes the semantics loop for "lease expiry" (cleanup loop) without requiring web handlers.
-struct DriverLogOverrideSink {
+struct CdyLibLogOverrideSink {
     driver_loader: SouthwardLoader,
-    index: Arc<crate::southward::index::RuntimeIndex>,
+    index: Arc<RuntimeIndex>,
+    plugin_loader: Arc<NorthwardLoader>,
+    northward_manager: Arc<NGNorthwardManager>,
 }
 
-impl LogOverrideChangeSink for DriverLogOverrideSink {
+impl LogOverrideChangeSink for CdyLibLogOverrideSink {
     fn on_effective_level_change(&self, scope: LogOverrideScope, _level: LogLevel) {
         // Driver-side log bridge has a **per-driver-library** max level, not per channel.
         // Therefore the correct propagation strategy is:
@@ -112,6 +114,7 @@ impl LogOverrideChangeSink for DriverLogOverrideSink {
                 // then bump individual drivers if any channel wants higher verbosity.
                 let global_u8: u8 = overrides.effective_global_level().into();
                 let _ = self.driver_loader.set_max_level_all(global_u8);
+                let _ = self.plugin_loader.set_max_level_all(global_u8);
 
                 let mut desired: HashMap<i32, u8> = HashMap::new();
                 for e in self.index.channels.iter() {
@@ -126,6 +129,24 @@ impl LogOverrideChangeSink for DriverLogOverrideSink {
                 for (driver_id, lvl) in desired {
                     let _ = self.driver_loader.set_max_level(driver_id, lvl);
                 }
+
+                // Plugin libraries have a **per-plugin-library** max level, not per app.
+                // Propagate max(plugin's apps effective levels) for each plugin_id.
+                let mut desired_plugin: HashMap<i32, u8> = HashMap::new();
+                for app_id in self.northward_manager.get_app_ids() {
+                    let Some(actor) = self.northward_manager.get_app(app_id) else {
+                        continue;
+                    };
+                    let plugin_id = actor.plugin_id();
+                    let eff_u8: u8 = overrides.effective_app_level(app_id).into();
+                    desired_plugin
+                        .entry(plugin_id)
+                        .and_modify(|m| *m = (*m).max(eff_u8))
+                        .or_insert(eff_u8);
+                }
+                for (plugin_id, lvl) in desired_plugin {
+                    let _ = self.plugin_loader.set_max_level(plugin_id, lvl);
+                }
             }
             LogOverrideScope::Channel(channel_id) => {
                 // Recompute only the affected driver_id (cheap and avoids churn).
@@ -133,6 +154,7 @@ impl LogOverrideChangeSink for DriverLogOverrideSink {
                     // Channel not active (yet). Best-effort fallback: ensure global level is applied.
                     let global_u8: u8 = overrides.effective_global_level().into();
                     let _ = self.driver_loader.set_max_level_all(global_u8);
+                    let _ = self.plugin_loader.set_max_level_all(global_u8);
                     return;
                 };
                 let driver_id = chan.config.driver_id();
@@ -148,6 +170,29 @@ impl LogOverrideChangeSink for DriverLogOverrideSink {
                 }
 
                 let _ = self.driver_loader.set_max_level(driver_id, max_u8);
+            }
+            LogOverrideScope::App(app_id) => {
+                // Recompute only the affected plugin_id (cheap and avoids churn).
+                let Some(actor) = self.northward_manager.get_app(app_id) else {
+                    let global_u8: u8 = overrides.effective_global_level().into();
+                    let _ = self.plugin_loader.set_max_level_all(global_u8);
+                    return;
+                };
+                let plugin_id = actor.plugin_id();
+
+                let mut max_u8: u8 = overrides.effective_global_level().into();
+                for other_app_id in self.northward_manager.get_app_ids() {
+                    let Some(a) = self.northward_manager.get_app(other_app_id) else {
+                        continue;
+                    };
+                    if a.plugin_id() != plugin_id {
+                        continue;
+                    }
+                    let eff_u8: u8 = overrides.effective_app_level(other_app_id).into();
+                    max_u8 = max_u8.max(eff_u8);
+                }
+
+                let _ = self.plugin_loader.set_max_level(plugin_id, max_u8);
             }
         };
     }
@@ -306,22 +351,6 @@ impl Gateway for NGGateway {
         // Start best-effort device snapshot GC (idempotent; disabled when ttl_ms == 0).
         southward_manager.start_snapshot_gc();
 
-        // Close the semantic loop for driver log level control:
-        // lease/override changes (including expiry) => `ng_driver_set_max_level`.
-        //
-        // Best-effort: install once and align all loaded drivers to current effective global level.
-        if let Some(rt) = log_control::global() {
-            let installed = log_control::set_change_sink(Arc::new(DriverLogOverrideSink {
-                driver_loader: southward_loader.clone(),
-                index: southward_manager.runtime_index(),
-            }));
-            if !installed {
-                warn!("Log override change sink already installed; skipping");
-            }
-            let desired: u8 = rt.overrides().effective_global_level().into();
-            let _ = southward_loader.set_max_level_all(desired);
-        }
-
         // Initialize channels and devices
         let southward_config = Self::load_southward_config(&conn).await.map_err(|e| {
             InitContextError::Primitive(format!("Failed to load configuration: {e}"))
@@ -383,6 +412,25 @@ impl Gateway for NGGateway {
             .map_err(|e| {
                 InitContextError::Primitive(format!("Failed to initialize northward topology: {e}"))
             })?;
+
+        // Close the semantic loop for cdylib log level control:
+        // lease/override changes (including expiry) => `ng_driver_set_max_level` / `ng_plugin_set_max_level`.
+        //
+        // Best-effort: install once and align all loaded libs to current effective global level.
+        if let Some(rt) = log_control::global() {
+            let installed = log_control::set_change_sink(Arc::new(CdyLibLogOverrideSink {
+                driver_loader: southward_loader.clone(),
+                index: southward_manager.runtime_index(),
+                plugin_loader: Arc::clone(&northward_loader),
+                northward_manager: Arc::clone(&northward_manager),
+            }));
+            if !installed {
+                warn!("Log override change sink already installed; skipping");
+            }
+            let desired: u8 = rt.overrides().effective_global_level().into();
+            let _ = southward_loader.set_max_level_all(desired);
+            let _ = northward_loader.set_max_level_all(desired);
+        }
 
         let gateway = Arc::new(Self {
             metrics_hub: Arc::clone(&metrics_hub),
