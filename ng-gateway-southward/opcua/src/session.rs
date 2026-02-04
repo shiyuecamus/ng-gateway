@@ -19,6 +19,7 @@ use opcua::client::{Session as UaSession, SessionActivity, SessionEventLoop, Ses
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 #[derive(Debug, Clone)]
 enum LoopEvent {
@@ -91,44 +92,52 @@ impl Session for OpcUaSession {
         let handle = Arc::clone(&self.handle);
 
         // Spawn the event loop driver task (attempt-scoped).
-        tokio::spawn(async move {
-            let stream = ev.enter();
-            pin_mut!(stream);
-            while let Some(item) = tokio::select! {
-                _ = cancel.cancelled() => None,
-                v = stream.next() => v,
-            } {
-                match item {
-                    Ok(poll) => match poll {
-                        SessionPollResult::Reconnected(_) | SessionPollResult::Transport(_) => {
-                            let _ = tx.send(LoopEvent::Active).await;
-                        }
-                        SessionPollResult::SessionActivity(act) => {
-                            if matches!(act, SessionActivity::KeepAliveSucceeded) {
+        //
+        // IMPORTANT:
+        // Preserve the current tracing span (contains `channel_id`) for the spawned task,
+        // so per-channel dynamic log level overrides can work reliably.
+        tokio::spawn(
+            async move {
+                let stream = ev.enter();
+                pin_mut!(stream);
+                while let Some(item) = tokio::select! {
+                    _ = cancel.cancelled() => None,
+                    v = stream.next() => v,
+                } {
+                    match item {
+                        Ok(poll) => match poll {
+                            SessionPollResult::Reconnected(_) | SessionPollResult::Transport(_) => {
                                 let _ = tx.send(LoopEvent::Active).await;
                             }
-                        }
-                        SessionPollResult::ConnectionLost(_) => {
-                            let _ = tx.send(LoopEvent::ConnectionLost).await;
+                            SessionPollResult::SessionActivity(act) => {
+                                if matches!(act, SessionActivity::KeepAliveSucceeded) {
+                                    let _ = tx.send(LoopEvent::Active).await;
+                                }
+                            }
+                            SessionPollResult::ConnectionLost(_) => {
+                                let _ = tx.send(LoopEvent::ConnectionLost).await;
+                                break;
+                            }
+                            _ => {}
+                        },
+                        Err(_) => {
+                            let _ = tx.send(LoopEvent::Error).await;
                             break;
                         }
-                        _ => {}
-                    },
-                    Err(_) => {
-                        let _ = tx.send(LoopEvent::Error).await;
-                        break;
                     }
                 }
+
+                // On cancellation or termination: detach session from handle.
+                handle.detach_session();
+
+                // Best-effort close.
+                session.disable_reconnects();
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect())
+                        .await;
             }
-
-            // On cancellation or termination: detach session from handle.
-            handle.detach_session();
-
-            // Best-effort close.
-            session.disable_reconnects();
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
-        });
+            .in_current_span(),
+        );
 
         // Wait until active (Initializing phase).
         Self::wait_first_active(&mut rx, &ctx.cancel).await?;

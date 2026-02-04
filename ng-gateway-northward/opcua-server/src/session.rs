@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, Instrument};
 
 /// OPC UA Server session for a single supervision attempt.
 pub struct OpcuaServerSession {
@@ -185,49 +185,58 @@ impl Session for OpcuaServerSession {
         let node_cache = Arc::clone(&self.handle.node_cache);
         let shutdown = ctx.cancel.child_token();
         let server_for_builder = self.server.clone();
-        tokio::spawn(async move {
-            Self::run_node_builder(
-                runtime,
-                node_cache,
-                shutdown,
-                server_for_builder,
-                node_build_rx,
-                namespace_index,
-            )
-            .await
-        });
+        tokio::spawn(
+            async move {
+                Self::run_node_builder(
+                    runtime,
+                    node_cache,
+                    shutdown,
+                    server_for_builder,
+                    node_build_rx,
+                    namespace_index,
+                )
+                .await
+            }
+            .in_current_span(),
+        );
 
         let runtime = Arc::clone(&self.handle.runtime);
         let node_cache = Arc::clone(&self.handle.node_cache);
         let shutdown = ctx.cancel.child_token();
         let server_for_delta = self.server.clone();
-        tokio::spawn(async move {
-            Self::run_delta_listener(
-                runtime,
-                node_cache,
-                shutdown,
-                server_for_delta,
-                namespace_index,
-            )
-            .await
-        });
+        tokio::spawn(
+            async move {
+                Self::run_delta_listener(
+                    runtime,
+                    node_cache,
+                    shutdown,
+                    server_for_delta,
+                    namespace_index,
+                )
+                .await
+            }
+            .in_current_span(),
+        );
 
         let runtime = Arc::clone(&self.handle.runtime);
         let node_cache = Arc::clone(&self.handle.node_cache);
         let update_rx = Arc::clone(&self.update_rx);
         let shutdown = ctx.cancel.child_token();
         let server_for_applier = self.server.clone();
-        tokio::spawn(async move {
-            Self::run_applier(
-                runtime,
-                node_cache,
-                update_rx,
-                shutdown,
-                server_for_applier,
-                namespace_index,
-            )
-            .await
-        });
+        tokio::spawn(
+            async move {
+                Self::run_applier(
+                    runtime,
+                    node_cache,
+                    update_rx,
+                    shutdown,
+                    server_for_applier,
+                    namespace_index,
+                )
+                .await
+            }
+            .in_current_span(),
+        );
 
         info!(
             target: log_fields::TARGET_PLUGIN,

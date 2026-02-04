@@ -30,7 +30,7 @@ use pulsar::{
 use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument};
 
 /// Pulsar supervised session for a single attempt.
 pub struct PulsarSession {
@@ -105,16 +105,19 @@ impl Session for PulsarSession {
         let mut producer = self.producer;
         let mut outbound_rx = self.outbound_rx;
         let publisher_reconnect = reconnect.clone();
-        let publisher_task = tokio::spawn(async move {
-            spawn_publisher_loop(
-                app_id,
-                &mut producer,
-                &mut outbound_rx,
-                publisher_reconnect,
-                publisher_cancel,
-            )
-            .await;
-        });
+        let publisher_task = tokio::spawn(
+            async move {
+                spawn_publisher_loop(
+                    app_id,
+                    &mut producer,
+                    &mut outbound_rx,
+                    publisher_reconnect,
+                    publisher_cancel,
+                )
+                .await;
+            }
+            .in_current_span(),
+        );
 
         let consumer_task = if let Some(routes) = self.downlink_routes.take() {
             if routes.topics.is_empty() {
@@ -124,17 +127,20 @@ impl Session for PulsarSession {
                 let events_tx = self.events_tx.clone();
                 let retry_policy = self.retry_policy;
                 let consumer_cancel = cancel.child_token();
-                Some(tokio::spawn(async move {
-                    run_consumer_supervisor(
-                        app_id,
-                        pulsar,
-                        routes,
-                        events_tx,
-                        retry_policy,
-                        consumer_cancel,
-                    )
-                    .await;
-                }))
+                Some(tokio::spawn(
+                    async move {
+                        run_consumer_supervisor(
+                            app_id,
+                            pulsar,
+                            routes,
+                            events_tx,
+                            retry_policy,
+                            consumer_cancel,
+                        )
+                        .await;
+                    }
+                    .in_current_span(),
+                ))
             }
         } else {
             None
@@ -214,7 +220,7 @@ async fn spawn_publisher_loop(
                                     let _ = reconnect.try_request_reconnect(e.to_string());
                                 }
                             }
-                        });
+                        }.in_current_span());
                     }
                     Err(e) => {
                         warn!(app_id, topic=%p.topic, error=%e, "pulsar send_non_blocking failed");

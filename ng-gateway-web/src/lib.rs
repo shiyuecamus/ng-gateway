@@ -22,7 +22,7 @@ use ng_gateway_utils::tls::configure_rustls_server_config;
 use static_ui::{UiAssets, UiRuntimeConfig};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, Instrument};
 use validation::{manager::ValidationManager, prelude::create_default_manager, EntityValidator};
 
 /// Shared application state
@@ -164,11 +164,14 @@ impl WebServer for NGWebServer {
         let server_handle = server.handle();
 
         // Spawn server task
-        tokio::spawn(async move {
-            if let Err(e) = server.await {
-                error!(error=%e, "Web server failed to start");
+        tokio::spawn(
+            async move {
+                if let Err(e) = server.await {
+                    error!(error=%e, "Web server failed to start");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         let web_server = NGWebServer {
             server: Arc::new(Mutex::new(Some(server_handle))),

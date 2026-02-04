@@ -22,9 +22,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::time::{interval, Duration, MissedTickBehavior};
+use tokio::{
+    sync::broadcast::error::RecvError,
+    time::{interval, Duration, MissedTickBehavior},
+};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 
 /// Incoming WebSocket messages from client.
 #[derive(Debug, Deserialize)]
@@ -305,14 +308,14 @@ impl ConnectionSubscriptions {
                                     };
                                 }
                                 Err(broadcast_err) => match broadcast_err {
-                                    tokio::sync::broadcast::error::RecvError::Lagged(n) => {
+                                    RecvError::Lagged(n) => {
                                         warn!(
                                             "Monitor subscription for device {} lagged by {} messages",
                                             device_id, n
                                         );
                                         continue;
                                     }
-                                    tokio::sync::broadcast::error::RecvError::Closed => {
+                                    RecvError::Closed => {
                                         debug!(
                                             "Monitor subscription channel for device {} closed",
                                             device_id
@@ -324,7 +327,8 @@ impl ConnectionSubscriptions {
                         }
                     }
                 }
-            });
+            }
+            .in_current_span());
 
             self.tasks.insert(device_id, DeviceSubscription { cancel });
         }

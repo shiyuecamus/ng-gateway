@@ -20,6 +20,7 @@ use tokio::{
     sync::{mpsc, oneshot, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info_span, warn, Instrument};
 
 /// Host-side wrapper factory for southward drivers.
 ///
@@ -175,10 +176,9 @@ impl Driver for RuntimeAwareDriver {
 
         let (tx_res, rx_res) = oneshot::channel();
 
+        let actor_span = info_span!("driver-actor", channel_id = channel_id);
         handle.spawn(async move {
-            use crate::export::tracing::{debug, Instrument};
-
-            let start_span = crate::export::tracing::info_span!("driver-start", channel_id = channel_id);
+            let start_span = info_span!("driver-start", channel_id = channel_id);
             let inner_start = Arc::clone(&inner);
             if let Err(e) = async move { inner_start.start().await }
                 .instrument(start_span)
@@ -206,6 +206,7 @@ impl Driver for RuntimeAwareDriver {
                         let Some(msg) = maybe_msg else { break; };
                         let inner = Arc::clone(&inner);
                         let collect_sem = Arc::clone(&collect_sem);
+                        // Preserve current span (contains `channel_id`) for per-message execution.
                         tokio::spawn(async move {
                             match msg {
                                 DriverMessage::Collect { items, reply } => {
@@ -227,14 +228,16 @@ impl Driver for RuntimeAwareDriver {
                                     let _ = reply.send(res);
                                 }
                             }
-                        });
+                        }
+                        .in_current_span());
                     }
                 }
             }
 
             debug!("Driver actor loop stopped");
             let _ = inner.stop().await;
-        });
+        }
+        .instrument(actor_span));
 
         rx_res.await.unwrap_or(Err(DriverError::ExecutionError(
             "Driver start task cancelled".to_string(),
@@ -342,10 +345,12 @@ impl RuntimeAwarePluginFactory {
 
 impl PluginFactory for RuntimeAwarePluginFactory {
     fn create_plugin(&self, ctx: NorthwardInitContext) -> NorthwardResult<Box<dyn Plugin>> {
+        let app_id = ctx.app_id;
         let inner_plugin = self.inner.create_plugin(ctx)?;
         let (tx, rx) = mpsc::channel(self.channel_capacity);
         Ok(Box::new(RuntimeAwarePlugin {
             inner: Arc::new(inner_plugin),
+            app_id,
             tx,
             cancel_token: CancellationToken::new(),
             rx: std::sync::Mutex::new(Some(rx)),
@@ -363,6 +368,7 @@ impl PluginFactory for RuntimeAwarePluginFactory {
 
 struct RuntimeAwarePlugin {
     inner: Arc<Box<dyn Plugin>>,
+    app_id: i32,
     tx: mpsc::Sender<Arc<NorthwardData>>,
     cancel_token: CancellationToken,
     rx: std::sync::Mutex<Option<mpsc::Receiver<Arc<NorthwardData>>>>,
@@ -381,6 +387,7 @@ impl Plugin for RuntimeAwarePlugin {
 
         let inner = Arc::clone(&self.inner);
         let cancel_token = self.cancel_token.clone();
+        let app_id = self.app_id;
         let mut rx = {
             let mut guard = self.rx.lock().map_err(|_| NorthwardError::RuntimeError {
                 reason: "Plugin runtime mutex poisoned".to_string(),
@@ -392,34 +399,36 @@ impl Plugin for RuntimeAwarePlugin {
 
         let (tx_res, rx_res) = oneshot::channel();
 
-        handle.spawn(async move {
-            use crate::export::tracing::{debug, warn};
+        let actor_span = info_span!("plugin-actor", app_id = app_id);
+        handle.spawn(
+            async move {
+                if let Err(e) = inner.start().await {
+                    let _ = tx_res.send(Err(e));
+                    return;
+                }
+                let _ = tx_res.send(Ok(()));
 
-            if let Err(e) = inner.start().await {
-                let _ = tx_res.send(Err(e));
-                return;
-            }
-            let _ = tx_res.send(Ok(()));
-
-            debug!("Plugin actor loop started");
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => break,
-                    maybe_msg = rx.recv() => {
-                        match maybe_msg {
-                            Some(data) => {
-                                if let Err(e) = inner.process_data(data).await {
-                                    warn!("Error processing northward data: {}", e);
+                debug!("Plugin actor loop started");
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => break,
+                        maybe_msg = rx.recv() => {
+                            match maybe_msg {
+                                Some(data) => {
+                                    if let Err(e) = inner.process_data(data).await {
+                                        warn!("Error processing northward data: {}", e);
+                                    }
                                 }
+                                None => break,
                             }
-                            None => break,
                         }
                     }
                 }
+                debug!("Plugin actor loop stopped");
+                let _ = inner.stop().await;
             }
-            debug!("Plugin actor loop stopped");
-            let _ = inner.stop().await;
-        });
+            .instrument(actor_span),
+        );
 
         rx_res.await.unwrap_or(Err(NorthwardError::RuntimeError {
             reason: "Plugin start task cancelled".to_string(),

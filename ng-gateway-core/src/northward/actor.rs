@@ -307,9 +307,12 @@ impl AppActor {
             )));
         }
 
-        // Check connection state (snapshot stream)
-        let conn_state = self.plugin.subscribe_connection_state().borrow().clone();
-        let is_connected = conn_state.is_connected();
+        // Check connection state (host-owned snapshot, observer-updated).
+        //
+        // Rationale:
+        // - Avoids repeatedly creating `watch::Receiver` instances on the hot path.
+        // - Keeps a single source of truth for UI/REST/metrics and routing decisions.
+        let is_connected = self.conn_state.load_full().is_connected();
 
         // If not connected and buffer is enabled, buffer the data
         if !is_connected && self.queue_policy.buffer_enabled {
@@ -586,6 +589,7 @@ impl AppActor {
         let app_id = self.app_id;
         let plugin = Arc::clone(&self.plugin);
         let prom = Arc::clone(&self.prom);
+        let conn_state = Arc::clone(&self.conn_state);
         let token = self.shutdown_token.clone();
         let span = self.span.clone();
 
@@ -598,62 +602,66 @@ impl AppActor {
             }
         };
 
-        tokio::spawn(async move {
-            info!("App {} worker task started", app_id);
+        tokio::spawn(
+            async move {
+                info!("App {} worker task started", app_id);
 
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        info!("App {} worker task cancelled", app_id);
-                        break;
-                    }
-                    maybe_data = rx.recv() => {
-                        match maybe_data {
-                            Some(data) => {
-                                // Check connection state before processing
-                                let conn_state = plugin.subscribe_connection_state().borrow().clone();
-                                let is_connected = conn_state.is_connected();
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            info!("App {} worker task cancelled", app_id);
+                            break;
+                        }
+                        maybe_data = rx.recv() => {
+                            match maybe_data {
+                                Some(data) => {
+                                    // Check connection state before processing (host-owned snapshot).
+                                    //
+                                    // Note: This check is a fast-path guard. `plugin.process_data()`
+                                    // will still return `NotConnected` if the handle is not published.
+                                    let is_connected = conn_state.load_full().is_connected();
 
-                                if !is_connected {
-                                    // Not connected: skip processing
-                                    debug!(
-                                        app_id = app_id,
-                                        "Data skipped: plugin not connected"
-                                    );
-                                    prom.record_uplink_dropped();
-                                    continue;
-                                }
-
-                                let start = Instant::now();
-
-                                // Process data through plugin
-                                match plugin.process_data(Arc::clone(&data)).await {
-                                    Ok(_) => {
-                                        let elapsed = start.elapsed();
-                                        prom.record_uplink_success(
-                                            elapsed.as_nanos() as u64,
-                                            elapsed.as_secs_f64(),
+                                    if !is_connected {
+                                        // Not connected: skip processing
+                                        debug!(
+                                            app_id = app_id,
+                                            "Data skipped: plugin not connected"
                                         );
-
-                                        debug!("App {} processed data successfully", app_id);
+                                        prom.record_uplink_dropped();
+                                        continue;
                                     }
-                                    Err(e) => {
-                                        error!("App {} failed to process data: {}", app_id, e);
-                                        prom.record_uplink_fail(start.elapsed().as_secs_f64());
+
+                                    let start = Instant::now();
+
+                                    // Process data through plugin
+                                    match plugin.process_data(Arc::clone(&data)).await {
+                                        Ok(_) => {
+                                            let elapsed = start.elapsed();
+                                            prom.record_uplink_success(
+                                                elapsed.as_nanos() as u64,
+                                                elapsed.as_secs_f64(),
+                                            );
+
+                                            debug!("App {} processed data successfully", app_id);
+                                        }
+                                        Err(e) => {
+                                            error!("App {} failed to process data: {}", app_id, e);
+                                            prom.record_uplink_fail(start.elapsed().as_secs_f64());
+                                        }
                                     }
                                 }
-                            }
-                            None => {
-                                warn!("App {} data channel closed", app_id);
-                                break;
+                                None => {
+                                    warn!("App {} data channel closed", app_id);
+                                    break;
+                                }
                             }
                         }
                     }
                 }
+                info!("App {} worker task stopped", app_id);
             }
-            info!("App {} worker task stopped", app_id);
-        }
-        .instrument(span));
+            .instrument(span),
+        );
     }
 
     // === Lifecycle management ===

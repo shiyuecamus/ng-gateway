@@ -31,7 +31,7 @@ use rdkafka::{
 use std::{collections::HashMap, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument};
 
 /// Kafka supervised session for a single attempt.
 pub struct KafkaSession {
@@ -108,16 +108,19 @@ impl Session for KafkaSession {
         let app_id = self.app_id;
         let publisher_cancel = cancel.child_token();
         let publisher_reconnect = reconnect.clone();
-        let publisher_task = tokio::spawn(async move {
-            spawn_publisher_loop(
-                app_id,
-                producer,
-                &mut outbound_rx,
-                publisher_reconnect,
-                publisher_cancel,
-            )
-            .await;
-        });
+        let publisher_task = tokio::spawn(
+            async move {
+                spawn_publisher_loop(
+                    app_id,
+                    producer,
+                    &mut outbound_rx,
+                    publisher_reconnect,
+                    publisher_cancel,
+                )
+                .await;
+            }
+            .in_current_span(),
+        );
 
         // Optional downlink consumer supervisor loop (best-effort, self-healing).
         let consumer_task = if let Some(routes) = self.downlink_routes.take() {
@@ -128,17 +131,20 @@ impl Session for KafkaSession {
                 let events_tx = self.events_tx.clone();
                 let retry_policy = self.retry_policy;
                 let consumer_cancel = cancel.child_token();
-                Some(tokio::spawn(async move {
-                    run_consumer_supervisor(
-                        app_id,
-                        conn,
-                        routes,
-                        events_tx,
-                        retry_policy,
-                        consumer_cancel,
-                    )
-                    .await;
-                }))
+                Some(tokio::spawn(
+                    async move {
+                        run_consumer_supervisor(
+                            app_id,
+                            conn,
+                            routes,
+                            events_tx,
+                            retry_policy,
+                            consumer_cancel,
+                        )
+                        .await;
+                    }
+                    .in_current_span(),
+                ))
             }
         } else {
             None
@@ -240,7 +246,7 @@ async fn spawn_publisher_loop(
                                     let _ = reconnect.try_request_reconnect(format!("delivery future cancelled: {e}"));
                                 }
                             }
-                        });
+                        }.in_current_span());
                     }
                     Err((e, _owned_msg)) => {
                         warn!(app_id, topic=%p.topic, error=%e, "kafka send_result failed");

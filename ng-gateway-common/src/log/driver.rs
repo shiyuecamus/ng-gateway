@@ -24,7 +24,7 @@ use std::{
     },
 };
 use tokio::sync::Notify;
-use tracing::Span;
+use tracing::{Instrument, Span};
 
 /// Host-side sink handle that keeps the callback context alive.
 pub struct HostLogSinkHandle {
@@ -115,7 +115,7 @@ pub fn ensure_ingest_started() {
         return;
     }
     let b = Arc::clone(&bridge);
-    tokio::spawn(async move { host_ingest_loop(b).await });
+    tokio::spawn(async move { host_ingest_loop(b).await }.in_current_span());
 }
 
 /// Create a host log sink handle for a specific driver.

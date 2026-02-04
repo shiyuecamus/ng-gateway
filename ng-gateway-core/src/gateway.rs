@@ -71,7 +71,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument, warn, Instrument};
 
 // --- Type aliases to reduce type complexity and improve readability ---
 type DataReceiver = InstrumentedReceiver<Arc<NorthwardData>>;
@@ -1536,28 +1536,31 @@ impl NGGateway {
         token: CancellationToken,
         mut data_rx: DataReceiver,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            info!("Starting high-performance data forwarding task");
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        break;
-                    }
-                    maybe_data = data_rx.recv() => {
-                        match maybe_data {
-                            Some(data) => {
-                                monitor_hub.broadcast(&data);
-                                northward_manager.route(data).await
-                            }
-                            None => {
-                                warn!("Data forwarding channel closed");
-                                break;
+        tokio::spawn(
+            async move {
+                info!("Starting high-performance data forwarding task");
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            break;
+                        }
+                        maybe_data = data_rx.recv() => {
+                            match maybe_data {
+                                Some(data) => {
+                                    monitor_hub.broadcast(&data);
+                                    northward_manager.route(data).await
+                                }
+                                None => {
+                                    warn!("Data forwarding channel closed");
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
-        })
+            .in_current_span(),
+        )
     }
 
     #[inline]
@@ -1569,38 +1572,41 @@ impl NGGateway {
         mut events_rx: EventsReceiver,
     ) -> tokio::task::JoinHandle<()> {
         let write_serializers = Arc::new(WriteSerializers::default());
-        tokio::spawn(async move {
-            info!("🚀 Unified northward event processor started");
+        tokio::spawn(
+            async move {
+                info!("🚀 Unified northward event processor started");
 
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        info!("Northward event processor shutting down");
-                        break;
-                    }
-                    maybe_event = events_rx.recv() => {
-                        match maybe_event {
-                            Some((app_id, event)) => {
-                                Self::handle_northward_event(
-                                    app_id,
-                                    event,
-                                    &northward_manager,
-                                    &southward_manager,
-                                    &metrics_hub,
-                                    &write_serializers,
-                                ).await;
-                            }
-                            None => {
-                                warn!("All northward event senders dropped");
-                                break;
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            info!("Northward event processor shutting down");
+                            break;
+                        }
+                        maybe_event = events_rx.recv() => {
+                            match maybe_event {
+                                Some((app_id, event)) => {
+                                    Self::handle_northward_event(
+                                        app_id,
+                                        event,
+                                        &northward_manager,
+                                        &southward_manager,
+                                        &metrics_hub,
+                                        &write_serializers,
+                                    ).await;
+                                }
+                                None => {
+                                    warn!("All northward event senders dropped");
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            info!("✅ Northward event processor stopped");
-        })
+                info!("✅ Northward event processor stopped");
+            }
+            .in_current_span(),
+        )
     }
 
     /// Set up data forwarding to northward system
@@ -1764,17 +1770,20 @@ impl NGGateway {
                 let southward_manager = Arc::clone(southward_manager);
                 let write_serializers = Arc::clone(write_serializers);
                 let metrics_hub = Arc::clone(metrics_hub);
-                tokio::spawn(async move {
-                    Self::handle_write_point(
-                        app_id,
-                        req,
-                        &northward_manager,
-                        &southward_manager,
-                        &metrics_hub,
-                        &write_serializers,
-                    )
-                    .await;
-                });
+                tokio::spawn(
+                    async move {
+                        Self::handle_write_point(
+                            app_id,
+                            req,
+                            &northward_manager,
+                            &southward_manager,
+                            &metrics_hub,
+                            &write_serializers,
+                        )
+                        .await;
+                    }
+                    .in_current_span(),
+                );
             }
 
             NorthwardEvent::RpcResponseReceived(response) => {

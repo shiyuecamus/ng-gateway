@@ -22,6 +22,7 @@ use std::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Default "active file" grace window to avoid deleting currently written files.
 const ACTIVE_GRACE_MS: i64 = 5 * 60 * 1000;
@@ -203,24 +204,27 @@ pub fn cleanup_logs_once(settings: &Settings, dry_run: bool) -> NGResult<Cleanup
 }
 
 pub fn spawn_cleanup_worker(settings: Settings, shutdown: CancellationToken) {
-    tokio::spawn(async move {
-        loop {
-            if shutdown.is_cancelled() {
-                break;
-            }
+    tokio::spawn(
+        async move {
+            loop {
+                if shutdown.is_cancelled() {
+                    break;
+                }
 
-            let cleanup = settings.logging.cleanup.get();
-            let interval_ms = cleanup.interval_ms.max(200);
-            if cleanup.enabled {
-                let _ = cleanup_logs_once(&settings, false);
-            }
+                let cleanup = settings.logging.cleanup.get();
+                let interval_ms = cleanup.interval_ms.max(200);
+                if cleanup.enabled {
+                    let _ = cleanup_logs_once(&settings, false);
+                }
 
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {},
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {},
+                }
             }
         }
-    });
+        .in_current_span(),
+    );
 }
 
 #[cfg(test)]

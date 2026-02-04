@@ -31,7 +31,7 @@ use ng_gateway_sdk::{
 use sea_orm::DatabaseConnection;
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 /// Northward manager for all apps and plugins
 #[derive(Clone)]
@@ -649,27 +649,31 @@ impl NGNorthwardManager {
         let metrics_hub = Arc::clone(&self.metrics_hub);
 
         // Spawn lightweight bridge task
-        tokio::spawn(async move {
-            info!("Event bridge started for app {}", app_id);
+        let span = info_span!("northward-event-bridge", app_id = app_id);
+        tokio::spawn(
+            async move {
+                info!("Event bridge started for app {}", app_id);
 
-            // Simple forwarding loop
-            while let Some(event) = app_events_rx.recv().await {
-                // Update metrics
-                metrics_hub.inc_northward_events_received();
+                // Simple forwarding loop
+                while let Some(event) = app_events_rx.recv().await {
+                    // Update metrics
+                    metrics_hub.inc_northward_events_received();
 
-                // Forward to global channel (with app_id tag)
-                let tx = northward_events_bus.sender();
-                if let Err(e) = tx.send((app_id, event)).await {
-                    error!(
-                        "Failed to forward event from app {} to global channel: {}",
-                        app_id, e
-                    );
-                    break;
+                    // Forward to global channel (with app_id tag)
+                    let tx = northward_events_bus.sender();
+                    if let Err(e) = tx.send((app_id, event)).await {
+                        error!(
+                            "Failed to forward event from app {} to global channel: {}",
+                            app_id, e
+                        );
+                        break;
+                    }
                 }
-            }
 
-            info!("Event bridge stopped for app {} (channel closed)", app_id);
-        });
+                info!("Event bridge stopped for app {} (channel closed)", app_id);
+            }
+            .instrument(span),
+        );
     }
 
     /// Update subscription in the router

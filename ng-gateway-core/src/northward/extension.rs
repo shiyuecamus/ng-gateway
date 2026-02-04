@@ -20,7 +20,7 @@ use ng_gateway_repository::AppExtRepository;
 use ng_gateway_sdk::{ExtensionStore, NorthwardError, NorthwardResult};
 use sea_orm::DatabaseConnection;
 use std::{collections::HashMap, sync::Arc};
-use tracing::debug;
+use tracing::{debug, info_span, Instrument};
 
 /// Host-owned hub that spawns a single extension-store actor.
 ///
@@ -38,18 +38,25 @@ impl HostExtensionStoreHub {
     /// - The returned hub is cheap to clone and can serve many apps.
     pub fn new(db: DatabaseConnection) -> Self {
         let (tx, mut rx) = mpsc::unbounded::<ExtensionStoreMsg>();
-        tokio::spawn(async move {
-            while let Some(msg) = rx.next().await {
-                let res = handle_msg(&db, msg.app_id, msg.req).await;
-                if msg.resp.send(res).is_err() {
-                    debug!(
-                        app_id = msg.app_id,
-                        "ExtensionStore response receiver dropped"
-                    );
+        let span = info_span!("extension-store-actor");
+        tokio::spawn(
+            async move {
+                while let Some(msg) = rx.next().await {
+                    // Enter per-request span so host-side per-app log level overrides can apply.
+                    let req_span = info_span!("extension-store-request", app_id = msg.app_id);
+                    let _enter = req_span.enter();
+                    let res = handle_msg(&db, msg.app_id, msg.req).await;
+                    if msg.resp.send(res).is_err() {
+                        debug!(
+                            app_id = msg.app_id,
+                            "ExtensionStore response receiver dropped"
+                        );
+                    }
                 }
+                debug!("ExtensionStore actor stopped");
             }
-            debug!("ExtensionStore actor stopped");
-        });
+            .instrument(span),
+        );
         Self { tx }
     }
 

@@ -32,7 +32,7 @@ use opcua::{
 use std::time::Instant;
 use std::{net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 type NgGatewayNodeManager = InMemoryNodeManager<NgGatewayNodeManagerImpl>;
 
@@ -312,9 +312,12 @@ impl OpcuaServerRuntime {
         let root_id = NodeId::new(namespace_index, "NG-Gateway");
 
         // Run server in background
-        tokio::spawn(async move {
-            let _ = server.run().await;
-        });
+        tokio::spawn(
+            async move {
+                let _ = server.run().await;
+            }
+            .in_current_span(),
+        );
         info!(
             target: log_fields::TARGET_PLUGIN,
             plugin_id,

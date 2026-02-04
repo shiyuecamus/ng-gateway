@@ -219,7 +219,13 @@ where
 
             // Drive the session until completion, or interrupt by reconnect request / cancellation.
             let run_ctx = ctx.clone();
-            let mut run_task = tokio::spawn(async move { session.run(run_ctx).await });
+            // IMPORTANT:
+            // `tokio::spawn` does NOT inherit the current tracing span by default.
+            // We MUST instrument the spawned `run()` future with the attempt span so
+            // per-channel / per-app dynamic log level overrides can work reliably.
+            let run_span = run_ctx.span.clone();
+            let mut run_task =
+                tokio::spawn(async move { session.run(run_ctx).await }.instrument(run_span));
 
             enum StopReason<E> {
                 Cancelled,

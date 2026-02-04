@@ -13,6 +13,7 @@ use crate::southward::internal::snapshot_now_ms;
 use dashmap::DashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 const SNAPSHOT_GC_MAX_WORKERS: usize = 16;
 
@@ -124,7 +125,8 @@ impl SnapshotGcRuntime {
                         }
                     }
                 }
-            });
+            }
+            .in_current_span());
         }
 
         // Dispatcher: pick up to N device ids and distribute to workers by hash partition.
@@ -159,6 +161,7 @@ impl SnapshotGcRuntime {
                     }
                 }
             }
-        });
+        }
+        .in_current_span());
     }
 }

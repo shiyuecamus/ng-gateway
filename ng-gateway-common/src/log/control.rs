@@ -17,6 +17,7 @@ use std::{
     },
     time::Duration,
 };
+use tracing::Instrument;
 use uuid::Uuid;
 
 /// Override scope.
@@ -283,13 +284,16 @@ impl LogOverrideManager {
             return;
         }
         let this = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                let ms = this.cleanup_interval_ms.load(Ordering::Relaxed).max(200);
-                tokio::time::sleep(Duration::from_millis(ms)).await;
-                this.cleanup_expired();
+        tokio::spawn(
+            async move {
+                loop {
+                    let ms = this.cleanup_interval_ms.load(Ordering::Relaxed).max(200);
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    this.cleanup_expired();
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     fn cleanup_expired(&self) {

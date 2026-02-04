@@ -7,6 +7,7 @@
 //! implement a trait on each actor/driver type and keeps call sites explicit.
 
 use std::future::Future;
+use tracing::Instrument;
 
 /// Start policy for components that establish a connection or long-running session.
 ///
@@ -57,9 +58,12 @@ where
 {
     match policy {
         StartPolicy::AsyncFireAndForget => {
-            tokio::spawn(async move {
-                let _ = start_fn().await;
-            });
+            tokio::spawn(
+                async move {
+                    let _ = start_fn().await;
+                }
+                .in_current_span(),
+            );
             Ok(())
         }
         StartPolicy::SyncWaitConnected { timeout_ms } => {

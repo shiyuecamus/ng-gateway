@@ -45,6 +45,7 @@ use std::{
 };
 use tokio::{sync::Mutex, task::JoinHandle, time::Duration as TokioDuration};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// OPC UA data-plane handle.
 pub struct OpcUaHandle {
@@ -162,7 +163,9 @@ impl OpcUaHandle {
 
         // Replace manager and task handle.
         *self.subs_mgr.lock().await = Some(Arc::clone(&mgr));
-        let task = tokio::spawn(async move { actor.run().await });
+        // Preserve the current tracing span (contains `channel_id`) for the spawned task,
+        // so per-channel dynamic log level overrides can work reliably.
+        let task = tokio::spawn(async move { actor.run().await }.in_current_span());
         *self.subs_task.lock().await = Some(task);
         Some(mgr)
     }

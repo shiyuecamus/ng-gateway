@@ -212,6 +212,11 @@ impl NorthwardHandle for ThingsBoardHandle {
                     // Also support gateway-level RPC response:
                     // - Topic: `v1/devices/me/rpc/response/<request_id>`
                     // - Payload: arbitrary JSON (best-effort).
+                    info!(
+                        request_id = resp.request_id,
+                        target_type = ?resp.target_type,
+                        "RpcResponse received"
+                    );
                     match resp.target_type {
                         TargetType::SubDevice => {
                             let Some(device_name) = resp.device_name.as_deref() else {

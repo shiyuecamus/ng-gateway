@@ -17,7 +17,7 @@ use tokio::sync::{
     broadcast::{channel, Receiver, Sender},
     Mutex, RwLock,
 };
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument, warn, Instrument};
 
 /// The main event bus implementation
 #[derive(Debug, Clone)]
@@ -204,30 +204,33 @@ impl<E: NGEvent> EventDispatcher<E> {
         let handlers = self.handlers.clone();
         let event_bus = Arc::clone(&self.event_bus);
 
-        tokio::spawn(async move {
-            while let Ok(event) = receiver.recv().await {
-                if let Ok(event) = event.downcast_arc::<E>() {
-                    let mut successful = 0;
-                    let mut failed = 0;
+        tokio::spawn(
+            async move {
+                while let Ok(event) = receiver.recv().await {
+                    if let Ok(event) = event.downcast_arc::<E>() {
+                        let mut successful = 0;
+                        let mut failed = 0;
 
-                    for handler in handlers.iter() {
-                        let mut handler = handler.lock().await;
-                        match handler(&event) {
-                            Ok(_) => successful += 1,
-                            Err(e) => {
-                                warn!(error=%e, "Handler failed");
-                                failed += 1;
+                        for handler in handlers.iter() {
+                            let mut handler = handler.lock().await;
+                            match handler(&event) {
+                                Ok(_) => successful += 1,
+                                Err(e) => {
+                                    warn!(error=%e, "Handler failed");
+                                    failed += 1;
+                                }
                             }
                         }
-                    }
 
-                    // Update statistics
-                    let mut stats = event_bus.stats.write().await;
-                    stats.successful_handlers += successful;
-                    stats.failed_handlers += failed;
+                        // Update statistics
+                        let mut stats = event_bus.stats.write().await;
+                        stats.successful_handlers += successful;
+                        stats.failed_handlers += failed;
+                    }
                 }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     #[inline]
