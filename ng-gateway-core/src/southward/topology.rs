@@ -22,8 +22,8 @@ use ng_gateway_common::metrics::southward::SouthwardChannelMetricHandles;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::entities::prelude::ChannelModel;
 use ng_gateway_sdk::{
-    ConnectionState, Driver, Phase, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext,
+    ConnectionState, DeviceState, Driver, Phase, RuntimeAction, RuntimeChannel, RuntimeDevice,
+    RuntimePoint, SouthwardInitContext,
 };
 use std::{
     collections::HashMap,
@@ -307,7 +307,7 @@ impl NGSouthwardManager {
             let device_name: Arc<str> = Arc::from(runtime_device.device_name());
             let instance = DeviceInstance {
                 config: Arc::clone(&runtime_device),
-                state: ng_gateway_sdk::DeviceState::Active,
+                state: DeviceState::Active,
                 status: runtime_device.status(),
                 driver: Arc::clone(&channel.driver),
                 last_collection: None,

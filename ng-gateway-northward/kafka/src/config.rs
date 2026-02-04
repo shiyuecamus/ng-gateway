@@ -8,10 +8,10 @@ use ng_gateway_sdk::PluginConfig;
 use serde::{Deserialize, Serialize};
 
 // Re-export SDK types used in configuration
-pub use ng_gateway_sdk::northward::downlink::{
-    AckPolicy, DownlinkPayloadConfig, EventDownlink, FailurePolicy,
+pub use ng_gateway_sdk::northward::{
+    downlink::{AckPolicy, DownlinkPayloadConfig, EventDownlink, FailurePolicy},
+    payload::UplinkPayloadConfig,
 };
-pub use ng_gateway_sdk::northward::payload::UplinkPayloadConfig;
 
 /// Kafka plugin configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

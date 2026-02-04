@@ -16,6 +16,7 @@ use ng_gateway_common::metrics::{southward::SouthwardChannelMetricHandles, NGMet
 use ng_gateway_sdk::{
     supervision::{Observer, ObserverFactory, RetryBudgetSnapshot, SouthwardObserverLabels},
     ConnectionState, DeviceConnectedData, DeviceDisconnectedData, NorthwardData, Phase,
+    SouthwardTransportMeter,
 };
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -39,7 +40,7 @@ impl ChannelBoundTransportMeter {
     }
 }
 
-impl ng_gateway_sdk::SouthwardTransportMeter for ChannelBoundTransportMeter {
+impl SouthwardTransportMeter for ChannelBoundTransportMeter {
     #[inline]
     fn add_bytes_in(&self, bytes: u64) {
         self.prom.add_bytes_received(bytes);

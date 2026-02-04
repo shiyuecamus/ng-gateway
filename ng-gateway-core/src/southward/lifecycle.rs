@@ -17,7 +17,7 @@ use chrono::Utc;
 use futures::future::join_all;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::entities::prelude::ChannelModel;
-use ng_gateway_sdk::{ConnectionState, FailureKind, FailurePhase, FailureReport, Phase};
+use ng_gateway_sdk::{ConnectionState, Driver, FailureKind, FailurePhase, FailureReport, Phase};
 use std::{sync::Arc, time::Duration};
 use tokio::time::timeout;
 
@@ -25,11 +25,7 @@ impl NGSouthwardManager {
     /// Wait until a driver's connection reaches Connected or Failed, with timeout.
     ///
     /// This is a thin wrapper used by lifecycle helpers to provide a unified "start + wait" semantic.
-    pub async fn wait_for_final(
-        &self,
-        driver: &Arc<dyn ng_gateway_sdk::Driver>,
-        timeout_ms: u64,
-    ) -> NGResult<()> {
+    pub async fn wait_for_final(&self, driver: &Arc<dyn Driver>, timeout_ms: u64) -> NGResult<()> {
         let mut rx = driver.subscribe_connection_state();
 
         match timeout(Duration::from_millis(timeout_ms), async move {

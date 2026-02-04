@@ -8,10 +8,11 @@ use super::{
     payload,
     topics::Topics,
 };
-use ng_gateway_sdk::{NorthwardData, NorthwardError, NorthwardHandle, NorthwardResult};
+use ng_gateway_sdk::{NorthwardData, NorthwardError, NorthwardHandle, NorthwardResult, TargetType};
 use rumqttc::{AsyncClient, QoS};
 use serde_json::json;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 /// ThingsBoard data-plane handle.
 ///
@@ -190,6 +191,108 @@ impl NorthwardHandle for ThingsBoardHandle {
                         .map_err(|e| NorthwardError::MqttError {
                             reason: e.to_string(),
                         })?;
+                }
+                NorthwardData::WritePointResponse(resp) => {
+                    // ThingsBoard northward currently does not require a write-point reply.
+                    // Best practice: keep the control-plane closed-loop inside gateway, and log results here.
+                    info!(
+                        request_id = resp.request_id,
+                        point_id = resp.point_id,
+                        device_id = resp.device_id,
+                        status = ?resp.status,
+                        error = resp.error.as_ref().map(|e| e.message.as_str()),
+                        "WritePointResponse received"
+                    );
+                }
+                NorthwardData::RpcResponse(resp) => {
+                    // ThingsBoard Server-side RPC for devices behind the gateway:
+                    // - Topic: `v1/gateway/rpc`
+                    // - Payload: {"device":"Device A","id":$request_id,"data":{...}}
+                    //
+                    // Also support gateway-level RPC response:
+                    // - Topic: `v1/devices/me/rpc/response/<request_id>`
+                    // - Payload: arbitrary JSON (best-effort).
+                    match resp.target_type {
+                        TargetType::SubDevice => {
+                            let Some(device_name) = resp.device_name.as_deref() else {
+                                warn!(
+                                    request_id = resp.request_id,
+                                    "RpcResponse missing device_name for SubDevice target; dropped"
+                                );
+                                return Ok(());
+                            };
+
+                            // ThingsBoard expects an integer request id. Our pipeline uses a String for portability.
+                            let request_id: i64 = match resp.request_id.parse::<i64>() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(
+                                        request_id = resp.request_id,
+                                        error = %e,
+                                        "RpcResponse request_id is not numeric; dropped"
+                                    );
+                                    return Ok(());
+                                }
+                            };
+
+                            let data = if resp.is_success() {
+                                // Keep `success: true` aligned with ThingsBoard docs; include result when present.
+                                match resp.result.as_ref() {
+                                    Some(result) => json!({ "success": true, "result": result }),
+                                    None => json!({ "success": true }),
+                                }
+                            } else {
+                                json!({
+                                    "success": false,
+                                    "error": resp.error.as_deref().unwrap_or("unknown error")
+                                })
+                            };
+
+                            let bytes = serde_json::to_vec(&json!({
+                                "device": device_name,
+                                "id": request_id,
+                                "data": data
+                            }))
+                            .map_err(|e| {
+                                NorthwardError::SerializationError {
+                                    reason: e.to_string(),
+                                }
+                            })?;
+
+                            self.client
+                                .publish(Topics::gateway_rpc(), self.qos(), false, bytes)
+                                .await
+                                .map_err(|e| NorthwardError::MqttError {
+                                    reason: e.to_string(),
+                                })?;
+                        }
+                        TargetType::Gateway => {
+                            let topic = Topics::device_rpc_response_topic(&resp.request_id);
+                            let body = if resp.is_success() {
+                                resp.result
+                                    .clone()
+                                    .unwrap_or_else(|| json!({ "success": true }))
+                            } else {
+                                json!({
+                                    "success": false,
+                                    "error": resp.error.as_deref().unwrap_or("unknown error")
+                                })
+                            };
+
+                            let bytes = serde_json::to_vec(&body).map_err(|e| {
+                                NorthwardError::SerializationError {
+                                    reason: e.to_string(),
+                                }
+                            })?;
+
+                            self.client
+                                .publish(topic, self.qos(), false, bytes)
+                                .await
+                                .map_err(|e| NorthwardError::MqttError {
+                                    reason: e.to_string(),
+                                })?;
+                        }
+                    }
                 }
                 _ => {
                     return Err(NorthwardError::RuntimeError {

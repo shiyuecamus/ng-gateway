@@ -7,9 +7,8 @@ use ng_driver_modbus::{
     },
     ModbusConnector,
 };
-use ng_gateway_sdk::supervision::NoopObserverFactory;
 use ng_gateway_sdk::{
-    supervision::{Connector, SupervisorLoop, SupervisorParams},
+    supervision::{Connector, NoopObserverFactory, SupervisorLoop, SupervisorParams},
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
     NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
     SouthwardInitContext, Status, SupervisedDriver, Transform,

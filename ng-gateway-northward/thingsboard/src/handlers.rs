@@ -96,17 +96,16 @@ pub async fn handle_device_rpc_request(
     let request_id = topic
         .split('/')
         .next_back()
-        .ok_or(ng_gateway_sdk::NorthwardError::InvalidMessageFormat {
+        .ok_or(NorthwardError::InvalidMessageFormat {
             reason: "Request ID not found in topic".to_string(),
         })?
         .to_string();
 
     // Parse RPC request
-    let rpc_request: TbGatewayRpcRequest = serde_json::from_slice(payload).map_err(|e| {
-        ng_gateway_sdk::NorthwardError::InvalidMessageFormat {
+    let rpc_request: TbGatewayRpcRequest =
+        serde_json::from_slice(payload).map_err(|e| NorthwardError::InvalidMessageFormat {
             reason: format!("Failed to parse device RPC request: {e}"),
-        }
-    })?;
+        })?;
 
     // Send internal event
     let _ = events_tx
@@ -150,11 +149,10 @@ pub async fn handle_gateway_rpc(
 ) -> HandlerResult {
     debug!("Handling gateway RPC (subdevice RPC)");
 
-    let rpc_request: TbSubDeviceRpcRequest = serde_json::from_slice(payload).map_err(|e| {
-        ng_gateway_sdk::NorthwardError::InvalidMessageFormat {
+    let rpc_request: TbSubDeviceRpcRequest =
+        serde_json::from_slice(payload).map_err(|e| NorthwardError::InvalidMessageFormat {
             reason: format!("Failed to parse gateway RPC request: {e}"),
-        }
-    })?;
+        })?;
 
     let _ = events_tx
         .send(NorthwardEvent::CommandReceived(Command {

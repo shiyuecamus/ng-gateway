@@ -1,17 +1,19 @@
-use std::sync::Arc;
-
-use ng_gateway_sdk::northward::downlink::{
-    decode_event, AckPolicy, DownlinkKind, DownlinkMessageMeta, DownlinkPayloadConfig,
-    DownlinkRoute, EventDownlink, FailurePolicy, MappedDownlinkFilterConfig,
-};
-use ng_gateway_sdk::northward::payload::{
-    build_context, encode_uplink_payload, MappedJsonConfig, UplinkEventKind, UplinkPayloadConfig,
-};
 use ng_gateway_sdk::{
-    AccessMode, DataType, NGValue, NorthwardData, NorthwardEvent, PointMeta, PointValue,
-    TelemetryData, Transform,
+    northward::{
+        downlink::{
+            decode_event, AckPolicy, DownlinkKind, DownlinkMessageMeta, DownlinkPayloadConfig,
+            DownlinkRoute, EventDownlink, FailurePolicy, MappedDownlinkFilterConfig,
+        },
+        payload::{
+            build_context, encode_uplink_payload, MappedJsonConfig, UplinkEventKind,
+            UplinkPayloadConfig,
+        },
+    },
+    AccessMode, DataType, NGValue, NorthwardData, NorthwardEvent, NorthwardRuntimeApi, PointMeta,
+    PointValue, TelemetryData, Transform,
 };
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 mod common;
 use common::MockRuntime;
@@ -68,7 +70,7 @@ fn test_uplink_mapped_json() {
         "pulsar",
         UplinkEventKind::Telemetry,
         &data,
-        &(runtime.clone() as Arc<dyn ng_gateway_sdk::NorthwardRuntimeApi>),
+        &(runtime.clone() as Arc<dyn NorthwardRuntimeApi>),
     )
     .expect("failed to build context");
 
@@ -77,7 +79,7 @@ fn test_uplink_mapped_json() {
         &config,
         &ctx,
         &data,
-        &(runtime as Arc<dyn ng_gateway_sdk::NorthwardRuntimeApi>),
+        &(runtime as Arc<dyn NorthwardRuntimeApi>),
     )
     .expect("encoding failed");
 

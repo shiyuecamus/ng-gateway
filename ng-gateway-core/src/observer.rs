@@ -10,7 +10,7 @@
 
 use ng_gateway_sdk::supervision::{
     ConnectionState, FailureKind, FailureReport, NoopObserver, NorthwardObserverLabels, Observer,
-    ObserverFactory, Phase, SouthwardObserverLabels,
+    ObserverFactory, Phase, RetryBudgetSnapshot, SouthwardObserverLabels,
 };
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -50,11 +50,7 @@ impl Observer for CompositeObserver {
     }
 
     #[inline]
-    fn on_backoff(
-        &self,
-        delay: Duration,
-        budget: &ng_gateway_sdk::supervision::RetryBudgetSnapshot,
-    ) {
+    fn on_backoff(&self, delay: Duration, budget: &RetryBudgetSnapshot) {
         for o in self.inner.iter() {
             o.on_backoff(delay, budget);
         }
@@ -183,11 +179,7 @@ impl Observer for LoggingObserver {
         }
     }
 
-    fn on_backoff(
-        &self,
-        delay: Duration,
-        budget: &ng_gateway_sdk::supervision::RetryBudgetSnapshot,
-    ) {
+    fn on_backoff(&self, delay: Duration, budget: &RetryBudgetSnapshot) {
         match &self.target {
             LoggingTarget::Southward { channel_id, kind } => {
                 tracing::info!(
