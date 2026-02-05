@@ -176,9 +176,10 @@ impl Driver for RuntimeAwareDriver {
 
         let (tx_res, rx_res) = oneshot::channel();
 
-        let actor_span = info_span!("driver-actor", channel_id = channel_id);
+        // Use i64 so log bridge layers can capture reliably.
+        let actor_span = info_span!("driver-actor", channel_id = i64::from(channel_id));
         handle.spawn(async move {
-            let start_span = info_span!("driver-start", channel_id = channel_id);
+            let start_span = info_span!("driver-start", channel_id = i64::from(channel_id));
             let inner_start = Arc::clone(&inner);
             if let Err(e) = async move { inner_start.start().await }
                 .instrument(start_span)
@@ -399,7 +400,8 @@ impl Plugin for RuntimeAwarePlugin {
 
         let (tx_res, rx_res) = oneshot::channel();
 
-        let actor_span = info_span!("plugin-actor", app_id = app_id);
+        // Use i64 so log bridge layers can capture reliably.
+        let actor_span = info_span!("plugin-actor", app_id = i64::from(app_id));
         handle.spawn(
             async move {
                 if let Err(e) = inner.start().await {

@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 ng-gateway-sdk = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "tracing"] }
 tokio-util = { workspace = true, features = ["rt", "io"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -236,10 +236,18 @@ fn reemit_as_tracing(ctx: &HostSinkContext, ev: HostWireEvent) {
         .and_then(parse_level_u8)
         .or(ev.level.as_deref().and_then(parse_level))
         .unwrap_or(tracing::Level::INFO);
-    let channel_id = ev.span.as_ref().and_then(|s| {
-        s.channel_id
-            .or(log_fields::map_i32(&s.fields, log_fields::CHANNEL_ID))
-    });
+    // Resolve channel attribution (best-effort):
+    // 1) explicit `span.channel_id` (preferred)
+    // 2) `channel_id` recorded into span fields
+    // 3) `channel_id` recorded into event fields (some callers log it on the event, not span)
+    let channel_id = ev
+        .span
+        .as_ref()
+        .and_then(|s| {
+            s.channel_id
+                .or(log_fields::map_i32(&s.fields, log_fields::CHANNEL_ID))
+        })
+        .or(log_fields::map_i32(&ev.fields, log_fields::CHANNEL_ID));
 
     // Use a sentinel key to avoid span allocation for no-channel events.
     // Channel ids are expected to be positive; this sentinel is reserved for "no channel".
@@ -268,7 +276,8 @@ fn reemit_as_tracing(ctx: &HostSinkContext, ev: HostWireEvent) {
                     source = log_fields::SOURCE_DRIVER,
                     driver_id = ctx.driver_id,
                     driver_type = dt_str,
-                    channel_id = key
+                    // Use i64 so downstream span visitors can capture reliably.
+                    channel_id = i64::from(key)
                 )
             };
             ctx.span_cache.insert(key, span.clone());

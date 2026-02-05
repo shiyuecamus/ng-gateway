@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ng-gateway-sdk = { workspace = true }
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_repr = { version = "0.1" }
 serde_json = { version = "1.0" }

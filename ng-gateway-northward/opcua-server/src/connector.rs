@@ -26,7 +26,8 @@ use tracing::info;
 pub struct OpcuaServerConnector {
     config: Arc<OpcuaServerPluginConfig>,
     runtime: Arc<dyn NorthwardRuntimeApi>,
-    plugin_id: i32,
+    /// App id (for log attribution and per-app overrides).
+    app_id: i32,
     events_tx: mpsc::Sender<NorthwardEvent>,
 }
 
@@ -43,7 +44,7 @@ impl OpcuaServerConnector {
         Ok(Self {
             config,
             runtime: ctx.runtime,
-            plugin_id: ctx.app_id,
+            app_id: ctx.app_id,
             events_tx: ctx.events_tx,
         })
     }
@@ -74,7 +75,7 @@ impl Connector for OpcuaServerConnector {
             attempt = ctx.attempt,
             source = log_fields::SOURCE_PLUGIN,
             plugin_type = "opcua-server",
-            app_id = self.plugin_id,
+            app_id = self.app_id,
             host = %self.config.host,
             port = self.config.port,
             namespace_uri = %self.config.namespace_uri,
@@ -104,7 +105,7 @@ impl Connector for OpcuaServerConnector {
         // Starting the server is the "connect" step (bind/listen + runtime init).
         let t_server = Instant::now();
         let server = OpcuaServerRuntime::start(
-            self.plugin_id,
+            self.app_id,
             Arc::clone(&self.config),
             Arc::clone(&self.runtime),
             Arc::clone(&node_cache),
@@ -117,7 +118,7 @@ impl Connector for OpcuaServerConnector {
             attempt = ctx.attempt,
             source = log_fields::SOURCE_PLUGIN,
             plugin_type = "opcua-server",
-            app_id = self.plugin_id,
+            app_id = self.app_id,
             server_start_ms = t_server.elapsed().as_millis() as u64,
             total_connect_ms = t0.elapsed().as_millis() as u64,
             "opcua-server connect: runtime ready"

@@ -223,10 +223,18 @@ fn reemit_as_tracing(ctx: &HostPluginSinkContext, ev: HostWireEvent) {
         .or(ev.level.as_deref().and_then(parse_level))
         .unwrap_or(tracing::Level::INFO);
 
-    let app_id = ev.span.as_ref().and_then(|s| {
-        s.app_id
-            .or(log_fields::map_i32(&s.fields, log_fields::APP_ID))
-    });
+    // Resolve app attribution (best-effort):
+    // 1) explicit `span.app_id` (preferred)
+    // 2) `app_id` recorded into span fields
+    // 3) `app_id` recorded into event fields (some callers log it on the event, not span)
+    let app_id = ev
+        .span
+        .as_ref()
+        .and_then(|s| {
+            s.app_id
+                .or(log_fields::map_i32(&s.fields, log_fields::APP_ID))
+        })
+        .or(log_fields::map_i32(&ev.fields, log_fields::APP_ID));
 
     // Use a sentinel key to avoid span allocation for no-app events.
     const NO_APP_KEY: i32 = i32::MIN;
@@ -252,7 +260,8 @@ fn reemit_as_tracing(ctx: &HostPluginSinkContext, ev: HostWireEvent) {
                     source = log_fields::SOURCE_PLUGIN,
                     plugin_id = ctx.plugin_id,
                     plugin_type = pt_str,
-                    app_id = key
+                    // Use i64 so downstream span visitors can capture reliably.
+                    app_id = i64::from(key)
                 )
             };
             ctx.span_cache.insert(key, span.clone());

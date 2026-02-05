@@ -12,7 +12,7 @@ ng-gateway-sdk = { workspace = true }
 anyhow = { version = "1.0" }
 dashmap = { version = "6.1" }
 arc-swap = { version = "1.7" }
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_repr = { version = "0.1" }
 serde_json = { version = "1.0" }

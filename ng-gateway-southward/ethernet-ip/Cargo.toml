@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rust-ethernet-ip = { version = "0.6" }
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 tracing = { version = "0.1" }
 async-trait = { version = "0.1" }
 serde = { version = "1.0", features = ["derive"] }

@@ -163,7 +163,7 @@ impl OpcuaServerRuntime {
     }
 
     pub async fn start(
-        plugin_id: i32,
+        app_id: i32,
         config: Arc<OpcuaServerPluginConfig>,
         _runtime: Arc<dyn NorthwardRuntimeApi>,
         _node_cache: Arc<crate::node_cache::NodeCache>,
@@ -177,16 +177,30 @@ impl OpcuaServerRuntime {
             });
         }
 
+        // Root span for the whole runtime start sequence.
+        //
+        // IMPORTANT:
+        // Some third-party crates may `tokio::spawn` during builder/setup phase
+        // (e.g. inside `ServerBuilder.build()`), so we must enter this span
+        // before any such calls to ensure `app_id` is inherited reliably.
+        let runtime_span = tracing::info_span!(
+            target: log_fields::TARGET_PLUGIN,
+            "opcua-server-runtime",
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = i64::from(app_id)
+        );
+        let _enter = runtime_span.enter();
+
         // Build server
         // PKI directory is not user-configurable by design:
         // use a stable, per-installed-plugin layout.
-        let pki_dir = format!("./pki/plugin/{plugin_id}");
+        let pki_dir = format!("./pki/plugin/{app_id}");
         info!(
             target: log_fields::TARGET_PLUGIN,
-            plugin_id,
             source = log_fields::SOURCE_PLUGIN,
             plugin_type = "opcua-server",
-            app_id = plugin_id,
+            app_id = app_id,
             host = %config.host,
             port = config.port,
             namespace_uri = %config.namespace_uri,
@@ -200,10 +214,9 @@ impl OpcuaServerRuntime {
         materialize_trusted_client_certs(&pki_dir, &config.trusted_client_certs)?;
         info!(
             target: log_fields::TARGET_PLUGIN,
-            plugin_id,
             source = log_fields::SOURCE_PLUGIN,
             plugin_type = "opcua-server",
-            app_id = plugin_id,
+            app_id = app_id,
             pki_prepare_ms = t_pki.elapsed().as_millis() as u64,
             trusted_client_certs = config.trusted_client_certs.len(),
             "opcua-server runtime: PKI prepared"
@@ -219,7 +232,7 @@ impl OpcuaServerRuntime {
             .product_uri(config.product_uri.clone())
             // Production note: this makes first-run easier by generating a self-signed cert
             // into the PKI dir when missing. You can turn this off and provide your own certs
-            // by pre-provisioning files under `pki/plugin/{plugin_id}`.
+            // by pre-provisioning files under `pki/plugin/{app_id}`.
             .create_sample_keypair(true)
             .certificate_path("own/cert.der")
             .private_key_path("private/private.pem")
@@ -289,10 +302,9 @@ impl OpcuaServerRuntime {
             .map_err(|e| NorthwardError::GatewayError { reason: e })?;
         info!(
             target: log_fields::TARGET_PLUGIN,
-            plugin_id,
             source = log_fields::SOURCE_PLUGIN,
             plugin_type = "opcua-server",
-            app_id = plugin_id,
+            app_id = app_id,
             build_ms = t_build.elapsed().as_millis() as u64,
             "opcua-server runtime: ServerBuilder.build completed"
         );
@@ -312,18 +324,28 @@ impl OpcuaServerRuntime {
         let root_id = NodeId::new(namespace_index, "NG-Gateway");
 
         // Run server in background
+        // Ensure the long-running server task always carries `app_id` span context so:
+        // - host-side per-app log filtering works
+        // - third-party crates that use `tokio::spawn` internally inherit this context
+        //   (when Tokio `tracing` feature is enabled).
+        let server_span = tracing::info_span!(
+            target: log_fields::TARGET_PLUGIN,
+            "opcua-server-run",
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = i64::from(app_id)
+        );
         tokio::spawn(
             async move {
                 let _ = server.run().await;
             }
-            .in_current_span(),
+            .instrument(server_span),
         );
         info!(
             target: log_fields::TARGET_PLUGIN,
-            plugin_id,
             source = log_fields::SOURCE_PLUGIN,
             plugin_type = "opcua-server",
-            app_id = plugin_id,
+            app_id = app_id,
             namespace_index = namespace_index,
             total_start_ms = t0.elapsed().as_millis() as u64,
             "opcua-server runtime: server task spawned"

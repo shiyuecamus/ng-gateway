@@ -25,7 +25,11 @@ async-trait = { version = "0.1" }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Tokio
-tokio = { version = "1.47", features = ["full"] }
+#
+# Enable `tracing` so tasks spawned by dependencies inherit parent spans.
+# This is critical for per-app / per-channel log filtering when third-party
+# libraries use `tokio::spawn` internally (they won't call `.instrument(...)`).
+tokio = { version = "1.47", features = ["full", "tracing"] }
 tokio-serial = { version = "5.4" }
 
 # Bytes
