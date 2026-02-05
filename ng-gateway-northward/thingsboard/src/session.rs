@@ -122,6 +122,9 @@ async fn subscribe_required_topics(
 ) -> NorthwardResult<()> {
     let qos = config.communication.qos();
     let topics = vec![
+        // Sub-device shared attributes changed (Gateway API)
+        Topics::gateway_attributes(),
+        // Gateway device attributes changed (Device API) - observability only
         Topics::device_attributes(),
         Topics::device_attributes_response_sub(),
         Topics::device_rpc_request_sub(),

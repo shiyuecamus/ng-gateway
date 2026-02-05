@@ -55,8 +55,8 @@ use ng_gateway_repository::{
 };
 use ng_gateway_sdk::{
     validate_and_resolve_action_inputs, AccessMode, ClientRpcResponse, Command, DriverError,
-    NorthwardData, NorthwardEvent, TargetType, ValueCodec, WritePoint, WritePointErrorKind,
-    WritePointResponse,
+    NorthwardData, NorthwardEvent, TargetType, ValueCodec, WritePoint, WritePointError,
+    WritePointErrorKind, WritePointResponse,
 };
 use sea_orm::{DatabaseConnection, IntoActiveModel};
 use std::{
@@ -1814,8 +1814,12 @@ impl NGGateway {
                 req.request_id.clone(),
                 req.point_id,
                 0,
-                WritePointErrorKind::NotFound,
-                format!("point {} not found", req.point_id),
+                Arc::<str>::from("unknown"),
+                Arc::<str>::from("unknown"),
+                WritePointError::new(
+                    WritePointErrorKind::NotFound,
+                    format!("point {} not found", req.point_id),
+                ),
                 Utc::now(),
             );
             northward_manager
@@ -1827,6 +1831,8 @@ impl NGGateway {
         // From here, we can always include device_id in response.
         let device_id = meta.device_id;
         let channel_id = meta.channel_id;
+        let device_name = Arc::clone(&meta.device_name);
+        let point_key = Arc::clone(&meta.point_key);
 
         // Access mode validation
         if !matches!(meta.access_mode, AccessMode::Write | AccessMode::ReadWrite) {
@@ -1834,8 +1840,9 @@ impl NGGateway {
                 req.request_id.clone(),
                 req.point_id,
                 device_id,
-                WritePointErrorKind::NotWriteable,
-                "point is not writeable",
+                Arc::clone(&device_name),
+                Arc::clone(&point_key),
+                WritePointError::new(WritePointErrorKind::NotWriteable, "point is not writeable"),
                 Utc::now(),
             );
             northward_manager
@@ -1851,11 +1858,15 @@ impl NGGateway {
                 req.request_id.clone(),
                 req.point_id,
                 device_id,
-                WritePointErrorKind::TypeMismatch,
-                format!(
-                    "type mismatch: expected {:?}, got {:?}",
-                    expected_dt,
-                    req.value.data_type()
+                Arc::clone(&device_name),
+                Arc::clone(&point_key),
+                WritePointError::new(
+                    WritePointErrorKind::TypeMismatch,
+                    format!(
+                        "type mismatch: expected {:?}, got {:?}",
+                        expected_dt,
+                        req.value.data_type()
+                    ),
                 ),
                 Utc::now(),
             );
@@ -1873,8 +1884,12 @@ impl NGGateway {
                         req.request_id.clone(),
                         req.point_id,
                         device_id,
-                        WritePointErrorKind::OutOfRange,
-                        format!("out of range: {n} not in [{min}, {max}]"),
+                        Arc::clone(&device_name),
+                        Arc::clone(&point_key),
+                        WritePointError::new(
+                            WritePointErrorKind::OutOfRange,
+                            format!("out of range: {n} not in [{min}, {max}]"),
+                        ),
                         Utc::now(),
                     );
                     northward_manager
@@ -1891,8 +1906,12 @@ impl NGGateway {
                 req.request_id.clone(),
                 req.point_id,
                 device_id,
-                WritePointErrorKind::NotConnected,
-                format!("channel {} not connected", meta.channel_id),
+                Arc::clone(&device_name),
+                Arc::clone(&point_key),
+                WritePointError::new(
+                    WritePointErrorKind::NotConnected,
+                    format!("channel {} not connected", meta.channel_id),
+                ),
                 Utc::now(),
             );
             northward_manager
@@ -1937,8 +1956,9 @@ impl NGGateway {
                                 request_id.clone(),
                                 point_id,
                                 device_id,
-                                kind,
-                                e.to_string(),
+                                Arc::clone(&device_name),
+                                Arc::clone(&point_key),
+                                WritePointError::new(kind, e.to_string()),
                                 Utc::now(),
                             ),
                         )),
@@ -1978,8 +1998,12 @@ impl NGGateway {
                             request_id.clone(),
                             point_id,
                             device_id,
-                            WritePointErrorKind::QueueTimeout,
-                            format!("queue timeout after {ms}ms"),
+                            Arc::clone(&device_name),
+                            Arc::clone(&point_key),
+                            WritePointError::new(
+                                WritePointErrorKind::QueueTimeout,
+                                format!("queue timeout after {ms}ms"),
+                            ),
                             Utc::now(),
                         );
                         northward_manager
@@ -2009,8 +2033,12 @@ impl NGGateway {
                 request_id.clone(),
                 point_id,
                 device_id,
-                WritePointErrorKind::DriverError,
-                "failed to acquire channel write lock",
+                Arc::clone(&device_name),
+                Arc::clone(&point_key),
+                WritePointError::new(
+                    WritePointErrorKind::DriverError,
+                    "failed to acquire channel write lock",
+                ),
                 Utc::now(),
             );
             northward_manager
@@ -2040,8 +2068,12 @@ impl NGGateway {
                     request_id.clone(),
                     point_id,
                     device_id,
-                    WritePointErrorKind::NotFound,
-                    format!("device {} not found", device_id),
+                    Arc::clone(&device_name),
+                    Arc::clone(&point_key),
+                    WritePointError::new(
+                        WritePointErrorKind::NotFound,
+                        format!("device {} not found", device_id),
+                    ),
                     Utc::now(),
                 );
                 northward_manager
@@ -2088,6 +2120,8 @@ impl NGGateway {
                 request_id,
                 point_id,
                 device_id,
+                device_name,
+                point_key,
                 Some(value),
                 Utc::now(),
             ),
@@ -2095,8 +2129,9 @@ impl NGGateway {
                 request_id.clone(),
                 point_id,
                 device_id,
-                WritePointErrorKind::DriverError,
-                e.to_string(),
+                Arc::clone(&device_name),
+                Arc::clone(&point_key),
+                WritePointError::new(WritePointErrorKind::DriverError, e.to_string()),
                 Utc::now(),
             ),
         };

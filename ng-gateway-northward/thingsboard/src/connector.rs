@@ -8,8 +8,8 @@ use super::{
     config::{ConnectionConfig, ThingsBoardPluginConfig},
     handle::ThingsBoardHandle,
     handlers::{
-        handle_device_attributes, handle_device_attributes_response, handle_device_rpc_request,
-        handle_device_rpc_response, handle_gateway_rpc,
+        handle_device_attributes_response, handle_device_rpc_request, handle_device_rpc_response,
+        handle_gateway_device_attributes, handle_gateway_rpc, handle_sub_device_attributes,
     },
     mqtt::connect_mqtt_client,
     provision::{
@@ -69,8 +69,8 @@ impl ThingsBoardConnector {
     }
 
     async fn setup_routes(&self) -> NorthwardResult<()> {
-        // 1. Device attributes handler
-        let device_attrs_handler: MessageHandler = {
+        // 1. Sub-device shared attributes changed (Gateway API)
+        let sub_device_attrs_handler: MessageHandler = {
             let events_tx = self.events_tx.clone();
             let runtime = Arc::clone(&self.runtime);
             Arc::new(move |topic: &str, payload: &[u8]| {
@@ -79,15 +79,29 @@ impl ThingsBoardConnector {
                 let topic = topic.to_string();
                 let payload = payload.to_vec();
                 Box::pin(async move {
-                    handle_device_attributes(&topic, &payload, &events_tx, &runtime).await
+                    handle_sub_device_attributes(&topic, &payload, &events_tx, &runtime).await
                 }) as Pin<Box<dyn Future<Output = HandlerResult> + Send + 'static>>
             })
         };
         self.router
-            .register(&Topics::device_attributes(), device_attrs_handler)
+            .register(&Topics::gateway_attributes(), sub_device_attrs_handler)
             .await;
 
-        // 2. Device attributes response handler
+        // 2. Gateway device attributes changed (Device API) - observability only
+        let gateway_device_attrs_handler: MessageHandler =
+            Arc::new(move |topic: &str, payload: &[u8]| {
+                let topic = topic.to_string();
+                let payload = payload.to_vec();
+                Box::pin(async move {
+                    // NOTE: This is intentionally log-only for now.
+                    handle_gateway_device_attributes(&topic, &payload).await
+                }) as Pin<Box<dyn Future<Output = HandlerResult> + Send + 'static>>
+            });
+        self.router
+            .register(&Topics::device_attributes(), gateway_device_attrs_handler)
+            .await;
+
+        // 3. Device attributes response handler
         let device_attr_response_handler: MessageHandler = {
             let events_tx = self.events_tx.clone();
             Arc::new(move |topic: &str, payload: &[u8]| {
@@ -106,7 +120,7 @@ impl ThingsBoardConnector {
             )
             .await;
 
-        // 3. Device RPC request handler
+        // 4. Device RPC request handler
         let device_rpc_request_handler: MessageHandler = {
             let events_tx = self.events_tx.clone();
             Arc::new(move |topic: &str, payload: &[u8]| {
@@ -125,7 +139,7 @@ impl ThingsBoardConnector {
             )
             .await;
 
-        // 4. Device RPC response handler
+        // 5. Device RPC response handler
         let device_rpc_response_handler: MessageHandler = {
             let events_tx = self.events_tx.clone();
             Arc::new(move |topic: &str, payload: &[u8]| {
@@ -144,7 +158,7 @@ impl ThingsBoardConnector {
             )
             .await;
 
-        // 7. Gateway RPC handler
+        // 6. Gateway RPC handler
         let gateway_rpc_handler: MessageHandler = {
             let events_tx = self.events_tx.clone();
             Arc::new(move |topic: &str, payload: &[u8]| {

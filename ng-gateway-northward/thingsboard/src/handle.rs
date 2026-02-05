@@ -199,6 +199,8 @@ impl NorthwardHandle for ThingsBoardHandle {
                         request_id = resp.request_id,
                         point_id = resp.point_id,
                         device_id = resp.device_id,
+                        device_name = resp.device_name.as_ref(),
+                        point_key = resp.point_key.as_ref(),
                         status = ?resp.status,
                         error = resp.error.as_ref().map(|e| e.message.as_str()),
                         "WritePointResponse received"

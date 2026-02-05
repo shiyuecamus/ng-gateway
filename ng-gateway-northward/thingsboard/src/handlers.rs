@@ -11,27 +11,30 @@ use ng_gateway_sdk::{
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, info};
 use uuid::Uuid;
 
-/// Handle gateway attributes (shared attributes) changed
+/// Handle sub-device shared attributes changed (Gateway API).
 ///
-/// Topic: `v1/devices/me/attributes`
+/// Topic: `v1/gateway/attributes`
+///
+/// Payload shape (ThingsBoard docs):
+/// `{ "device": "<TB device name>", "data": { "k1": "v1", ... } }`
 #[inline]
-pub async fn handle_device_attributes(
+pub async fn handle_sub_device_attributes(
     _topic: &str,
     payload: &[u8],
     events_tx: &mpsc::Sender<NorthwardEvent>,
     runtime: &Arc<dyn NorthwardRuntimeApi>,
 ) -> HandlerResult {
     debug!(
-        "Received device attributes changed: {}",
+        "Received sub-device shared attributes changed: {}",
         String::from_utf8_lossy(payload)
     );
 
     let attr_changed: TbAttributeChanged =
         serde_json::from_slice(payload).map_err(|e| NorthwardError::InvalidMessageFormat {
-            reason: format!("Failed to parse device attributes changed: {e}"),
+            reason: format!("Failed to parse sub-device attributes changed: {e}"),
         })?;
 
     // Map attribute key -> point_id (best-effort).
@@ -64,6 +67,27 @@ pub async fn handle_device_attributes(
         let _ = events_tx.send(NorthwardEvent::WritePoint(req)).await;
     }
 
+    Ok(())
+}
+
+/// Handle gateway device attributes changed (Device API).
+///
+/// Topic: `v1/devices/me/attributes`
+///
+/// Notes:
+/// - This topic reflects shared attributes updates for the gateway device itself.
+/// - Payload is typically a plain JSON object (key-value map), NOT the `{device,data}` wrapper.
+/// - Current best practice for ng-gateway: keep it read-only (observability only) unless
+///   a dedicated gateway-level control surface is defined.
+#[inline]
+pub async fn handle_gateway_device_attributes(_topic: &str, payload: &[u8]) -> HandlerResult {
+    // Best-effort parse for cleaner logs; do not fail the handler on invalid JSON.
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(payload).ok();
+    info!(
+        payload = %String::from_utf8_lossy(payload),
+        json = parsed.as_ref().map(|v| v.to_string()),
+        "Gateway device attributes changed (not applied)"
+    );
     Ok(())
 }
 

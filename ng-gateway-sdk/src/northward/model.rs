@@ -98,6 +98,21 @@ pub struct WritePointResponse {
     pub point_id: i32,
     /// Target device identifier (for routing/logging convenience).
     pub device_id: i32,
+    /// Target device name (stable snapshot at response time).
+    ///
+    /// # Notes
+    /// - This is provided for northward plugins so they can publish platform-facing
+    ///   payloads without performing extra runtime lookups.
+    /// - For hot paths, `Arc<str>` is used to keep clones cheap.
+    #[serde(with = "arc_str_serde")]
+    pub device_name: Arc<str>,
+    /// Point key used for platform payload mapping (stable snapshot at response time).
+    ///
+    /// # Notes
+    /// - `point_key` is the semantic identifier used by most northward protocols (e.g. MQTT JSON keys).
+    /// - This is included to support best-practice "reported state" publishing without additional lookups.
+    #[serde(with = "arc_str_serde")]
+    pub point_key: Arc<str>,
     /// Unified status.
     pub status: WritePointStatus,
     /// Optional error details when failed.
@@ -116,6 +131,8 @@ impl WritePointResponse {
         request_id: String,
         point_id: i32,
         device_id: i32,
+        device_name: Arc<str>,
+        point_key: Arc<str>,
         applied_value: Option<NGValue>,
         completed_at: DateTime<Utc>,
     ) -> Self {
@@ -123,6 +140,8 @@ impl WritePointResponse {
             request_id,
             point_id,
             device_id,
+            device_name,
+            point_key,
             status: WritePointStatus::Success,
             error: None,
             applied_value,
@@ -135,19 +154,19 @@ impl WritePointResponse {
         request_id: String,
         point_id: i32,
         device_id: i32,
-        kind: WritePointErrorKind,
-        message: impl Into<String>,
+        device_name: Arc<str>,
+        point_key: Arc<str>,
+        error: WritePointError,
         completed_at: DateTime<Utc>,
     ) -> Self {
         Self {
             request_id,
             point_id,
             device_id,
+            device_name,
+            point_key,
             status: WritePointStatus::Failed,
-            error: Some(WritePointError {
-                kind,
-                message: message.into(),
-            }),
+            error: Some(error),
             applied_value: None,
             completed_at,
         }
@@ -164,6 +183,20 @@ pub enum WritePointStatus {
 pub struct WritePointError {
     pub kind: WritePointErrorKind,
     pub message: String,
+}
+
+impl WritePointError {
+    /// Create a [`WritePointError`] with a kind and a human-readable message.
+    ///
+    /// This helper is designed for hot-path code where we want to construct errors
+    /// without introducing additional allocation patterns beyond the final `String`.
+    #[inline]
+    pub fn new(kind: WritePointErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
