@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ng-gateway-sdk = { workspace = true }
+ng-gateway-sdk = "0.1"
 tokio = { version = "1.47", features = ["full", "tracing"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 serde = { version = "1.0", features = ["derive"] }

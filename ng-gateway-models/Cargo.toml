@@ -12,7 +12,7 @@ workspace = true
 [dependencies.ng-gateway-error]
 workspace = true
 [dependencies.ng-gateway-sdk]
-workspace = true
+version = "0.1"
 
 # Date and Time
 [dependencies.chrono]

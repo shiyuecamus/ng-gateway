@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ng-gateway-sdk = { workspace = true }
+ng-gateway-sdk = "0.1"
 anyhow = { version = "1.0" }
 dashmap = { version = "6.1" }
 arc-swap = { version = "1.7" }

@@ -18,7 +18,7 @@ workspace = true
 [dependencies.ng-gateway-repository]
 workspace = true
 [dependencies.ng-gateway-sdk]
-workspace = true
+version = "0.1"
 
 # External dependencies
 [dependencies.tokio]

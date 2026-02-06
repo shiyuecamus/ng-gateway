@@ -24,4 +24,4 @@ chrono = { version = "0.4" }
 tracing-subscriber = { version = "0.3" }
 
 # Internal crates
-ng-gateway-sdk = { workspace = true }
+ng-gateway-sdk = "0.1"

@@ -16,7 +16,7 @@ workspace = true
 [dependencies.ng-gateway-utils]
 workspace = true
 [dependencies.ng-gateway-sdk]
-workspace = true
+version = "0.1"
 
 # ORM
 [dependencies.sea-orm]

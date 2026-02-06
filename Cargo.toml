@@ -10,7 +10,6 @@ members = [
   "ng-gateway-common",
   "ng-gateway-repository",
   "ng-gateway-core",
-  "ng-gateway-sdk",
   "ng-gateway-bench",
   "ng-gateway-southward/dlt645",
   "ng-gateway-southward/opcua",
@@ -28,6 +27,7 @@ members = [
   "ng-gateway-xtask",
 ]
 resolver = "2"
+exclude = ["ng-gateway-sdk"]
 
 [workspace.package]
 authors = ["shiyuecamus <shiyuecamus@gmail.com>"]
@@ -60,8 +60,6 @@ path = "./ng-gateway-common"
 path = "./ng-gateway-repository"
 [workspace.dependencies.ng-gateway-core]
 path = "./ng-gateway-core"
-[workspace.dependencies.ng-gateway-sdk]
-path = "./ng-gateway-sdk"
 
 # Tracing
 [workspace.dependencies.tracing]

@@ -1,9 +1,25 @@
 [package]
 name = "ng-gateway-sdk"
-edition = { workspace = true }
 publish = true
 version = "0.1.0"
 build = "build.rs"
+edition = "2021"
+authors = ["shiyuecamus <shiyuecamus@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/shiyuecamus/ng-gateway"
+readme = "README.md"
+homepage = "https://github.com/shiyuecamus/ng-gateway"
+documentation = "https://docs.rs/ng-gateway-sdk"
+description = "SDK for building NG Gateway southward drivers and northward plugins."
+keywords = ["iot", "gateway", "sdk", "plugin", "driver"]
+categories = ["network-programming", "asynchronous"]
+
+include = [
+  "Cargo.toml",
+  "README.md",
+  "build.rs",
+  "src/**",
+]
 
 
 [dependencies]

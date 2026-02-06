@@ -26,7 +26,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-ng-gateway-sdk = { workspace = true }
+ng-gateway-sdk = "0.1"
 
 # Southward drivers under test (workspace members)
 ng-driver-modbus = { path = "../ng-gateway-southward/modbus", optional = true }

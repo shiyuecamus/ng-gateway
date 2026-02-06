@@ -23,7 +23,7 @@ workspace = true
 [dependencies.ng-gateway-models]
 workspace = true
 [dependencies.ng-gateway-sdk]
-workspace = true
+version = "0.1"
 [dependencies.ng-gateway-macros]
 workspace = true
 [dependencies.ng-gateway-utils]
