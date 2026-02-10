@@ -11,6 +11,7 @@ members = [
   "ng-gateway-repository",
   "ng-gateway-core",
   "ng-gateway-bench",
+  "ng-gateway-sdk",
   "ng-gateway-southward/dlt645",
   "ng-gateway-southward/opcua",
   "ng-gateway-southward/iec104",
@@ -27,7 +28,6 @@ members = [
   "ng-gateway-xtask",
 ]
 resolver = "2"
-exclude = ["ng-gateway-sdk"]
 
 [workspace.package]
 authors = ["shiyuecamus <shiyuecamus@gmail.com>"]
