@@ -22,10 +22,9 @@ use log::Logger;
 use ng_gateway_models::constants::{
     BUILTIN_DIR, CERT_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR, LOG_DIR, PKI_DIR, PLUGIN_DIR,
 };
-use ng_gateway_models::initializer::BuiltinSynchronizer;
 use ng_gateway_models::{
-    settings::Settings, CacheProvider, CasbinService, DbManager, EventBus, Gateway, PermChecker,
-    WebServer,
+    initializer::BuiltinSynchronizer, settings::Settings, CacheProvider, CasbinService, DbManager,
+    EventBus, Gateway, PermChecker, WebServer,
 };
 use once_cell::sync::OnceCell;
 use std::{
