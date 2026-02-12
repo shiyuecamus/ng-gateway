@@ -23,6 +23,15 @@
 
 ---
 
+<p align="center">
+  <img alt="NG Gateway Web UI - Dashboard" width="900" src="https://i.postimg.cc/sxq899QS/ng_home.png" />
+  <br />
+  <br />
+  <img alt="NG Gateway Web UI - Channel Observability" width="900" src="https://i.postimg.cc/2yMJFFbn/ng_channel.png" />
+</p>
+
+---
+
 ## 🌐 Documentation
 
 - **Docs**: [ng-gateway.com](https://ng-gateway.com)
@@ -50,7 +59,7 @@ Typical scenarios:
 
 ---
 
-## 🚀 Quick Start (Docker)
+## 🚀 Quick Start
 
 > Full guide: [Install / Quick Start](https://ng-gateway.com/install/)
 
@@ -70,7 +79,7 @@ docker run -d --name ng-gateway \
 - **API**: `http://localhost:8978/api`
 - **Default credentials**: `system_admin` / `system_admin` (change it after first login)
 
-## 🛠️ Run from source (for developers)
+## 🛠️ Run from source
 
 > See [Local Development](https://ng-gateway.com/dev/local-dev) for `cargo xtask`, UI dev server, and proxy setup.
 
@@ -92,13 +101,7 @@ pnpm install
 pnpm dev:antd
 ```
 
-## 📦 Driver / plugin distribution layout (cdylib)
-
-- **builtin**: built-in drivers/plugins are typically deployed to `drivers/builtin` and `plugins/builtin`
-- **custom**: custom extensions should go to `drivers/custom` and `plugins/custom` (mounted as volumes in the Docker example)
-- **Dev note**: for this repo, use `cargo xtask deploy` and restart the process to validate the new dynamic library
-
-## 🧩 Extending (drivers / plugins)
+## 🧩 Driver / Plugin Customization
 
 - **Southward driver development**: [Southward Driver Dev](https://ng-gateway.com/dev/driver-dev)
 - **Northward plugin development**: [Northward Plugin Dev](https://ng-gateway.com/dev/plugin-dev)

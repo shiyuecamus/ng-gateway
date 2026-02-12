@@ -23,6 +23,17 @@
 
 ---
 
+---
+
+<p align="center">
+  <img alt="NG Gateway Web UI - Dashboard" width="900" src="https://i.postimg.cc/sxq899QS/ng_home.png" />
+  <br />
+  <br />
+  <img alt="NG Gateway Web UI - Channel Observability" width="900" src="https://i.postimg.cc/2yMJFFbn/ng_channel.png" />
+</p>
+
+---
+
 ## 🌐 文档
 
 - **官网文档**：[ng-gateway.com](https://ng-gateway.com)
@@ -38,7 +49,7 @@
 - **可观测性**：Prometheus 指标（`/metrics`）+ Web UI + 实时快照（Monitor）
 - **运行时调参与日志治理**：运行时调参 + per-channel/app 日志级别 TTL 覆盖
 
-## 🎯 项目定位（适合什么场景）
+## 🎯 项目定位
 
 NG Gateway 面向工业现场/边缘侧部署：在多协议设备与云/私有平台之间，提供高吞吐采集、可靠交付与可观测运维的网关底座。
 
@@ -48,7 +59,7 @@ NG Gateway 面向工业现场/边缘侧部署：在多协议设备与云/私有�
 - 弱网/抖动下持续运行：可控重试/退避、背压隔离、明确失败语义
 - 需要二开扩展协议/平台：通过驱动/插件扩展，尽量不改核心仓库
 
-## 🚀 30 秒起跑（Docker）
+## 🚀 30 秒起跑
 
 > 完整图文版请看文档：[快速开始](https://ng-gateway.com/install/)
 
@@ -68,7 +79,7 @@ docker run -d --name ng-gateway \
 - **API**：`http://localhost:8978/api`
 - **默认账号**：`system_admin` / `system_admin`（建议首次登录后修改）
 
-## 🛠️ 从源码运行（开发者）
+## 🛠️ 从源码运行
 
 > 完整的开发工作流（`cargo xtask` / UI dev server / 代理联调）见文档：[本地开发](https://ng-gateway.com/dev/local-dev)
 
@@ -90,18 +101,12 @@ pnpm install
 pnpm dev:antd
 ```
 
-## 📦 驱动 / 插件交付目录（cdylib）
-
-- **builtin**：内置驱动/插件通常部署在 `drivers/builtin`、`plugins/builtin`
-- **custom**：自定义扩展建议放在 `drivers/custom`、`plugins/custom`（Docker 示例已挂载 volume）
-- **开发期提示**：本仓库推荐用 `cargo xtask deploy` + 重启进程验证动态库替换
-
-## 🧩 扩展开发（驱动 / 插件二开）
+## 🧩 驱动 / 插件二开
 
 - **南向驱动开发**：[南向驱动开发](https://ng-gateway.com/dev/driver-dev)
 - **北向插件开发**：[北向插件开发](https://ng-gateway.com/dev/plugin-dev)
 
-## 🧪 性能与基准（Bench）
+## 🧪 性能与基准
 
 仓库提供 `ng-gateway-bench` 用于做基准测试与回归对比（建议在相同硬件与固定配置下对比）。
 

@@ -18,49 +18,53 @@
 - **场景 1~6**：只测采集（不同 channel/device/频率组合）
 - **场景 7**：采集 + 下发（默认下发 100 个点，默认 50 次）
 
-## 快速开始（常用 demo）
+## 快速开始
 
-建议优先用 release 构建（吞吐更稳定）。最佳实践是使用仓库内置的 cargo alias（见 `.cargo/config.toml`），这样不用手动记忆 `--no-default-features/--features` 组合：
+建议优先用 release 构建（吞吐更稳定）。
+
+由于 Rust 链接限制（多个驱动包含相同的 C-ABI 符号），测试不同协议时需要使用不同的 `--features` 参数。
+
+### 测试 Modbus
+
+默认开启 Modbus feature，无需额外参数。
 
 ```bash
-cargo bench-modbus --help
-cargo bench-opcua --help
+# 运行单个场景 (场景 3)
+cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 3
+
+# 运行所有场景 (1..=7)
+cargo run --release --bin ng-gateway-bench -- --protocol modbus --all-scenarios
 ```
 
-### 跑单个协议 + 单个场景
+### 测试 OPC UA
+
+必须显式**禁用默认 feature** 并 **开启 opcua feature**。
 
 ```bash
-cargo bench-modbus --scenario 3
-```
+# 运行单个场景 (场景 3)
+cargo run --release --bin ng-gateway-bench --no-default-features --features opcua -- --protocol opcua --scenario 3
 
-```bash
-cargo bench-opcua --scenario 3
-```
-
-### 跑单个协议 + 全场景（1..=7）
-
-```bash
-cargo bench-modbus --all-scenarios
-cargo bench-opcua --all-scenarios
+# 运行所有场景 (1..=7)
+cargo run --release --bin ng-gateway-bench --no-default-features --features opcua -- --protocol opcua --all-scenarios
 ```
 
 ### 调整预热/测量时长（更接近稳态）
 
 ```bash
-cargo bench-opcua --scenario 3 --warmup-secs 10 --duration-secs 60
+cargo run --release --bin ng-gateway-bench --no-default-features --features opcua -- \
+  --protocol opcua --scenario 3 --warmup-secs 10 --duration-secs 60
 ```
 
 ### 调整资源采样间隔（更细粒度/更低开销）
 
 ```bash
-cargo bench-modbus --scenario 3 --sample-interval-ms 200
-cargo bench-modbus --scenario 3 --sample-interval-ms 1000
+cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 3 --sample-interval-ms 200
 ```
 
 ### 场景 7：调整下发点数/次数/超时
 
 ```bash
-cargo bench-modbus --scenario 7 \
+cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 7 \
   --downlink-points 100 --downlink-iterations 100 --downlink-timeout-ms 3000
 ```
 

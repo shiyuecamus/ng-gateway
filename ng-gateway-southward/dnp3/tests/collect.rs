@@ -21,7 +21,7 @@ use std::{sync::Arc, time::Duration};
 async fn dnp3_connect_and_recv_data() -> anyhow::Result<()> {
     init_tracing();
 
-    let host = "8.155.150.180";
+    let host = "8.155.153.52";
     let port = 20000;
     let master_addr = 2;
     let outstation_addr = 1;
