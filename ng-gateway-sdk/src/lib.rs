@@ -68,9 +68,9 @@ pub use southward::{
         validate_and_resolve_action_inputs,
     },
     wire::{WireDecode, WireEncode},
-    CollectItem, CollectionGroupKey, Driver, DriverConfig, DriverFactory, ExecuteOutcome,
-    ExecuteResult, RuntimeAction, RuntimeChannel, RuntimeDelta, RuntimeDevice, RuntimeParameter,
-    RuntimePoint, WriteOutcome, WriteResult,
+    CollectItem, CollectionGroupKey, CollectorConcurrencyProfile, Driver, DriverConfig,
+    DriverFactory, ExecuteOutcome, ExecuteResult, RuntimeAction, RuntimeChannel, RuntimeDelta,
+    RuntimeDevice, RuntimeParameter, RuntimePoint, WriteOutcome, WriteResult,
 };
 pub use supervision::{
     ConnectionState, FailureKind, FailurePhase, FailureReport, HandleCell, Phase,

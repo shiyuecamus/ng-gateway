@@ -6,16 +6,21 @@
 use super::{
     codec::ModbusCodec,
     planner::{ModbusPlanner, ModbusPlannerConfig},
-    types::{ModbusChannel, ModbusDevice, ModbusFunctionCode, ModbusParameter, ModbusPoint},
+    types::{
+        ModbusChannel, ModbusConnection, ModbusDevice, ModbusFunctionCode, ModbusParameter,
+        ModbusPoint,
+    },
 };
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use chrono::Utc;
+use futures_util::future::try_join_all;
 use ng_gateway_sdk::{
     downcast_parameters, supervision::ReconnectHandle, AccessMode, CollectItem, CollectionGroupKey,
-    DataType, DeviceBuffers, DriverError, DriverResult, ExecuteOutcome, ExecuteResult, NGValue,
-    NorthwardData, PointValue, RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimeParameter,
-    RuntimePoint, SouthwardHandle, ValueCodec, WriteOutcome, WriteResult,
+    CollectorConcurrencyProfile, DataType, DeviceBuffers, DriverError, DriverResult,
+    ExecuteOutcome, ExecuteResult, NGValue, NorthwardData, PointValue, RuntimeAction, RuntimeDelta,
+    RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardHandle, ValueCodec, WriteOutcome,
+    WriteResult,
 };
 use serde_json::json;
 use std::{
@@ -118,12 +123,17 @@ impl ModbusHandle {
 
     #[inline]
     fn effective_pool_size(&self) -> usize {
-        match &self.inner.config.connection {
-            crate::types::ModbusConnection::Tcp { .. } => {
-                self.inner.config.tcp_pool_size.clamp(1, 8) as usize
-            }
-            crate::types::ModbusConnection::Rtu { .. } => 1,
-        }
+        let size = match &self.inner.config.connection {
+            ModbusConnection::Tcp { .. } => self.inner.config.tcp_pool_size.clamp(1, 32) as usize,
+            ModbusConnection::Rtu { .. } => 1,
+        };
+        tracing::info!(
+            channel_id = self.inner.id,
+            tcp_pool_size = self.inner.config.tcp_pool_size,
+            effective_size = size,
+            "Modbus effective pool size calculated"
+        );
+        size
     }
 
     #[inline]
@@ -225,54 +235,79 @@ impl ModbusHandle {
             max_batch_bits: self.inner.config.max_batch_bits.clamp(1, 2000),
         };
         let batches = ModbusPlanner::plan_read_batches(cfg, &modbus_points);
+        let batches_len = batches.len();
 
-        let ctx_arc = self.pick_ctx()?;
         let slave = Slave(slave_id);
         let timeout_ms = self.inner.connection_policy.read_timeout_ms.max(1);
         let ts = Utc::now();
 
-        for batch in batches {
-            let op_label = match batch.function {
-                ModbusFunctionCode::ReadCoils => "ReadCoils",
-                ModbusFunctionCode::ReadDiscreteInputs => "ReadDiscreteInputs",
-                ModbusFunctionCode::ReadHoldingRegisters => "ReadHoldingRegisters",
-                ModbusFunctionCode::ReadInputRegisters => "ReadInputRegisters",
-                _ => "UnknownRead",
-            };
+        // Execute read batches concurrently across the TCP context pool.
+        //
+        // Why: each slave may require multiple (e.g. 17) Modbus reads. Running these
+        // sequentially on a single TCP session amplifies per-request latency and can
+        // easily exceed a 1s collection period. By distributing batches across a pool,
+        // we reduce end-to-end latency to roughly the max of a few request "waves".
+        //
+        // Safety: each `Context` is guarded by `Mutex` (single-flight). Concurrency is
+        // achieved by using multiple contexts (connections) from the pool.
+        let batch_parallelism = self.effective_pool_size().clamp(1, 8);
+        let mut results: Vec<(usize, NorthwardReadResult)> = Vec::with_capacity(batches_len);
+        let mut i = 0usize;
+        while i < batches.len() {
+            let end = (i + batch_parallelism).min(batches.len());
+            let batches_ref = &batches;
+            let futs = (i..end).map(|idx| async move {
+                let batch = &batches_ref[idx];
+                let op_label = match batch.function {
+                    ModbusFunctionCode::ReadCoils => "ReadCoils",
+                    ModbusFunctionCode::ReadDiscreteInputs => "ReadDiscreteInputs",
+                    ModbusFunctionCode::ReadHoldingRegisters => "ReadHoldingRegisters",
+                    ModbusFunctionCode::ReadInputRegisters => "ReadInputRegisters",
+                    _ => "UnknownRead",
+                };
 
-            let func = batch.function;
-            let start = batch.start_addr;
-            let qty = batch.quantity;
-            let ctx = Arc::clone(&ctx_arc);
+                let func = batch.function;
+                let start = batch.start_addr;
+                let qty = batch.quantity;
+                let ctx = self.pick_ctx()?;
 
-            let op_res = self
-                .run_op(ctx, timeout_ms, op_label, move |ctx| {
-                    Box::pin(async move {
-                        let mut guard = ctx.lock().await;
-                        guard.set_slave(slave);
-                        match func {
-                            ModbusFunctionCode::ReadCoils => guard
-                                .read_coils(start, qty)
-                                .await
-                                .map(|r| r.map(NorthwardReadResult::Coils)),
-                            ModbusFunctionCode::ReadDiscreteInputs => guard
-                                .read_discrete_inputs(start, qty)
-                                .await
-                                .map(|r| r.map(NorthwardReadResult::Coils)),
-                            ModbusFunctionCode::ReadHoldingRegisters => guard
-                                .read_holding_registers(start, qty)
-                                .await
-                                .map(|r| r.map(NorthwardReadResult::Registers)),
-                            ModbusFunctionCode::ReadInputRegisters => guard
-                                .read_input_registers(start, qty)
-                                .await
-                                .map(|r| r.map(NorthwardReadResult::Registers)),
-                            _ => unreachable!(),
-                        }
+                let op_res = self
+                    .run_op(ctx, timeout_ms, op_label, move |ctx| {
+                        Box::pin(async move {
+                            let mut guard = ctx.lock().await;
+                            guard.set_slave(slave);
+                            match func {
+                                ModbusFunctionCode::ReadCoils => guard
+                                    .read_coils(start, qty)
+                                    .await
+                                    .map(|r| r.map(NorthwardReadResult::Coils)),
+                                ModbusFunctionCode::ReadDiscreteInputs => guard
+                                    .read_discrete_inputs(start, qty)
+                                    .await
+                                    .map(|r| r.map(NorthwardReadResult::Coils)),
+                                ModbusFunctionCode::ReadHoldingRegisters => guard
+                                    .read_holding_registers(start, qty)
+                                    .await
+                                    .map(|r| r.map(NorthwardReadResult::Registers)),
+                                ModbusFunctionCode::ReadInputRegisters => guard
+                                    .read_input_registers(start, qty)
+                                    .await
+                                    .map(|r| r.map(NorthwardReadResult::Registers)),
+                                _ => unreachable!(),
+                            }
+                        })
                     })
-                })
-                .await?;
+                    .await?;
 
+                Ok::<(usize, NorthwardReadResult), DriverError>((idx, op_res))
+            });
+            let chunk = try_join_all(futs).await?;
+            results.extend(chunk);
+            i = end;
+        }
+
+        for (idx, op_res) in results {
+            let batch = &batches[idx];
             match op_res {
                 NorthwardReadResult::Coils(bits) => {
                     for p in &batch.points {
@@ -353,8 +388,8 @@ impl SouthwardHandle for ModbusHandle {
     }
 
     #[inline]
-    fn collect_max_inflight(&self) -> usize {
-        self.effective_pool_size().max(1)
+    fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
+        CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
     }
 
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {

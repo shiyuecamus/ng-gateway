@@ -8,7 +8,7 @@
 //! - `Session::init()` performs post-connect initialization that defines "Ready".
 //! - `Session::run()` drives the session until disconnect/cancel/reconnect request.
 
-use super::{FailureKind, FailurePhase, FailureReport};
+use super::{super::CollectorConcurrencyProfile, FailureKind, FailurePhase, FailureReport};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -103,6 +103,16 @@ pub trait Connector: Send + Sync + 'static {
     fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized;
+
+    /// Provide a best-effort, allocation-free concurrency capability profile **before**
+    /// the data-plane handle becomes available.
+    ///
+    /// # Default
+    /// Strict serialization (`serial()`).
+    #[inline]
+    fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
+        CollectorConcurrencyProfile::serial()
+    }
 
     /// Establish the session (transport + protocol-level connect).
     async fn connect(

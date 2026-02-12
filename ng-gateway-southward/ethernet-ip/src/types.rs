@@ -34,6 +34,19 @@ pub struct EthernetIpChannelConfig {
     pub slot: u8,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Number of TCP connections in the session pool.
+    ///
+    /// Multiple CIP sessions allow distributing tag reads across independent
+    /// connections, reducing end-to-end collection latency from `N_batches * RTT`
+    /// to roughly `ceil(N_batches / pool_size) * RTT`.
+    ///
+    /// Default: 1 (serial, backward compatible).
+    #[serde(default = "default_pool_size")]
+    pub pool_size: u8,
+}
+
+fn default_pool_size() -> u8 {
+    1
 }
 
 fn default_port() -> u16 {

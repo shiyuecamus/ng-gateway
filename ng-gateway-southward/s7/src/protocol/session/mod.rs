@@ -15,7 +15,7 @@ use super::{
 };
 use arc_swap::ArcSwapOption;
 use bytes::{Bytes, BytesMut};
-use futures::{pin_mut, Stream};
+use futures::{future::try_join_all, pin_mut, Stream};
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use ng_gateway_sdk::{WireDecode, WireEncode};
 use std::{
@@ -336,23 +336,28 @@ impl Session {
         };
         let plan = S7Planner::plan_read(&planner, specs);
 
-        // Send each batch as a ReadVar job, await each response, collect payloads
-        let mut responses: Vec<Bytes> = Vec::with_capacity(plan.batches.len());
-        for batch in plan.batches.iter() {
-            // Build request S7 Job bytes and wrap
-            // Generate a per-session monotonic pdu_ref with wrap-around
+        // Execute read batches concurrently using the session's pdu_ref multiplexing.
+        //
+        // The IO event loop routes responses by pdu_ref, allowing multiple in-flight
+        // ReadVar PDUs bounded by the negotiated AMQ. This reduces end-to-end latency
+        // from `N * RTT` to approximately `ceil(N / AMQ) * RTT`.
+        let read_timeout = self.config.read_timeout;
+        let futs = plan.batches.iter().map(|batch| {
             let pdu_ref = self.next_pdu_ref();
             let s7 = build_read_var(pdu_ref, batch);
-            let resp = self.send_raw(s7, self.config.read_timeout).await?;
-            resp.validate_response()?;
-            let view = resp.as_ref_view()?;
-            // Extract only payload bytes for merge helper
-            if let S7PayloadRef::AckData(S7AckDataPayloadRef::ReadVarResponse(r)) = view.payload {
-                responses.push(Bytes::copy_from_slice(r.raw_tail));
-            } else {
-                return Err(Error::ErrUnexpectedPdu);
+            async move {
+                let resp = self.send_raw(s7, read_timeout).await?;
+                resp.validate_response()?;
+                let view = resp.as_ref_view()?;
+                if let S7PayloadRef::AckData(S7AckDataPayloadRef::ReadVarResponse(r)) = view.payload
+                {
+                    Ok::<Bytes, Error>(Bytes::copy_from_slice(r.raw_tail))
+                } else {
+                    Err(Error::ErrUnexpectedPdu)
+                }
             }
-        }
+        });
+        let responses: Vec<Bytes> = try_join_all(futs).await?;
 
         Ok(plan.merge(&responses))
     }
@@ -492,20 +497,25 @@ impl Session {
         };
         let plan = S7Planner::plan_read(&planner_cfg, specs);
 
-        // Send each batch and capture raw payload bytes for merge
-        let mut responses = Vec::with_capacity(plan.batches.len());
-        for batch in plan.batches.iter() {
+        // Execute read batches concurrently, leveraging the session's pdu_ref multiplexing
+        // and AMQ-bounded concurrency for minimal end-to-end latency.
+        let read_timeout = self.config.read_timeout;
+        let futs = plan.batches.iter().map(|batch| {
             let pdu_ref = self.next_pdu_ref();
             let s7 = build_read_var(pdu_ref, batch);
-            let resp = self.send_raw(s7, self.config.read_timeout).await?;
-            resp.validate_response()?;
-            let view = resp.as_ref_view()?;
-            if let S7PayloadRef::AckData(S7AckDataPayloadRef::ReadVarResponse(r)) = view.payload {
-                responses.push(Bytes::copy_from_slice(r.raw_tail));
-            } else {
-                return Err(Error::ErrUnexpectedPdu);
+            async move {
+                let resp = self.send_raw(s7, read_timeout).await?;
+                resp.validate_response()?;
+                let view = resp.as_ref_view()?;
+                if let S7PayloadRef::AckData(S7AckDataPayloadRef::ReadVarResponse(r)) = view.payload
+                {
+                    Ok::<Bytes, Error>(Bytes::copy_from_slice(r.raw_tail))
+                } else {
+                    Err(Error::ErrUnexpectedPdu)
+                }
             }
-        }
+        });
+        let responses: Vec<Bytes> = try_join_all(futs).await?;
 
         plan.merge_typed(&responses)
     }

@@ -135,15 +135,15 @@ fn build_channel_nodes() -> Vec<Node> {
                                         )),
                                     }),
                                     max: Some(RuleValue::WithMessage {
-                                        value: 8.0,
+                                        value: 32.0,
                                         message: Some(ui_text!(
-                                            en = "TCP Pool Size should not exceed 8",
-                                            zh = "TCP 连接池大小建议不超过 8"
+                                            en = "TCP Pool Size should not exceed 32",
+                                            zh = "TCP 连接池大小建议不超过 32"
                                         )),
                                     }),
                                     ..Default::default()
                                 }),
-                                default_value: Some(json!(1)),
+                                default_value: Some(json!(8)),
                                 order: Some(2),
                                 ui: None,
                                 when: None,
@@ -401,7 +401,7 @@ fn build_channel_nodes() -> Vec<Node> {
                 path: "maxGapRegisters".into(),
                 label: ui_text!(en = "Max Registers Gap", zh = "最大寄存器间隙"),
                 data_type: UiDataType::Integer,
-                default_value: Some(json!(1)),
+                default_value: Some(json!(8)),
                 order: Some(9),
                 ui: None,
                 rules: Some(Rules {

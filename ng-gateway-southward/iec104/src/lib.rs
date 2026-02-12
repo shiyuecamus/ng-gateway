@@ -18,6 +18,5 @@ ng_driver_factory!(
     driver_type = "iec104",
     component = Iec104Connector,
     metadata_fn = build_metadata,
-    model_convert = Iec104Converter,
-    collect_max_inflight = 8
+    model_convert = Iec104Converter
 );

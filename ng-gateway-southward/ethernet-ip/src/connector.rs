@@ -2,18 +2,18 @@
 //!
 //! Final-form integration:
 //! - `EthernetIpConnector`: implements SDK `Connector` and is constructed via `Connector::new(ctx)`.
-//! - `connect()`: creates a connected `EipClient` and returns `EthernetIpSession`.
+//! - `connect()`: creates a pool of connected `EipClient` instances and returns `EthernetIpSession`.
 
 use super::{
-    handle::EthernetIpHandle,
+    handle::{EipSessionPool, EthernetIpHandle},
     session::EthernetIpSession,
     types::{EthernetIpChannel, EthernetIpChannelConfig},
 };
 use ng_gateway_sdk::{
     connect_tcp_metered_with_timeout,
     supervision::{Connector, Session, SessionContext},
-    DriverError, DriverResult, FailureKind, FailurePhase, SouthwardInitContext,
-    SouthwardTransportMeter,
+    CollectorConcurrencyProfile, DriverError, DriverResult, FailureKind, FailurePhase,
+    SouthwardInitContext, SouthwardTransportMeter,
 };
 use rust_ethernet_ip::{EipClient, RoutePath};
 use std::sync::Arc;
@@ -27,6 +27,7 @@ pub struct EthernetIpConnector {
 }
 
 impl EthernetIpConnector {
+    /// Create a single CIP client connection.
     async fn connect_once(
         &self,
         ctx: &SessionContext,
@@ -65,6 +66,25 @@ impl EthernetIpConnector {
                 DriverError::SessionError(format!("Failed to connect to {addr} (Slot {slot}): {e}"))
             })
     }
+
+    /// Create a pool of `pool_size` CIP client connections.
+    ///
+    /// Connections are established sequentially to avoid overwhelming the PLC
+    /// with simultaneous TCP SYN storms. Each connection is an independent
+    /// CIP session suitable for concurrent tag read/write operations.
+    async fn connect_pool(
+        &self,
+        ctx: &SessionContext,
+        cfg: &EthernetIpChannelConfig,
+    ) -> DriverResult<Arc<EipSessionPool>> {
+        let pool_size = cfg.pool_size.clamp(1, 32) as usize;
+        let mut clients = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let client = self.connect_once(ctx, cfg).await?;
+            clients.push(client);
+        }
+        Ok(Arc::new(EipSessionPool::new(clients)))
+    }
 }
 
 #[async_trait::async_trait]
@@ -91,12 +111,18 @@ impl Connector for EthernetIpConnector {
         })
     }
 
+    #[inline]
+    fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
+        let lanes = self.channel.config.pool_size.clamp(1, 32) as usize;
+        CollectorConcurrencyProfile::from_io_lanes(lanes)
+    }
+
     async fn connect(
         &self,
         ctx: SessionContext,
     ) -> Result<Self::Session, <Self::Session as Session>::Error> {
-        let client = self.connect_once(&ctx, &self.channel.config).await?;
-        Ok(EthernetIpSession::new(Arc::clone(&self.handle), client))
+        let pool = self.connect_pool(&ctx, &self.channel.config).await?;
+        Ok(EthernetIpSession::new(Arc::clone(&self.handle), pool))
     }
 
     fn classify_error(

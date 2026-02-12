@@ -65,6 +65,7 @@ pub fn build_test_topology(
         port,
         slot,
         timeout: timeout_ms,
+        pool_size: 1,
     };
 
     let channel = EthernetIpChannel {

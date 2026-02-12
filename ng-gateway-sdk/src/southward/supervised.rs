@@ -10,9 +10,9 @@
 
 use super::super::{
     supervision::{Connector, SupervisorHandle, SupervisorLoop},
-    CollectItem, CollectionGroupKey, ConnectionState, Driver, DriverError, DriverResult,
-    ExecuteResult, NGValue, NorthwardData, RuntimeAction, RuntimeDelta, RuntimeDevice,
-    RuntimeParameter, RuntimePoint, WriteResult,
+    CollectItem, CollectionGroupKey, CollectorConcurrencyProfile, ConnectionState, Driver,
+    DriverError, DriverResult, ExecuteResult, NGValue, NorthwardData, RuntimeAction, RuntimeDelta,
+    RuntimeDevice, RuntimeParameter, RuntimePoint, WriteResult,
 };
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
@@ -34,9 +34,13 @@ pub trait SouthwardHandle: DowncastSync + Send + Sync + 'static {
         None
     }
 
-    /// Max in-flight collect calls for this handle.
-    fn collect_max_inflight(&self) -> usize {
-        1
+    /// Collection concurrency capability profile for this handle.
+    ///
+    /// When connected, `SupervisedDriver` will prefer this value over any connector/default hint.
+    /// Implementations should return a stable value and avoid allocations.
+    #[inline]
+    fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
+        CollectorConcurrencyProfile::serial()
     }
 
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>>;
@@ -75,10 +79,11 @@ where
     supervisor: Arc<SupervisorLoop<C>>,
     started: AtomicBool,
     handle: Mutex<Option<SupervisorHandle>>,
-    /// Default max in-flight collect calls before the handle becomes available.
+    /// Default concurrency profile before the handle becomes available.
     ///
-    /// This is used by the ABI runtime adapter to size semaphores before the first connect.
-    collect_max_inflight_default: usize,
+    /// This is used by the ABI runtime adapter and the Collector to size semaphores
+    /// before the first successful connect publishes the handle.
+    concurrency_profile_default: CollectorConcurrencyProfile,
 }
 
 impl<C> SupervisedDriver<C>
@@ -89,20 +94,20 @@ where
     /// Create a supervised driver from an already configured supervisor loop.
     #[inline]
     pub fn new(supervisor: SupervisorLoop<C>) -> Self {
-        Self::new_with_collect_max_inflight(supervisor, 1)
+        Self::new_with_concurrency_profile(supervisor, CollectorConcurrencyProfile::serial())
     }
 
-    /// Create a supervised driver with an explicit default max in-flight collect limit.
+    /// Create a supervised driver with an explicit default concurrency profile.
     #[inline]
-    pub fn new_with_collect_max_inflight(
+    pub fn new_with_concurrency_profile(
         supervisor: SupervisorLoop<C>,
-        collect_max_inflight_default: usize,
+        concurrency_profile_default: CollectorConcurrencyProfile,
     ) -> Self {
         Self {
             supervisor: Arc::new(supervisor),
             started: AtomicBool::new(false),
             handle: Mutex::new(None),
-            collect_max_inflight_default: collect_max_inflight_default.max(1),
+            concurrency_profile_default,
         }
     }
 
@@ -150,11 +155,11 @@ where
     }
 
     #[inline]
-    fn collect_max_inflight(&self) -> usize {
+    fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
         self.supervisor
             .load_handle()
-            .map(|h| h.collect_max_inflight())
-            .unwrap_or(self.collect_max_inflight_default)
+            .map(|h| h.collector_concurrency_profile())
+            .unwrap_or(self.concurrency_profile_default)
     }
 
     #[inline]

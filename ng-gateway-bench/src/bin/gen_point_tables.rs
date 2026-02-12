@@ -1,8 +1,6 @@
 use anyhow::Context;
 use clap::Parser;
-use ng_gateway_sdk::{
-    DriverSchemas, FlattenEntity, TemplateMetadata, UiDataType,
-};
+use ng_gateway_sdk::{DriverSchemas, FlattenEntity, TemplateMetadata, UiDataType};
 use rust_xlsxwriter::{workbook::Workbook, Color, Format, FormatPattern};
 use serde_json::Value as Json;
 use std::{

@@ -30,8 +30,8 @@ use ng_gateway_sdk::{
 use opcua::{
     client::Session,
     types::{
-        constants::MAX_ARRAY_LENGTH, DataValue, NodeId, ReadValueId, StatusCode,
-        TimestampsToReturn, WriteValue,
+        constants::MAX_ARRAY_LENGTH, NodeId, ReadValueId, StatusCode, TimestampsToReturn,
+        WriteValue,
     },
 };
 use serde_json::json;
@@ -428,33 +428,48 @@ impl SouthwardHandle for OpcUaHandle {
 
         let session = self.load_session()?;
 
-        let mut i = 0usize;
-        while i < nodes_to_read.len() {
-            let end = (i + max_read_nodes_per_call).min(nodes_to_read.len());
-            let nodes_chunk = &nodes_to_read[i..end];
-            let points_chunk = &points[i..end];
+        // Pre-build chunk ranges for concurrent execution.
+        let mut chunk_ranges: Vec<(usize, usize)> = Vec::new();
+        {
+            let mut i = 0usize;
+            while i < nodes_to_read.len() {
+                let end = (i + max_read_nodes_per_call).min(nodes_to_read.len());
+                chunk_ranges.push((i, end));
+                i = end;
+            }
+        }
 
-            let read_res: DriverResult<Vec<DataValue>> = match tokio::time::timeout(
-                timeout_duration,
-                session.read(nodes_chunk, TimestampsToReturn::Both, 0.0),
-            )
-            .await
-            {
-                Ok(Ok(values)) => Ok(values),
-                Ok(Err(sc)) => Err(DriverError::ExecutionError(format!(
-                    "OPC UA read status: {sc}"
-                ))),
-                Err(_) => {
-                    self.try_request_reconnect("opcua read timeout");
-                    Err(DriverError::Timeout(timeout_duration))
+        // Execute all chunks concurrently via try_join_all.
+        // OPC UA sessions support concurrent Read service calls; the underlying
+        // secure channel serialises wire frames, but the transport layer pipelines
+        // requests so total latency is approximately one round-trip rather than
+        // `N_chunks * RTT`.
+        let futs = chunk_ranges.iter().map(|&(start, end)| {
+            let nodes_chunk = &nodes_to_read[start..end];
+            let session = Arc::clone(&session);
+            async move {
+                match tokio::time::timeout(
+                    timeout_duration,
+                    session.read(nodes_chunk, TimestampsToReturn::Both, 0.0),
+                )
+                .await
+                {
+                    Ok(Ok(values)) => Ok((start, end, values)),
+                    Ok(Err(sc)) => Err(DriverError::ExecutionError(format!(
+                        "OPC UA read status: {sc}"
+                    ))),
+                    Err(_) => {
+                        self.try_request_reconnect("opcua read timeout");
+                        Err(DriverError::Timeout(timeout_duration))
+                    }
                 }
-            };
+            }
+        });
+        let chunk_results = futures::future::try_join_all(futs).await?;
 
-            let values = match read_res {
-                Ok(v) => v,
-                Err(e) => return Err(e),
-            };
-
+        // Decode and distribute results into per-device buffers.
+        for (start, end, values) in chunk_results {
+            let points_chunk = &points[start..end];
             for (p, dv) in points_chunk.iter().zip(values.iter()) {
                 if dv.status.as_ref().map(|s| s.is_bad()).unwrap_or(false) {
                     continue;
@@ -475,8 +490,6 @@ impl SouthwardHandle for OpcUaHandle {
                     },
                 );
             }
-
-            i = end;
         }
 
         let ts = Utc::now();

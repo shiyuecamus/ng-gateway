@@ -46,7 +46,7 @@ pub struct ModbusChannelConfig {
     /// Maximum address gap for coalescing bit reads (0x01/0x02).
     #[serde(default = "ModbusChannelConfig::default_max_gap_bits")]
     pub max_gap_bits: u16,
-    /// TCP connection pool size (best practice: default 1, recommended max 8).
+    /// TCP connection pool size (best practice: default 1, recommended max 32).
     ///
     /// # Notes
     /// - This only applies to `connection.kind = tcp`.
@@ -64,7 +64,7 @@ impl ModbusChannelConfig {
 
     /// Default value for register merge gap (best practice: 1).
     fn default_max_gap_registers() -> u16 {
-        1
+        8
     }
 
     /// Default value for bit batch size (best practice: 512).

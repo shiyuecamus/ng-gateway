@@ -2,7 +2,7 @@
 //!
 //! Final-form integration:
 //! - `McConnector`: implements SDK `Connector` and is constructed via `Connector::new(ctx)`.
-//! - `connect()`: establishes transport and returns an attempt-scoped `McSession`.
+//! - `connect()`: establishes a pool of TCP connections and returns an attempt-scoped `McSession`.
 
 use super::{
     handle::McHandle,
@@ -13,8 +13,8 @@ use super::{
 use ng_gateway_sdk::{
     connect_tcp_metered_with_timeout,
     supervision::{Connector, Session, SessionContext},
-    DriverError, DriverResult, FailureKind, FailurePhase, SouthwardInitContext,
-    SouthwardTransportMeter,
+    CollectorConcurrencyProfile, DriverError, DriverResult, FailureKind, FailurePhase,
+    SouthwardInitContext, SouthwardTransportMeter,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -34,6 +34,10 @@ impl McConnector {
             .map_err(|e| DriverError::ConfigurationError(format!("Invalid socket address: {e}")))
     }
 
+    /// Build session config for a single pool member.
+    ///
+    /// Each connection in the pool is serial (`max_concurrent_requests = 1`);
+    /// concurrency is achieved by distributing across pool members.
     #[inline]
     fn build_session_config(&self, socket_addr: SocketAddr) -> Arc<SessionConfig> {
         Arc::new(SessionConfig {
@@ -46,10 +50,20 @@ impl McConnector {
             read_timeout: Duration::from_millis(self.channel.connection_policy.read_timeout_ms),
             write_timeout: Duration::from_millis(self.channel.connection_policy.write_timeout_ms),
             send_queue_capacity: 256,
-            max_concurrent_requests: self.channel.config.concurrent_requests.unwrap_or(1).max(1)
-                as usize,
+            // Each pool member is serial; pool provides concurrency.
+            max_concurrent_requests: 1,
             tcp_nodelay: true,
         })
+    }
+
+    /// Effective pool size derived from channel configuration.
+    #[inline]
+    fn effective_pool_size(&self) -> usize {
+        self.channel
+            .config
+            .concurrent_requests
+            .unwrap_or(1)
+            .clamp(1, 8) as usize
     }
 }
 
@@ -76,31 +90,48 @@ impl Connector for McConnector {
         })
     }
 
+    #[inline]
+    fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
+        CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
+    }
+
     async fn connect(
         &self,
         ctx: SessionContext,
     ) -> Result<Self::Session, <Self::Session as Session>::Error> {
         let socket_addr = self.socket_addr()?;
         let config = self.build_session_config(socket_addr);
+        let pool_size = self.effective_pool_size();
 
-        let connect_fut = connect_tcp_metered_with_timeout(
-            socket_addr,
-            Arc::clone(&self.transport_meter),
-            self.channel.connection_policy.connect_timeout_ms,
-        );
-        let stream = tokio::select! {
-            _ = ctx.cancel.cancelled() => {
-                return Err(DriverError::ServiceUnavailable);
-            }
-            res = connect_fut => res.map_err(|e| DriverError::ExecutionError(e.to_string()))?,
-        };
-        let _ = stream.inner_ref().set_nodelay(true);
+        // Create pool_size independent TCP connections, each with its own
+        // MC protocol session and event loop. Connections are established
+        // sequentially to avoid overwhelming the PLC.
+        let mut proto_sessions = Vec::with_capacity(pool_size);
+        let mut event_loops = Vec::with_capacity(pool_size);
 
-        let (proto_session, event_loop) = create_with_stream(config, stream);
+        for _ in 0..pool_size {
+            let connect_fut = connect_tcp_metered_with_timeout(
+                socket_addr,
+                Arc::clone(&self.transport_meter),
+                self.channel.connection_policy.connect_timeout_ms,
+            );
+            let stream = tokio::select! {
+                _ = ctx.cancel.cancelled() => {
+                    return Err(DriverError::ServiceUnavailable);
+                }
+                res = connect_fut => res.map_err(|e| DriverError::ExecutionError(e.to_string()))?,
+            };
+            let _ = stream.inner_ref().set_nodelay(true);
+
+            let (proto_session, event_loop) = create_with_stream(Arc::clone(&config), stream);
+            proto_sessions.push(proto_session);
+            event_loops.push(event_loop);
+        }
+
         Ok(McSession::new(
             Arc::clone(&self.handle),
-            proto_session,
-            event_loop,
+            proto_sessions,
+            event_loops,
         ))
     }
 

@@ -4,8 +4,10 @@
 //! It MUST be cheap to clone (`Arc`), safe to use concurrently, and avoid extra allocations.
 //!
 //! Design:
-//! - The protocol session (`protocol::session::Session`) is attached/detached by `McSession`.
+//! - The protocol session pool is attached/detached by `McSession`.
 //! - Data-plane methods fail fast with `ServiceUnavailable` when no active session exists.
+//! - MC's SLMP protocol is serial (no request correlation), so concurrency is achieved
+//!   via a connection pool where each member handles one batch at a time.
 
 use super::{
     codec::McCodec,
@@ -18,29 +20,97 @@ use super::{
 };
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
+use futures::future::try_join_all;
 use ng_gateway_sdk::{
-    downcast_parameters, AccessMode, CollectItem, CollectionGroupKey, DataType, DeviceBuffers,
-    DriverError, DriverResult, ExecuteOutcome, ExecuteResult, NGValue, NorthwardData, PointValue,
-    RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardHandle,
-    ValueCodec, WriteOutcome, WriteResult,
+    downcast_parameters, AccessMode, CollectItem, CollectionGroupKey, CollectorConcurrencyProfile,
+    DataType, DeviceBuffers, DriverError, DriverResult, ExecuteOutcome, ExecuteResult, NGValue,
+    NorthwardData, PointValue, RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimeParameter,
+    RuntimePoint, SouthwardHandle, ValueCodec, WriteOutcome, WriteResult,
 };
 use serde_json::json;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Instant,
 };
 use tracing::{instrument, warn};
 
+/// Connection pool for MC protocol sessions.
+///
+/// MC's SLMP protocol is strictly serial (send request → wait response → next),
+/// so a single TCP connection can only process one request at a time. This pool
+/// distributes batches across multiple independent connections using lock-free
+/// round-robin, reducing end-to-end latency from `N_batches * RTT` to roughly
+/// `ceil(N_batches / pool_size) * RTT`.
+pub struct McSessionPool {
+    /// Pool of independent protocol sessions, each backed by its own TCP connection
+    /// and event loop task.
+    sessions: Vec<Arc<ProtoSession>>,
+    /// Lock-free round-robin counter for session selection.
+    rr: AtomicUsize,
+}
+
+impl McSessionPool {
+    /// Create a new pool from a list of active protocol sessions.
+    pub fn new(sessions: Vec<Arc<ProtoSession>>) -> Self {
+        Self {
+            sessions,
+            rr: AtomicUsize::new(0),
+        }
+    }
+
+    /// Round-robin pick a session from the pool.
+    #[inline]
+    pub fn pick(&self) -> Option<Arc<ProtoSession>> {
+        let n = self.sessions.len();
+        if n == 0 {
+            return None;
+        }
+        let i = self.rr.fetch_add(1, Ordering::Relaxed) % n;
+        Some(Arc::clone(&self.sessions[i]))
+    }
+
+    /// Pick a session by explicit index (for deterministic batch distribution).
+    #[inline]
+    pub fn pick_by_index(&self, idx: usize) -> Option<Arc<ProtoSession>> {
+        let n = self.sessions.len();
+        if n == 0 {
+            return None;
+        }
+        Some(Arc::clone(&self.sessions[idx % n]))
+    }
+
+    /// Number of sessions in the pool.
+    #[inline]
+    pub fn pool_size(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Shutdown all sessions in the pool.
+    pub(crate) async fn shutdown_all(&self) {
+        for session in &self.sessions {
+            session.shutdown().await;
+        }
+    }
+}
+
+impl std::fmt::Debug for McSessionPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McSessionPool")
+            .field("pool_size", &self.sessions.len())
+            .finish()
+    }
+}
+
 /// MC data-plane handle published when the protocol session is Ready.
 pub struct McHandle {
     /// Typed runtime channel configuration.
     inner: Arc<McChannel>,
-    /// Current active protocol session (lock-free hot reads).
-    session: ArcSwapOption<ProtoSession>,
+    /// Current active protocol session pool (lock-free hot reads).
+    pool: ArcSwapOption<McSessionPool>,
     /// Metrics: total collect/control operations (best-effort).
     total_requests: AtomicU64,
     successful_requests: AtomicU64,
@@ -59,7 +129,7 @@ impl McHandle {
     pub fn new(inner: Arc<McChannel>) -> Self {
         Self {
             inner,
-            session: ArcSwapOption::from(None),
+            pool: ArcSwapOption::from(None),
             total_requests: AtomicU64::new(0),
             successful_requests: AtomicU64::new(0),
             failed_requests: AtomicU64::new(0),
@@ -67,25 +137,43 @@ impl McHandle {
         }
     }
 
-    /// Attach a protocol session for this attempt.
+    /// Attach a protocol session pool for this attempt.
     ///
-    /// This is called exactly once per attempt, after the session becomes Active.
+    /// This is called exactly once per attempt, after all sessions become Active.
     #[inline]
-    pub(crate) fn attach_session(&self, session: Arc<ProtoSession>) {
-        self.session.store(Some(session));
+    pub(crate) fn attach_pool(&self, pool: Arc<McSessionPool>) {
+        self.pool.store(Some(pool));
     }
 
-    /// Detach protocol session (best-effort).
+    /// Detach protocol session pool (best-effort).
+    ///
+    /// Returns the previously attached pool (if any) so the caller can
+    /// perform a graceful shutdown via [`McSessionPool::shutdown_all`].
     #[inline]
-    pub(crate) fn detach_session(&self) {
-        self.session.store(None);
+    pub(crate) fn detach_pool(&self) -> Option<Arc<McSessionPool>> {
+        self.pool.swap(None)
     }
 
     #[inline]
-    fn load_session(&self) -> DriverResult<Arc<ProtoSession>> {
-        self.session
-            .load_full()
+    fn load_pool(&self) -> DriverResult<Arc<McSessionPool>> {
+        self.pool.load_full().ok_or(DriverError::ServiceUnavailable)
+    }
+
+    /// Pick a single session from the pool for non-batched operations.
+    #[inline]
+    fn pick_session(&self) -> DriverResult<Arc<ProtoSession>> {
+        self.load_pool()?
+            .pick()
             .ok_or(DriverError::ServiceUnavailable)
+    }
+
+    /// Effective pool size derived from channel configuration.
+    pub(crate) fn effective_pool_size(&self) -> usize {
+        self.inner
+            .config
+            .concurrent_requests
+            .unwrap_or(1)
+            .clamp(1, 8) as usize
     }
 
     /// Compute word-length (MC "points") for a given data type.
@@ -145,6 +233,11 @@ impl SouthwardHandle for McHandle {
             .map(|d| CollectionGroupKey::from_u64(Self::KIND_MC_CHANNEL, d.channel_id as u64))
     }
 
+    #[inline]
+    fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
+        CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
+    }
+
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
         if items.is_empty() {
             return Err(DriverError::ValidationError(
@@ -184,7 +277,7 @@ impl SouthwardHandle for McHandle {
             return Ok(Vec::new());
         }
 
-        let session = self.load_session()?;
+        let pool = self.load_pool()?;
 
         let mut specs: Vec<TypedPointReadSpec> = Vec::with_capacity(mc_points.len());
         for (index, point) in mc_points.iter().enumerate() {
@@ -267,23 +360,51 @@ impl SouthwardHandle for McHandle {
             .unwrap_or(series_max)
             .max(1);
         let max_bytes = self.inner.config.max_bytes_per_frame.unwrap_or(4096).max(1);
+        let planner_cfg = PlannerConfig::new(max_points, max_bytes);
+
         let start_ts = Instant::now();
-        let read_results = match McTypedApi::read_points_typed(
-            &session,
-            &PlannerConfig::new(max_points, max_bytes),
-            specs,
-        )
-        .await
-        {
-            Ok(values) => {
-                self.update_metrics(start_ts, true);
-                values
+
+        // Distribute specs across pool members for concurrent execution.
+        //
+        // MC's SLMP protocol is strictly serial per connection, so concurrency
+        // is achieved by distributing work across a pool of TCP connections.
+        // Each pool member independently plans and executes its subset of specs
+        // through the standard typed API.
+        let pool_size = pool.pool_size();
+        let read_results = if pool_size <= 1 {
+            // Fast path: single connection, no distribution overhead.
+            let session = pool.pick().ok_or(DriverError::ServiceUnavailable)?;
+            McTypedApi::read_points_typed(&session, &planner_cfg, specs)
+                .await
+                .map_err(|e| DriverError::ExecutionError(e.to_string()))?
+        } else {
+            // Distribute specs across pool members using round-robin by index.
+            let mut groups: Vec<Vec<TypedPointReadSpec>> =
+                (0..pool_size).map(|_| Vec::new()).collect();
+            for (i, spec) in specs.into_iter().enumerate() {
+                groups[i % pool_size].push(spec);
             }
-            Err(e) => {
-                self.update_metrics(start_ts, false);
-                return Err(DriverError::ExecutionError(e.to_string()));
-            }
+
+            let futs = groups.into_iter().enumerate().map(|(idx, group_specs)| {
+                let session = pool.pick_by_index(idx);
+                let cfg = planner_cfg;
+                async move {
+                    let session = session.ok_or(DriverError::ServiceUnavailable)?;
+                    McTypedApi::read_points_typed(&session, &cfg, group_specs)
+                        .await
+                        .map_err(|e| DriverError::ExecutionError(e.to_string()))
+                }
+            });
+
+            let group_results = try_join_all(futs).await?;
+            // Flatten all group results into a single list.
+            group_results.into_iter().flatten().collect()
         };
+
+        match &read_results.is_empty() {
+            true => self.update_metrics(start_ts, false),
+            false => self.update_metrics(start_ts, true),
+        }
 
         for item in read_results.into_iter() {
             if item.end_code != 0 || item.index >= mc_points.len() {
@@ -365,7 +486,7 @@ impl SouthwardHandle for McHandle {
 
         let resolved = downcast_parameters::<crate::types::McParameter>(parameters)?;
 
-        let session = self.load_session()?;
+        let session = self.pick_session()?;
 
         let mut entries = Vec::with_capacity(resolved.len());
 
@@ -568,7 +689,7 @@ impl SouthwardHandle for McHandle {
                     ))
                 })?;
 
-        let session = self.load_session()?;
+        let session = self.pick_session()?;
 
         let series_max = self.inner.config.series.device_batch_in_word_points_max();
         let max_points = self

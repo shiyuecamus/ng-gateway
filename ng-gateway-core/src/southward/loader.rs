@@ -154,7 +154,6 @@ impl SouthwardLoader {
             driver_id,
             path.display()
         );
-
         // Fast preflight to avoid dlopen errors on mismatched binaries.
         ensure_current_platform_from_path(path)?;
 

@@ -12,8 +12,8 @@ use super::{
 use ng_gateway_sdk::{
     connect_serial_metered, connect_tcp_metered_with_timeout,
     supervision::{Connector, Session, SessionContext},
-    DriverError, DriverResult, FailureKind, FailurePhase, SerialConnectConfig,
-    SouthwardInitContext, SouthwardTransportMeter,
+    CollectorConcurrencyProfile, DriverError, DriverResult, FailureKind, FailurePhase,
+    SerialConnectConfig, SouthwardInitContext, SouthwardTransportMeter,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio_modbus::client::{rtu, tcp};
@@ -40,7 +40,7 @@ impl ModbusConnector {
                     .map_err(|e| {
                         DriverError::ConfigurationError(format!("Invalid socket address: {e}"))
                     })?;
-                let size = cfg.tcp_pool_size.clamp(1, 8) as usize;
+                let size = cfg.tcp_pool_size.clamp(1, 32) as usize;
                 let mut contexts = Vec::with_capacity(size);
                 for _ in 0..size {
                     let fut = connect_tcp_metered_with_timeout(
@@ -107,6 +107,17 @@ impl Connector for ModbusConnector {
             transport_meter: ctx.transport_meter,
             handle,
         })
+    }
+
+    #[inline]
+    fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
+        let lanes = match &self.channel.config.connection {
+            ModbusConnection::Tcp { .. } => self.channel.config.tcp_pool_size.clamp(1, 32) as usize,
+            ModbusConnection::Rtu { .. } => 1usize,
+        };
+        // For Modbus, we keep per-slave serialization at the Collector layer by default,
+        // and rely on internal batching/connection-pool parallelism inside the handle.
+        CollectorConcurrencyProfile::from_io_lanes(lanes)
     }
 
     async fn connect(

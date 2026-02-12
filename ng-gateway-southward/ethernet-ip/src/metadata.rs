@@ -94,6 +94,32 @@ fn build_channel_nodes() -> Vec<Node> {
             when: None,
         })),
         Node::Field(Box::new(Field {
+            path: "poolSize".into(),
+            label: ui_text!(en = "Connection Pool Size", zh = "连接池大小"),
+            data_type: UiDataType::Integer,
+            rules: Some(Rules {
+                min: Some(RuleValue::WithMessage {
+                    value: 1.0,
+                    message: Some(ui_text!(
+                        en = "Pool size must be at least 1",
+                        zh = "连接池大小至少为1"
+                    )),
+                }),
+                max: Some(RuleValue::WithMessage {
+                    value: 32.0,
+                    message: Some(ui_text!(
+                        en = "Pool size must not exceed 32",
+                        zh = "连接池大小不能超过32"
+                    )),
+                }),
+                ..Default::default()
+            }),
+            default_value: Some(json!(1)),
+            order: Some(5),
+            ui: None,
+            when: None,
+        })),
+        Node::Field(Box::new(Field {
             path: "slot".into(),
             label: ui_text!(en = "Slot", zh = "插槽号"),
             data_type: UiDataType::Integer,

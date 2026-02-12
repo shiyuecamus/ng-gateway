@@ -37,6 +37,10 @@ publish = false
 repository = "https://github.com/shiyuecamus/ng-gateway"
 version = "0.1.0"
 
+[patch.crates-io]
+# Force all workspace crates (including drivers) to use the local SDK during development.
+ng-gateway-sdk = { path = "./ng-gateway-sdk" }
+
 # External NG common api
 [workspace.dependencies.node-grove-common-api]
 version = "0.0.12"

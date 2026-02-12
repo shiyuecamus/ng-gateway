@@ -191,12 +191,16 @@ impl Driver for RuntimeAwareDriver {
             let _ = tx_res.send(Ok(()));
 
             // Initialize collect concurrency after start.
-            let collect_max = inner.collect_max_inflight().max(1);
+            let profile = inner.collector_concurrency_profile();
+            let collect_max = profile.global_max_inflight.get();
             if collect_max > 1 {
                 collect_sem.add_permits(collect_max.saturating_sub(1));
             }
 
-            debug!("Driver actor loop started");
+            debug!(
+                "Driver actor loop started, collect profile: {:?}",
+                profile
+            );
 
             loop {
                 tokio::select! {
@@ -259,6 +263,12 @@ impl Driver for RuntimeAwareDriver {
             .map_err(|_| DriverError::ExecutionError("Driver mailbox closed".to_string()))?;
         rx.await
             .map_err(|_| DriverError::ExecutionError("Driver collect cancelled".to_string()))?
+    }
+
+    #[inline]
+    fn collector_concurrency_profile(&self) -> crate::CollectorConcurrencyProfile {
+        // Forward the inner driver's capability profile to the host.
+        self.inner.collector_concurrency_profile()
     }
 
     async fn execute_action(

@@ -21,6 +21,7 @@ backoff = { version = "0.4" }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 dashmap = { version = "6.1" }
 chrono = { version = "0.4" }
+futures = { version = "0.3" }
 tracing-subscriber = { version = "0.3" }
 
 # Internal crates

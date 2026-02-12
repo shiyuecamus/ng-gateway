@@ -1,8 +1,11 @@
 pub(crate) mod codec;
+pub mod concurrency;
 pub mod log;
 pub(crate) mod model;
 pub mod probe;
 pub mod supervised;
+
+pub use concurrency::CollectorConcurrencyProfile;
 pub mod transport;
 pub(crate) mod types;
 pub(crate) mod validation;
@@ -71,7 +74,7 @@ pub enum ExecuteOutcome {
 #[macro_export]
 macro_rules! ng_driver_factory {
     // Final form (component + model_convert): with description.
-    (name = $name:expr, description = $description:expr, driver_type = $driver_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(, collect_max_inflight = $collect_max_inflight:expr)? $(,)?) => {
+    (name = $name:expr, description = $description:expr, driver_type = $driver_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(,)?) => {
         // Generated, per-library factory to avoid exposing generic extension points.
         struct __NgComponentDriverFactory {
             model_convert: $model_convert,
@@ -139,6 +142,9 @@ macro_rules! ng_driver_factory {
                 let retry_policy = ctx.runtime_channel.connection_policy().backoff.clone();
 
                 let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+                // Best-effort concurrency profile BEFORE handle is published.
+                let concurrency_profile: $crate::CollectorConcurrencyProfile =
+                    <$component as $crate::supervision::Connector>::collector_concurrency_profile_hint(&connector);
 
                 let params = $crate::supervision::SupervisorParams {
                     retry_policy,
@@ -151,9 +157,7 @@ macro_rules! ng_driver_factory {
                     span,
                 );
 
-                let collect_max_inflight: usize = 1usize;
-                $(let collect_max_inflight: usize = $collect_max_inflight;)?
-                let driver = $crate::SupervisedDriver::new_with_collect_max_inflight(loop_, collect_max_inflight);
+                let driver = $crate::SupervisedDriver::new_with_concurrency_profile(loop_, concurrency_profile);
                 Ok(Box::new(driver))
             }
 
@@ -209,7 +213,7 @@ macro_rules! ng_driver_factory {
     };
 
     // Final form (component + model_convert): NO description.
-    (name = $name:expr, driver_type = $driver_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(, collect_max_inflight = $collect_max_inflight:expr)? $(,)?) => {
+    (name = $name:expr, driver_type = $driver_type:expr, component = $component:ty, metadata_fn = $metadata_fn:path, model_convert = $model_convert:ty $(, channel_capacity = $cap:expr)? $(,)?) => {
         // Reuse the same generated factory, but export NULL description.
         struct __NgComponentDriverFactory {
             model_convert: $model_convert,
@@ -266,6 +270,9 @@ macro_rules! ng_driver_factory {
                 let retry_policy = ctx.runtime_channel.connection_policy().backoff.clone();
 
                 let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+                // Best-effort concurrency profile BEFORE handle is published.
+                let concurrency_profile: $crate::CollectorConcurrencyProfile =
+                    <$component as $crate::supervision::Connector>::collector_concurrency_profile_hint(&connector);
 
                 let params = $crate::supervision::SupervisorParams {
                     retry_policy,
@@ -278,9 +285,7 @@ macro_rules! ng_driver_factory {
                     span,
                 );
 
-                let collect_max_inflight: usize = 1usize;
-                $(let collect_max_inflight: usize = $collect_max_inflight;)?
-                let driver = $crate::SupervisedDriver::new_with_collect_max_inflight(loop_, collect_max_inflight);
+                let driver = $crate::SupervisedDriver::new_with_concurrency_profile(loop_, concurrency_profile);
                 Ok(Box::new(driver))
             }
 
@@ -587,21 +592,17 @@ pub trait Driver: DowncastSync + Send + Sync {
     ///   in the slice belong to the same `k`.
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>>;
 
-    /// Maximum number of in-flight `collect_data()` calls allowed for this driver instance.
+    /// Collection concurrency capability profile for this driver instance.
     ///
-    /// # Design notes
-    /// - Default is `1` to preserve strict serialization for legacy and third-party drivers.
-    /// - Drivers that maintain a **TCP connection pool** (or other parallel I/O lanes) should
-    ///   override this to match their pool size to unlock collection concurrency.
-    /// - The SDK runtime wrapper does **not** enforce ordering between `collect_data` and
-    ///   control-plane operations. Drivers must enforce any required serialization at the
-    ///   physical link/session/connection layer (e.g., via `Mutex` or per-connection workers).
+    /// The Collector uses this to automatically adapt:
+    /// - how many `collect_data()` calls may run concurrently (cross-group concurrency)
+    /// - whether calls that share the same `CollectionGroupKey` must be serialized
     ///
     /// # Performance
     /// This method must be **fast** and must not allocate.
     #[inline]
-    fn collect_max_inflight(&self) -> usize {
-        1
+    fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
+        CollectorConcurrencyProfile::serial()
     }
 
     /// Execute an action/command
