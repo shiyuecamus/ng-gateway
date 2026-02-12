@@ -28,7 +28,7 @@ jobs:
         # on PATH at *setup-node step time*. Install pnpm first, then enable caching.
         uses: pnpm/action-setup@v4
         with:
-          version: 10.22.0
+          version: 10.28.2
           run_install: false
 
       - name: Setup Node.js

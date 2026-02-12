@@ -3,7 +3,7 @@
 
 ARG RUST_VERSION=1.91-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
-ARG PNPM_VERSION=9.15.4
+ARG PNPM_VERSION=10.28.2
 
 # Optional proxy settings (forwarded from deploy scripts via `--build-arg`).
 # We map them to ENV in stages that perform network access so tools like

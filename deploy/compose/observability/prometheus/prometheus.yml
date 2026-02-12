@@ -33,4 +33,3 @@ scrape_configs:
       - targets: ["gateway:5678"]
         labels:
           source: docker
-

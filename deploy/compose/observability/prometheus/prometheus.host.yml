@@ -23,4 +23,3 @@ scrape_configs:
       - targets: ["host.docker.internal:5678"]
         labels:
           source: host
-
