@@ -67,6 +67,19 @@ struct Cli {
     modbus_port: u16,
     #[arg(long, default_value_t = 1)]
     modbus_slave_id: u8,
+    /// Maximum Modbus slave id used when generating per-device slave ids.
+    ///
+    /// Why:
+    /// - Benchmark scenarios may create many devices across many channels.
+    /// - Using a single fixed slave id (e.g. always 1) is unrealistic when your simulator
+    ///   already provisions multiple slave units (e.g. 1..=10).
+    ///
+    /// Behavior:
+    /// - For each device, we assign a slave id in the range `[modbus_slave_id, modbus_slave_id_max]`
+    ///   in a round-robin fashion using a global device index across channels.
+    /// - Set this to `1` to keep legacy behavior (all devices use slave id 1).
+    #[arg(long, default_value_t = 10)]
+    modbus_slave_id_max: u8,
     /// Base register address.
     #[arg(long, default_value_t = 0)]
     modbus_address_base: u16,
@@ -241,7 +254,8 @@ fn build_channels(
                             period_ms: scenario.period_ms,
                             host: cli.modbus_host.clone(),
                             port: cli.modbus_port,
-                            slave_id: cli.modbus_slave_id,
+                            slave_id_base: cli.modbus_slave_id,
+                            slave_id_max: cli.modbus_slave_id_max,
                             address_base: cli.modbus_address_base,
                             address_step: cli.modbus_address_step,
                             tcp_pool_size: cli.modbus_tcp_pool_size,

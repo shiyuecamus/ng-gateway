@@ -34,8 +34,17 @@ pub struct ModbusChannelRuntimeArgs {
     pub host: String,
     /// Modbus TCP port.
     pub port: u16,
-    /// Slave id (unit id).
-    pub slave_id: u8,
+    /// Base slave id (unit id).
+    ///
+    /// This is the start of the slave id range. For typical simulators you may set:
+    /// - base = 1
+    /// - max  = 10
+    pub slave_id_base: u8,
+    /// Maximum slave id (unit id).
+    ///
+    /// Devices will be assigned a slave id in `[slave_id_base, slave_id_max]` in a round-robin
+    /// fashion using a global device index across channels.
+    pub slave_id_max: u8,
     /// Base register address.
     pub address_base: u16,
     /// Address step per point (register units).
@@ -85,6 +94,15 @@ pub fn build_modbus_channel_runtime(
 
     // Build devices and points.
     for dev_idx in 0..args.devices_per_channel {
+        // Assign slave id per device (global across channels).
+        let slave_id = assign_modbus_slave_id(
+            args.channel_idx,
+            args.devices_per_channel,
+            dev_idx,
+            args.slave_id_base,
+            args.slave_id_max,
+        );
+
         // Keep ids within i32 range even for high scenario fan-out.
         let dev_id = (1_000_000i32)
             .saturating_add((args.channel_idx as i32).saturating_mul(10_000))
@@ -95,7 +113,7 @@ pub fn build_modbus_channel_runtime(
             device_name: format!("bench-modbus-dev-{}-{}", args.channel_idx, dev_idx),
             device_type: "bench-modbus".to_string(),
             status: Status::Enabled,
-            slave_id: args.slave_id,
+            slave_id,
         }) as Arc<dyn RuntimeDevice>;
 
         let mut pts: Vec<Arc<dyn RuntimePoint>> = Vec::with_capacity(args.points_per_device);
@@ -179,4 +197,32 @@ pub fn build_modbus_channel_runtime(
         points_by_device: collect_items,
         downlink_points,
     })
+}
+
+/// Assign a Modbus slave id for a device in a benchmark topology.
+///
+/// # Behavior
+/// - Builds a global device index across channels: `channel_idx * devices_per_channel + dev_idx`.
+/// - Maps that index into a configured slave id range: `[base, max]` (inclusive).
+/// - Clamps the final value to `[1, 247]` (driver validation range).
+fn assign_modbus_slave_id(
+    channel_idx: usize,
+    devices_per_channel: usize,
+    dev_idx: usize,
+    base: u8,
+    max: u8,
+) -> u8 {
+    let base_u16 = u16::from(base).clamp(1, 247);
+    let max_u16 = u16::from(max).clamp(1, 247);
+    let max_u16 = max_u16.max(base_u16);
+
+    let range = max_u16 - base_u16 + 1;
+    let global_index_1based: u16 = (channel_idx as u16)
+        .saturating_mul(devices_per_channel as u16)
+        .saturating_add(dev_idx as u16)
+        .saturating_add(1);
+
+    let offset = (global_index_1based - 1) % range;
+    let slave_id = base_u16 + offset;
+    slave_id as u8
 }

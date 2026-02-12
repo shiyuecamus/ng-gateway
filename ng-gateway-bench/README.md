@@ -96,7 +96,9 @@ cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 7 \
 
 - **`--modbus-host <ip/hostname>`**：Modbus TCP server 地址，默认：`8.155.153.52`
 - **`--modbus-port <u16>`**：端口，默认：`502`
-- **`--modbus-slave-id <u8>`**：UnitId/SlaveId，默认：`1`
+- **`--modbus-slave-id <u8>`**：UnitId/SlaveId 起始值（base），默认：`1`
+- **`--modbus-slave-id-max <u8>`**：UnitId/SlaveId 最大值（max），默认：`10`
+  - 说明：bench 会按 device（跨 channel 的全局序号）在 `[base..=max]` 范围内轮询分配从站号；将 `max` 设为 `1` 等价于所有 device 都用 `1`
 - **`--modbus-address-base <u16>`**：寄存器起始地址，默认：`0`
 - **`--modbus-address-step <u16>`**：点位地址步进（寄存器单位），默认：`2`
   - 说明：本 bench 将 **Float32 映射为 2 个寄存器**（`quantity = 2`），因此默认 step=2
@@ -140,3 +142,40 @@ cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 7 \
 
 - `--modbus-address-base`
 - `--modbus-address-step`
+
+## 生成压测用 DevicePoints 点位表（Excel）
+
+有些压测/性能回归场景会需要一批符合网关导入格式的 **DevicePoints 模板文件**（含隐藏 `__meta__`），命名形如：
+
+- `{driver}-scenario{S}-channel{N}-device-points.xlsx`
+
+说明：
+
+- 文件为标准 **XLSX**（zip/XML）。
+- 每个文件代表 **一个 channel** 的导入数据（一张表里包含该 channel 的所有 device + points 行）。
+
+### 直接运行 Rust 生成器（二进制）
+
+```bash
+# 生成 Modbus 的 scenario 1..7（默认 feature=modbus）
+cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables -- \
+  --all --out-dir generated --locale zh-CN
+
+# 生成 OPC UA 的 scenario 1..7（必须切换 features）
+cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables \
+  --no-default-features --features opcua -- \
+  --all --out-dir generated --locale zh-CN
+
+# 只生成某几个场景
+cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables -- \
+  --scenarios 1,3,7 --out-dir generated --locale zh-CN
+
+# 快速冒烟（用 --all 但覆盖规模，避免生成超大文件）
+cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables -- \
+  --all --channels 1 --devices-per-channel 1 --points-per-device 10 \
+  --out-dir /tmp/ng-point-tables-smoke --locale zh-CN
+
+# Modbus：如果你的模拟器只建了 10 个从站，建议保持默认（slaveId 会分布在 1..=10）
+# 也可以显式设置：
+#   --modbus-slave-id-max 10
+```
