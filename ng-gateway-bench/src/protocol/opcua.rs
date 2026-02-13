@@ -64,6 +64,7 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
             keep_alive_interval: 30_000,
             max_failed_keep_alive_count: 3,
             subscribe_batch_size: 256,
+            max_timeouts: 3,
         },
     });
 

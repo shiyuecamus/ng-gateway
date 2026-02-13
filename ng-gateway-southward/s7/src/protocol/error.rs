@@ -76,6 +76,12 @@ pub enum Error {
     /// TSAP-specific: Slot value is out of allowed range (0..=15)
     #[error("Slot value {0} is out of range (0..=15)")]
     InvalidSlot(u8),
+
+    /// Every batch in a concurrent read operation failed.
+    ///
+    /// Individual batch errors are logged at WARN level before this variant is returned.
+    #[error("all read batches failed")]
+    AllBatchesFailed,
 }
 
 #[repr(u16)]

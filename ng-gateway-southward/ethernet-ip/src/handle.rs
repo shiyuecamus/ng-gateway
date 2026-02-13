@@ -12,7 +12,7 @@ use super::{
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::future::try_join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use ng_gateway_sdk::{
     supervision::ReconnectHandle, AccessMode, CollectItem, CollectionGroupKey,
     CollectorConcurrencyProfile, DeviceBuffers, DriverError, DriverResult, ExecuteOutcome,
@@ -24,7 +24,7 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         Arc, OnceLock,
     },
     time::Duration as StdDuration,
@@ -40,6 +40,8 @@ use tracing::{error, warn};
 pub struct EipSessionPool {
     /// Pool of CIP clients, each behind a mutex for single-flight protection.
     clients: Vec<Arc<Mutex<EipClient>>>,
+    /// Per-member health flag. `true` = healthy (default), `false` = suspected dead.
+    healthy: Vec<AtomicBool>,
     /// Lock-free round-robin counter for connection selection.
     rr: AtomicUsize,
 }
@@ -47,24 +49,49 @@ pub struct EipSessionPool {
 impl EipSessionPool {
     /// Create a new pool from a list of connected `EipClient` instances.
     pub fn new(clients: Vec<EipClient>) -> Self {
+        let n = clients.len();
         Self {
             clients: clients
                 .into_iter()
                 .map(|c| Arc::new(Mutex::new(c)))
                 .collect(),
+            healthy: (0..n).map(|_| AtomicBool::new(true)).collect(),
             rr: AtomicUsize::new(0),
         }
     }
 
-    /// Round-robin pick a client from the pool.
+    /// Round-robin pick a healthy client from the pool.
+    ///
+    /// Skips members marked as unhealthy. Falls back to any member if all are
+    /// unhealthy (better to try than to fail immediately).
     #[inline]
     pub fn pick(&self) -> Option<Arc<Mutex<EipClient>>> {
         let n = self.clients.len();
         if n == 0 {
             return None;
         }
-        let i = self.rr.fetch_add(1, Ordering::Relaxed) % n;
+        let base = self.rr.fetch_add(1, Ordering::Relaxed);
+        // First pass: prefer healthy members.
+        for offset in 0..n {
+            let i = (base + offset) % n;
+            if self.healthy[i].load(Ordering::Relaxed) {
+                return Some(Arc::clone(&self.clients[i]));
+            }
+        }
+        // Fallback: all unhealthy, pick by round-robin anyway.
+        let i = base % n;
         Some(Arc::clone(&self.clients[i]))
+    }
+
+    /// Mark a pool member as unhealthy after a transport error.
+    #[inline]
+    pub fn mark_unhealthy(&self, client: &Arc<Mutex<EipClient>>) {
+        for (i, c) in self.clients.iter().enumerate() {
+            if Arc::ptr_eq(c, client) {
+                self.healthy[i].store(false, Ordering::Relaxed);
+                return;
+            }
+        }
     }
 
     /// Number of connections in the pool.
@@ -88,6 +115,8 @@ pub struct EthernetIpHandle {
     /// Session pool (lock-free hot reads via ArcSwap).
     pool: ArcSwapOption<EipSessionPool>,
     reconnect: OnceLock<ReconnectHandle>,
+    /// Consecutive timeout counter — reconnect only after exceeding `config.max_timeouts`.
+    consecutive_timeouts: AtomicU32,
 }
 
 impl EthernetIpHandle {
@@ -100,6 +129,7 @@ impl EthernetIpHandle {
             inner,
             pool: ArcSwapOption::from(None),
             reconnect: OnceLock::new(),
+            consecutive_timeouts: AtomicU32::new(0),
         }
     }
 
@@ -114,10 +144,10 @@ impl EthernetIpHandle {
         self.pool.store(Some(pool));
     }
 
-    /// Detach session pool (best-effort).
+    /// Detach session pool and return the previous pool for graceful shutdown.
     #[inline]
-    pub(crate) fn detach_pool(&self) {
-        self.pool.store(None);
+    pub(crate) fn detach_pool(&self) -> Option<Arc<EipSessionPool>> {
+        self.pool.swap(None)
     }
 
     #[inline]
@@ -148,6 +178,9 @@ impl SouthwardHandle for EthernetIpHandle {
 
     #[inline]
     fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
+        // per_group_key stays 1: collect_data() handles pool distribution internally
+        // via Semaphore + FuturesUnordered. Collector-level splitting would add
+        // Mutex contention without benefit.
         CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
     }
 
@@ -188,103 +221,130 @@ impl SouthwardHandle for EthernetIpHandle {
         }
 
         let pool = self.load_pool()?;
-        const BATCH_SIZE: usize = 50;
+        let batch_size = self.inner.config.batch_size.max(1) as usize;
         let timeout_ms = self.inner.config.timeout;
 
-        // Execute read batches concurrently across the session pool.
-        //
-        // Each batch is assigned to a pool member via round-robin and executed
-        // under its mutex (single-flight per CIP session). Concurrency equals
-        // `min(num_batches, pool_size)`, reducing end-to-end latency from
-        // `N_batches * RTT` to roughly `ceil(N_batches / pool_size) * RTT`.
-        let batch_parallelism = pool.pool_size().clamp(1, 8);
-        let batches: Vec<&[Arc<EthernetIpPoint>]> = points.chunks(BATCH_SIZE).collect();
+        // Execute read batches concurrently across the session pool using
+        // Semaphore + FuturesUnordered. Unlike wave-based execution, completed
+        // batches immediately free a concurrency slot for the next batch,
+        // eliminating sync-point stalls.
+        let concurrency = pool.pool_size().clamp(1, 8);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let batches: Vec<&[Arc<EthernetIpPoint>]> = points.chunks(batch_size).collect();
+
+        let mut futs = FuturesUnordered::new();
+        for (idx, chunk) in batches.iter().enumerate() {
+            let permit = semaphore.clone().acquire_owned().await.map_err(|_| {
+                DriverError::ExecutionError("EIP concurrency semaphore closed".into())
+            })?;
+            let client_mutex = pool.pick();
+            let chunk = *chunk;
+            futs.push(async move {
+                let _permit = permit; // held for the duration of this batch
+                let client_mutex = client_mutex.ok_or(DriverError::ServiceUnavailable)?;
+                let tag_names: Vec<&str> = chunk.iter().map(|p| p.tag_name.as_str()).collect();
+                let op_res = timeout(StdDuration::from_millis(timeout_ms), async {
+                    let mut client = client_mutex.lock().await;
+                    client.read_tags_batch(&tag_names).await
+                })
+                .await;
+                Ok::<_, DriverError>((idx, client_mutex, op_res))
+            });
+        }
 
         let mut overall_success = true;
-        let mut batch_idx = 0usize;
-
-        while batch_idx < batches.len() {
-            let wave_end = (batch_idx + batch_parallelism).min(batches.len());
-
-            let futs = (batch_idx..wave_end).map(|idx| {
-                let chunk = batches[idx];
-                let client_mutex = pool.pick();
-                async move {
-                    let client_mutex = client_mutex.ok_or(DriverError::ServiceUnavailable)?;
-                    let tag_names: Vec<&str> = chunk.iter().map(|p| p.tag_name.as_str()).collect();
-                    let n = tag_names.len();
-                    let op_res = timeout(StdDuration::from_millis(timeout_ms), async {
-                        let mut client = client_mutex.lock().await;
-                        let res = client.read_tags_batch(&tag_names).await;
-                        // Erase the opaque error type to help the compiler infer nested Result.
-                        res.map(|v| v.into_iter().take(n).collect::<Vec<_>>())
-                    })
-                    .await;
-                    Ok::<_, DriverError>((idx, op_res))
+        while let Some(r) = futs.next().await {
+            let (idx, client_ref, op_res) = match r {
+                Ok(v) => v,
+                Err(_) => {
+                    overall_success = false;
+                    continue;
                 }
-            });
+            };
+            let chunk = batches[idx];
+            match op_res {
+                Ok(Ok(results)) => {
+                    // Success — reset consecutive timeout counter.
+                    self.consecutive_timeouts.store(0, Ordering::Relaxed);
+                    // Match results by tag_name for safety, not by position index.
+                    let result_map: HashMap<&str, _> = results
+                        .iter()
+                        .map(|(name, res)| (name.as_str(), res))
+                        .collect();
 
-            let wave_results = try_join_all(futs).await?;
+                    if result_map.len() != chunk.len() {
+                        warn!(
+                            expected = chunk.len(),
+                            actual = result_map.len(),
+                            "read_tags_batch returned mismatched result count"
+                        );
+                    }
 
-            for (idx, op_res) in wave_results {
-                let chunk = batches[idx];
-                match op_res {
-                    Ok(Ok(results)) => {
-                        for (i, (_tag_name, res)) in results.into_iter().enumerate() {
-                            let point = &chunk[i];
-                            let Some(buf) = buffers.get_mut(&point.device_id) else {
-                                continue;
-                            };
-                            match res {
-                                Ok(plc_value) => {
-                                    match EthernetIpCodec::to_ng_value(
-                                        plc_value,
-                                        point.logical_data_type(),
-                                        &point.transform,
-                                    ) {
-                                        Ok(val) => {
-                                            buf.push(
-                                                point.r#type,
-                                                PointValue {
-                                                    point_id: point.id,
-                                                    point_key: Arc::from(point.key.as_str()),
-                                                    value: val,
-                                                },
-                                            );
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "Codec error for point {}: {}",
-                                                point.tag_name, e
-                                            );
-                                        }
+                    for point in chunk.iter() {
+                        let Some(res) = result_map.get(point.tag_name.as_str()) else {
+                            warn!(tag = %point.tag_name, "Tag missing from batch read response");
+                            continue;
+                        };
+                        let Some(buf) = buffers.get_mut(&point.device_id) else {
+                            continue;
+                        };
+                        match res {
+                            Ok(plc_value) => {
+                                match EthernetIpCodec::to_ng_value(
+                                    plc_value.clone(),
+                                    point.logical_data_type(),
+                                    &point.transform,
+                                ) {
+                                    Ok(val) => {
+                                        buf.push(
+                                            point.r#type,
+                                            PointValue {
+                                                point_id: point.id,
+                                                point_key: Arc::from(point.key.as_str()),
+                                                value: val,
+                                            },
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!("Codec error for point {}: {}", point.tag_name, e);
                                     }
                                 }
-                                Err(e) => {
-                                    warn!("Error reading point {}: {}", point.tag_name, e);
-                                }
+                            }
+                            Err(e) => {
+                                warn!("Error reading point {}: {}", point.tag_name, e);
                             }
                         }
                     }
-                    Ok(Err(e)) => {
-                        warn!("Batch read failed: {}", e);
-                        overall_success = false;
-                        self.try_request_reconnect("ethernetip batch read failed");
-                    }
-                    Err(_) => {
-                        warn!("Batch read timeout");
-                        overall_success = false;
-                        self.try_request_reconnect("ethernetip batch read timeout");
+                }
+                Ok(Err(e)) => {
+                    // Transport error — always reconnect immediately.
+                    warn!("Batch read failed: {}", e);
+                    overall_success = false;
+                    pool.mark_unhealthy(&client_ref);
+                    self.consecutive_timeouts.store(0, Ordering::Relaxed);
+                    self.try_request_reconnect("ethernetip batch read failed");
+                }
+                Err(_) => {
+                    // Timeout — use consecutive counter.
+                    overall_success = false;
+                    pool.mark_unhealthy(&client_ref);
+                    let count = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
+                    let threshold = self.inner.config.max_timeouts.max(1);
+                    if count >= threshold {
+                        warn!(
+                            consecutive_timeouts = count,
+                            threshold, "Batch read timeout threshold reached, request reconnect"
+                        );
+                        self.consecutive_timeouts.store(0, Ordering::Relaxed);
+                        self.try_request_reconnect("ethernetip timeout threshold reached");
+                    } else {
+                        warn!(
+                            consecutive_timeouts = count,
+                            threshold, "Batch read timeout (below reconnect threshold)"
+                        );
                     }
                 }
             }
-
-            // Stop issuing further waves on fatal errors to avoid hammering a broken link.
-            if !overall_success {
-                break;
-            }
-
-            batch_idx = wave_end;
         }
 
         let any_data = buffers.values().any(|b| !b.is_empty());
@@ -328,40 +388,42 @@ impl SouthwardHandle for EthernetIpHandle {
 
         let pool = self.load_pool()?;
         let client_mutex = pool.pick().ok_or(DriverError::ServiceUnavailable)?;
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(parameters.len());
         let mut overall_success = true;
 
-        for (param, value) in parameters {
+        // Pre-encode all values before acquiring the lock to minimise hold time.
+        let mut write_items: Vec<(&str, _)> = Vec::with_capacity(parameters.len());
+        for (param, value) in parameters.iter() {
             let eth_param = param.downcast_ref::<EthernetIpParameter>().ok_or(
                 DriverError::ConfigurationError("Invalid Parameter Type".into()),
             )?;
-
             if eth_param.tag_name.is_empty() {
                 warn!("Parameter {} has no tag_name, skipping", eth_param.name);
                 continue;
             }
+            let plc_value = EthernetIpCodec::to_plc_value(value, eth_param.wire_data_type())?;
+            write_items.push((&eth_param.tag_name, plc_value));
+        }
 
-            let plc_value = EthernetIpCodec::to_plc_value(&value, eth_param.wire_data_type())?;
-            let op_res = timeout(StdDuration::from_millis(self.inner.config.timeout), async {
-                let mut client = client_mutex.lock().await;
-                client.write_tag(&eth_param.tag_name, plc_value).await
-            })
-            .await;
-
-            match op_res {
-                Ok(Ok(_)) => {
-                    results.push(format!("Wrote {:?} to {}", value, eth_param.tag_name));
-                }
-                Ok(Err(e)) => {
-                    overall_success = false;
-                    error!("Write tag {} failed: {}", eth_param.tag_name, e);
-                }
-                Err(_) => {
-                    overall_success = false;
-                    self.try_request_reconnect("ethernetip write timeout");
-                    break;
+        // Acquire the client lock once for the entire batch of writes,
+        // avoiding N acquire/release cycles that would contend with concurrent reads.
+        let op_res = timeout(StdDuration::from_millis(self.inner.config.timeout), async {
+            let mut client = client_mutex.lock().await;
+            for (tag_name, plc_value) in &write_items {
+                match client.write_tag(tag_name, plc_value.clone()).await {
+                    Ok(_) => results.push(format!("Wrote to {tag_name}")),
+                    Err(e) => {
+                        error!("Write tag {tag_name} failed: {e}");
+                        overall_success = false;
+                    }
                 }
             }
+        })
+        .await;
+
+        if op_res.is_err() {
+            overall_success = false;
+            self.try_request_reconnect("ethernetip write timeout");
         }
 
         if !overall_success {

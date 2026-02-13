@@ -15,7 +15,7 @@ use super::{
 };
 use arc_swap::ArcSwapOption;
 use bytes::{Bytes, BytesMut};
-use futures::{future::try_join_all, pin_mut, Stream};
+use futures::{future::join_all, pin_mut, Stream};
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use ng_gateway_sdk::{WireDecode, WireEncode};
 use std::{
@@ -33,7 +33,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     select,
-    sync::{broadcast, mpsc, oneshot, watch, Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore},
     time::sleep,
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
@@ -96,8 +96,8 @@ pub struct Session {
     timeouts_total: Arc<AtomicU64>,
     /// Monotonic PDU reference generator with wrap-around in [1..=65535]
     pdu_ref_counter: AtomicU16,
-    /// Negotiated planner configuration after handshake
-    planner_config: Arc<Mutex<Option<PlannerConfig>>>,
+    /// Negotiated planner configuration after handshake (lock-free reads).
+    planner_config: Arc<ArcSwapOption<PlannerConfig>>,
 }
 
 /// Session event loop facade providing a stream of `SessionPollResult` and helpers
@@ -168,7 +168,7 @@ impl Session {
         let request_semaphore = Arc::new(ArcSwapOption::from(None));
         let inflight_gauge = Arc::new(AtomicUsize::new(0));
         let timeouts_total = Arc::new(AtomicU64::new(0));
-        let planner_config = Arc::new(Mutex::new(None));
+        let planner_config = Arc::new(ArcSwapOption::from(None));
 
         Arc::new(Session {
             config,
@@ -329,11 +329,13 @@ impl Session {
             return Ok(Vec::new());
         }
 
-        // Use negotiated planner config; fall back to default PDU=960 if not yet set
-        let planner = {
-            let guard = self.planner_config.lock().await;
-            guard.unwrap_or(PlannerConfig::new(960))
-        };
+        // Use negotiated planner config; fall back to default PDU=960 if not yet set.
+        // Lock-free load via ArcSwapOption (set once after handshake, never mutated).
+        let planner = self
+            .planner_config
+            .load_full()
+            .map(|arc| *arc)
+            .unwrap_or(PlannerConfig::new(960));
         let plan = S7Planner::plan_read(&planner, specs);
 
         // Execute read batches concurrently using the session's pdu_ref multiplexing.
@@ -341,6 +343,10 @@ impl Session {
         // The IO event loop routes responses by pdu_ref, allowing multiple in-flight
         // ReadVar PDUs bounded by the negotiated AMQ. This reduces end-to-end latency
         // from `N * RTT` to approximately `ceil(N / AMQ) * RTT`.
+        //
+        // We use `join_all` (not `try_join_all`) to collect partial results: successful
+        // batches produce data while failed batches yield an empty placeholder. The
+        // planner's merge phase handles per-item return codes gracefully.
         let read_timeout = self.config.read_timeout;
         let futs = plan.batches.iter().map(|batch| {
             let pdu_ref = self.next_pdu_ref();
@@ -357,7 +363,25 @@ impl Session {
                 }
             }
         });
-        let responses: Vec<Bytes> = try_join_all(futs).await?;
+        let results = join_all(futs).await;
+
+        let mut all_failed = true;
+        let mut responses = Vec::with_capacity(results.len());
+        for (batch_idx, r) in results.into_iter().enumerate() {
+            match r {
+                Ok(bytes) => {
+                    all_failed = false;
+                    responses.push(bytes);
+                }
+                Err(e) => {
+                    tracing::warn!(batch_idx, error = %e, "S7 read_var batch failed; yielding empty payload for merge");
+                    responses.push(Bytes::new());
+                }
+            }
+        }
+        if all_failed && !plan.batches.is_empty() {
+            return Err(Error::AllBatchesFailed);
+        }
 
         Ok(plan.merge(&responses))
     }
@@ -368,10 +392,11 @@ impl Session {
             return Ok(Vec::new());
         }
 
-        let planner = {
-            let guard = self.planner_config.lock().await;
-            guard.unwrap_or(PlannerConfig::new(960))
-        };
+        let planner = self
+            .planner_config
+            .load_full()
+            .map(|arc| *arc)
+            .unwrap_or(PlannerConfig::new(960));
         let plan = S7Planner::plan_write(&planner, items);
 
         let mut acks: Vec<S7Pdu> = Vec::with_capacity(plan.batches.len());
@@ -490,15 +515,18 @@ impl Session {
             return Ok(Vec::new());
         }
 
-        // Use negotiated planner config; fall back to default PDU=960 if not yet set
-        let planner_cfg = {
-            let guard = self.planner_config.lock().await;
-            guard.unwrap_or(PlannerConfig::new(960))
-        };
+        // Use negotiated planner config; fall back to default PDU=960 if not yet set.
+        let planner_cfg = self
+            .planner_config
+            .load_full()
+            .map(|arc| *arc)
+            .unwrap_or(PlannerConfig::new(960));
         let plan = S7Planner::plan_read(&planner_cfg, specs);
 
         // Execute read batches concurrently, leveraging the session's pdu_ref multiplexing
         // and AMQ-bounded concurrency for minimal end-to-end latency.
+        //
+        // Uses `join_all` to preserve partial results from successful batches.
         let read_timeout = self.config.read_timeout;
         let futs = plan.batches.iter().map(|batch| {
             let pdu_ref = self.next_pdu_ref();
@@ -515,7 +543,25 @@ impl Session {
                 }
             }
         });
-        let responses: Vec<Bytes> = try_join_all(futs).await?;
+        let results = join_all(futs).await;
+
+        let mut all_failed = true;
+        let mut responses = Vec::with_capacity(results.len());
+        for (batch_idx, r) in results.into_iter().enumerate() {
+            match r {
+                Ok(bytes) => {
+                    all_failed = false;
+                    responses.push(bytes);
+                }
+                Err(e) => {
+                    tracing::warn!(batch_idx, error = %e, "S7 read_var_typed batch failed; yielding empty payload for merge");
+                    responses.push(Bytes::new());
+                }
+            }
+        }
+        if all_failed && !plan.batches.is_empty() {
+            return Err(Error::AllBatchesFailed);
+        }
 
         plan.merge_typed(&responses)
     }
@@ -693,17 +739,16 @@ async fn run_connection_with_stream(
 
     // Handshake: COTP CR/CC then S7 SetupCommunication
     let mut framed = Framed::new(stream, Codec);
-    if handshake::iso_connect(&mut framed, Arc::clone(&config))
-        .await
-        .is_err()
-    {
+    if let Err(e) = handshake::iso_connect(&mut framed, Arc::clone(&config)).await {
+        tracing::warn!(error = %e, "S7 COTP handshake (ISO connect) failed");
         let _ = events_tx.send(SessionEvent::TransportError);
         publish_lifecycle(&events_tx, &lifecycle_tx, SessionLifecycleState::Failed);
         return;
     }
     let negotiated = match handshake::negotiation(&mut framed, Arc::clone(&config), 0).await {
         Ok(v) => v,
-        Err(_e) => {
+        Err(e) => {
+            tracing::warn!(error = %e, "S7 communication setup negotiation failed");
             let _ = events_tx.send(SessionEvent::TransportError);
             publish_lifecycle(&events_tx, &lifecycle_tx, SessionLifecycleState::Failed);
             return;
@@ -711,10 +756,7 @@ async fn run_connection_with_stream(
     };
 
     let amq_callee = negotiated.amq_callee as usize;
-    {
-        let mut guard = planner_config.lock().await;
-        *guard = Some(PlannerConfig::new(negotiated.pdu_len));
-    }
+    planner_config.store(Some(Arc::new(PlannerConfig::new(negotiated.pdu_len))));
 
     // Initialize concurrency gate based on negotiated limits
     let effective_max = min(amq_callee, config.max_concurrent_requests);

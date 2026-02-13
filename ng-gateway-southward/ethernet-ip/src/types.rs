@@ -43,6 +43,26 @@ pub struct EthernetIpChannelConfig {
     /// Default: 1 (serial, backward compatible).
     #[serde(default = "default_pool_size")]
     pub pool_size: u8,
+    /// Maximum number of tags per single CIP batch read request.
+    ///
+    /// Larger batches reduce round-trips but increase per-request payload size.
+    /// Default: 50.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: u16,
+    /// Number of consecutive operation timeouts before requesting a reconnect.
+    ///
+    /// Prevents reconnect churn from transient PLC slowness. Transport errors
+    /// always trigger immediate reconnect regardless of this threshold.
+    #[serde(default = "default_max_timeouts")]
+    pub max_timeouts: u32,
+}
+
+fn default_batch_size() -> u16 {
+    50
+}
+
+fn default_max_timeouts() -> u32 {
+    3
 }
 
 fn default_pool_size() -> u8 {

@@ -20,7 +20,7 @@ use super::{
 };
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
-use futures::future::try_join_all;
+// `join_all` used for partial-success semantics in pool-based concurrent reads.
 use ng_gateway_sdk::{
     downcast_parameters, AccessMode, CollectItem, CollectionGroupKey, CollectorConcurrencyProfile,
     DataType, DeviceBuffers, DriverError, DriverResult, ExecuteOutcome, ExecuteResult, NGValue,
@@ -235,6 +235,9 @@ impl SouthwardHandle for McHandle {
 
     #[inline]
     fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
+        // per_group_key stays 1: all devices in a channel form a single group,
+        // and collect_data() handles pool-level distribution internally. Splitting
+        // at the Collector level would break planner coalescing of adjacent addresses.
         CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
     }
 
@@ -378,17 +381,34 @@ impl SouthwardHandle for McHandle {
                 .await
                 .map_err(|e| DriverError::ExecutionError(e.to_string()))?
         } else {
-            // Distribute specs across pool members using round-robin by index.
+            // Distribute specs across pool members grouped by device_code.
+            //
+            // Sort by the same key the planner uses for coalescing (device_code, head)
+            // so that contiguous addresses stay in the same session. This preserves
+            // the planner's ability to merge adjacent reads, preventing request count
+            // inflation that a naive round-robin would cause.
+            specs.sort_by_key(|s| (s.device_code, s.addr.head));
+
             let mut groups: Vec<Vec<TypedPointReadSpec>> =
                 (0..pool_size).map(|_| Vec::new()).collect();
-            for (i, spec) in specs.into_iter().enumerate() {
-                groups[i % pool_size].push(spec);
+            let mut session_idx = 0usize;
+            let mut prev_device_code: Option<u16> = None;
+
+            for spec in specs.into_iter() {
+                if prev_device_code != Some(spec.device_code) {
+                    prev_device_code = Some(spec.device_code);
+                    session_idx = (session_idx + 1) % pool_size;
+                }
+                groups[session_idx].push(spec);
             }
 
             let futs = groups.into_iter().enumerate().map(|(idx, group_specs)| {
                 let session = pool.pick_by_index(idx);
                 let cfg = planner_cfg;
                 async move {
+                    if group_specs.is_empty() {
+                        return Ok(Vec::new());
+                    }
                     let session = session.ok_or(DriverError::ServiceUnavailable)?;
                     McTypedApi::read_points_typed(&session, &cfg, group_specs)
                         .await
@@ -396,9 +416,29 @@ impl SouthwardHandle for McHandle {
                 }
             });
 
-            let group_results = try_join_all(futs).await?;
-            // Flatten all group results into a single list.
-            group_results.into_iter().flatten().collect()
+            let group_results = futures::future::join_all(futs).await;
+            // Flatten successful group results; log failures but preserve partial data.
+            let mut merged = Vec::new();
+            let mut any_success = false;
+            for (idx, r) in group_results.into_iter().enumerate() {
+                match r {
+                    Ok(items) => {
+                        if !items.is_empty() {
+                            any_success = true;
+                        }
+                        merged.extend(items);
+                    }
+                    Err(e) => {
+                        tracing::warn!(pool_member = idx, error = %e, "MC pool member read failed; partial results preserved");
+                    }
+                }
+            }
+            if !any_success && pool_size > 0 {
+                return Err(DriverError::ExecutionError(
+                    "All MC pool members failed".to_string(),
+                ));
+            }
+            merged
         };
 
         match &read_results.is_empty() {

@@ -83,6 +83,7 @@ pub fn build_modbus_channel_runtime(
             max_batch_bits: 2000,
             max_gap_bits: 500,
             tcp_pool_size: args.tcp_pool_size,
+            max_timeouts: 3,
         },
     });
 

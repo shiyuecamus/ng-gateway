@@ -84,63 +84,46 @@ impl Session for McSession {
     }
 
     async fn run(self, ctx: SessionContext) -> Result<RunOutcome, Self::Error> {
-        // Merge lifecycle watchers from all sessions: if ANY session goes
-        // Closed/Failed, we request reconnect for the entire pool.
+        // Monitor all pool member lifecycles concurrently.
+        //
+        // Each watcher waits for its session to reach Closed or Failed via
+        // `wait_for`, which correctly calls `borrow_and_update()` internally,
+        // avoiding the state-tracking bugs of manual `has_changed` + `select_all`.
         let mut lifecycle_rxs: Vec<watch::Receiver<SessionLifecycleState>> =
             self.proto_sessions.iter().map(|s| s.lifecycle()).collect();
 
-        loop {
-            // Build a future that resolves when ANY lifecycle watcher fires.
-            let any_changed = async {
-                // Wait for the first watcher to change.
-                for rx in lifecycle_rxs.iter_mut() {
-                    // Use tokio::select! across all watchers.
-                    // Since we can't dynamically select! on a Vec, we use a helper.
-                    if rx.has_changed().unwrap_or(true) {
-                        let state = *rx.borrow_and_update();
-                        if matches!(
-                            state,
-                            SessionLifecycleState::Closed | SessionLifecycleState::Failed
-                        ) {
-                            return true;
-                        }
-                    }
-                }
-                // If no immediate change, wait for any watcher to fire.
-                let _ = futures::future::select_all(
-                    lifecycle_rxs.iter_mut().map(|rx| Box::pin(rx.changed())),
-                )
-                .await;
-                // Re-check states after a change.
-                for rx in lifecycle_rxs.iter() {
-                    let state = *rx.borrow();
-                    if matches!(
-                        state,
+        // Build a future per watcher that resolves when the session reaches
+        // Closed or Failed. `select_all` resolves on the first one, then we
+        // trigger a full pool reconnect.
+        let futs = lifecycle_rxs.iter_mut().map(|rx| {
+            Box::pin(async move {
+                rx.wait_for(|s| {
+                    matches!(
+                        s,
                         SessionLifecycleState::Closed | SessionLifecycleState::Failed
-                    ) {
-                        return true;
-                    }
-                }
-                false
-            };
+                    )
+                })
+                .await
+                .is_ok()
+            })
+        });
 
-            tokio::select! {
-                _ = ctx.cancel.cancelled() => {
-                    if let Some(pool) = self.handle.detach_pool() {
-                        pool.shutdown_all().await;
-                    }
-                    return Ok(RunOutcome::Disconnected);
+        tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                if let Some(pool) = self.handle.detach_pool() {
+                    pool.shutdown_all().await;
                 }
-                failed = any_changed => {
-                    if failed {
-                        if let Some(pool) = self.handle.detach_pool() {
-                            pool.shutdown_all().await;
-                        }
-                        return Ok(RunOutcome::ReconnectRequested(Arc::<str>::from(
-                            "mc protocol session ended",
-                        )));
-                    }
+                return Ok(RunOutcome::Disconnected);
+            }
+            (_failed, _idx, _remaining) = futures::future::select_all(futs) => {
+                // Any session ended (Closed/Failed) or the watcher channel closed.
+                // Either way, tear down the entire pool and request reconnect.
+                if let Some(pool) = self.handle.detach_pool() {
+                    pool.shutdown_all().await;
                 }
+                return Ok(RunOutcome::ReconnectRequested(Arc::<str>::from(
+                    "mc protocol session ended",
+                )));
             }
         }
     }

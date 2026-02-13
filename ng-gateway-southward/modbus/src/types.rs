@@ -54,6 +54,13 @@ pub struct ModbusChannelConfig {
     ///   the required single-flight semantics on a serial bus.
     #[serde(default = "ModbusChannelConfig::default_tcp_pool_size")]
     pub tcp_pool_size: u16,
+    /// Number of consecutive operation timeouts before requesting a reconnect.
+    ///
+    /// Prevents reconnect churn from transient PLC slowness. Transport errors
+    /// (broken pipe, connection reset) always trigger immediate reconnect
+    /// regardless of this threshold.
+    #[serde(default = "ModbusChannelConfig::default_max_timeouts")]
+    pub max_timeouts: u32,
 }
 
 impl ModbusChannelConfig {
@@ -80,6 +87,10 @@ impl ModbusChannelConfig {
     /// Default TCP pool size (best practice: 1).
     fn default_tcp_pool_size() -> u16 {
         1
+    }
+
+    fn default_max_timeouts() -> u32 {
+        3
     }
 }
 

@@ -20,6 +20,7 @@ async-opcua = { git = "https://github.com/FreeOpcUa/async-opcua", rev = "696044c
   "client",
 ] }
 arc-swap = { version = "1.7" }
+dashmap = { version = "6.1" }
 backoff = { version = "0.4" }
 futures = { version = "0.3" }
 tokio-util = { version = "0.7", features = ["rt", "io"] }

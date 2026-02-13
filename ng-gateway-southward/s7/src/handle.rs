@@ -118,11 +118,24 @@ impl SouthwardHandle for S7Handle {
 
         let session = self.load_session()?;
 
-        // Batch read across all points once.
+        // Batch read across all points with an outer deadline that caps total
+        // collect_data duration. Without this, N batches each consuming nearly
+        // `read_timeout` could exceed the collection interval by N×.
+        // Outer deadline = 3× read_timeout (min 5 s) to cap the total duration when
+        // AMQ-bounded waves cause `ceil(N / AMQ) × read_timeout` latency.
+        let collect_timeout = tokio::time::Duration::from_millis(
+            self.inner
+                .connection_policy
+                .read_timeout_ms
+                .saturating_mul(3)
+                .max(5000),
+        );
         let addresses = s7_points.iter().map(|p| &p.address).collect::<Vec<_>>();
-        let results = match session.read_addresses_typed(&addresses).await {
-            Ok(r) => r,
-            Err(e) => return Err(DriverError::ExecutionError(e.to_string())),
+        let results = match timeout(collect_timeout, session.read_addresses_typed(&addresses)).await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(DriverError::ExecutionError(e.to_string())),
+            Err(_elapsed) => return Err(DriverError::Timeout(collect_timeout)),
         };
 
         for (p, it) in s7_points.iter().zip(results.into_iter()) {

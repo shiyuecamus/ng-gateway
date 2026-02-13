@@ -14,7 +14,7 @@ use super::{
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::future::try_join_all;
+use futures_util::future::join_all;
 use ng_gateway_sdk::{
     downcast_parameters, supervision::ReconnectHandle, AccessMode, CollectItem, CollectionGroupKey,
     CollectorConcurrencyProfile, DataType, DeviceBuffers, DriverError, DriverResult,
@@ -27,7 +27,7 @@ use std::{
     collections::HashMap,
     future::Future,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc, OnceLock,
     },
     time::Duration as StdDuration,
@@ -84,6 +84,9 @@ pub struct ModbusHandle {
     inner: Arc<ModbusChannel>,
     pool: ArcSwapOption<SessionPool>,
     reconnect: OnceLock<ReconnectHandle>,
+    /// Consecutive timeout counter. Reconnect is requested only after
+    /// exceeding `config.max_timeouts`. Transport errors bypass the counter.
+    consecutive_timeouts: AtomicU32,
 }
 
 impl ModbusHandle {
@@ -96,6 +99,7 @@ impl ModbusHandle {
             inner,
             pool: ArcSwapOption::from(None),
             reconnect: OnceLock::new(),
+            consecutive_timeouts: AtomicU32::new(0),
         }
     }
 
@@ -165,18 +169,42 @@ impl ModbusHandle {
     {
         let duration = StdDuration::from_millis(op_timeout_ms.max(1));
         match timeout(duration, op(Arc::clone(&ctx))).await {
-            Ok(Ok(inner)) => inner.map_err(|code| {
-                DriverError::ExecutionError(format!("Modbus exception on {op_label}: {code:?}"))
-            }),
+            Ok(Ok(inner)) => {
+                // Success — reset consecutive timeout counter.
+                self.consecutive_timeouts.store(0, Ordering::Relaxed);
+                inner.map_err(|code| {
+                    DriverError::ExecutionError(format!("Modbus exception on {op_label}: {code:?}"))
+                })
+            }
             Ok(Err(e)) => {
+                // Transport error — always reconnect immediately (broken pipe, etc.).
                 let msg = e.to_string();
                 warn!(op = op_label, err = %msg, "Transport error, request reconnect");
+                self.consecutive_timeouts.store(0, Ordering::Relaxed);
                 self.try_request_reconnect("modbus transport error");
                 Err(DriverError::ExecutionError(msg))
             }
             Err(_) => {
-                warn!(op = op_label, "Operation timeout, request reconnect");
-                self.try_request_reconnect("modbus timeout");
+                // Timeout — use consecutive counter to avoid churn from transient slowness.
+                let count = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
+                let threshold = self.inner.config.max_timeouts.max(1);
+                if count >= threshold {
+                    warn!(
+                        op = op_label,
+                        consecutive_timeouts = count,
+                        threshold,
+                        "Timeout threshold reached, request reconnect"
+                    );
+                    self.consecutive_timeouts.store(0, Ordering::Relaxed);
+                    self.try_request_reconnect("modbus timeout threshold reached");
+                } else {
+                    warn!(
+                        op = op_label,
+                        consecutive_timeouts = count,
+                        threshold,
+                        "Operation timeout (below reconnect threshold)"
+                    );
+                }
                 Err(DriverError::Timeout(tokio::time::Duration::from_millis(
                     op_timeout_ms.max(1),
                 )))
@@ -301,9 +329,26 @@ impl ModbusHandle {
 
                 Ok::<(usize, NorthwardReadResult), DriverError>((idx, op_res))
             });
-            let chunk = try_join_all(futs).await?;
-            results.extend(chunk);
+            // Use `join_all` (not `try_join_all`) to preserve partial results.
+            // Failed batches are logged and skipped; their points will have no
+            // value in this cycle. Only when ALL batches across ALL waves fail
+            // do we propagate an error.
+            let chunk = join_all(futs).await;
+            for r in chunk {
+                match r {
+                    Ok(item) => results.push(item),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Modbus read batch failed; skipping batch");
+                    }
+                }
+            }
             i = end;
+        }
+
+        if results.is_empty() && !batches.is_empty() {
+            return Err(DriverError::ExecutionError(
+                "All Modbus read batches failed".to_string(),
+            ));
         }
 
         for (idx, op_res) in results {

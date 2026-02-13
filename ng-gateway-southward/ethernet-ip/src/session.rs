@@ -48,7 +48,8 @@ impl Session for EthernetIpSession {
 
     async fn run(self, ctx: SessionContext) -> Result<RunOutcome, Self::Error> {
         ctx.cancel.cancelled().await;
-        self.handle.detach_pool();
+        // Detach pool; the returned Arc is dropped here, triggering Drop on EipClient(s).
+        let _old_pool = self.handle.detach_pool();
         Ok(RunOutcome::Disconnected)
     }
 }

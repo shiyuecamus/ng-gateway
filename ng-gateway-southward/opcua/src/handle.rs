@@ -20,12 +20,13 @@ use super::{
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use chrono::Utc;
+use dashmap::DashMap;
 use ng_gateway_sdk::{
     downcast_parameters, supervision::ReconnectHandle, AccessMode, CollectItem, CollectionGroupKey,
     CollectionType, DeviceBuffers, DriverError, DriverResult, ExecuteOutcome, ExecuteResult,
     NGValue, NorthwardData, NorthwardPublisher, PointValue, RuntimeAction, RuntimeDelta,
-    RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardHandle, Status, WriteOutcome,
-    WriteResult,
+    RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardHandle, SouthwardInitContext, Status,
+    WriteOutcome, WriteResult,
 };
 use opcua::{
     client::Session,
@@ -40,7 +41,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, OnceLock, RwLock,
+        Arc, OnceLock,
     },
 };
 use tokio::{sync::Mutex, task::JoinHandle, time::Duration as TokioDuration};
@@ -58,8 +59,17 @@ pub struct OpcUaHandle {
 
     /// Effective max nodes per `Session::read()` call (0 means unknown).
     read_chunk_size: AtomicU64,
+    /// Consecutive read timeout counter. Reconnect is requested only after
+    /// exceeding [`Self::RECONNECT_TIMEOUT_THRESHOLD`] to avoid churn when
+    /// the server is briefly slow.
+    consecutive_timeouts: AtomicU64,
     /// Cached NodeIds parsed from string to avoid repeated parsing costs on hot path.
-    node_id_cache: RwLock<HashMap<String, NodeId>>,
+    ///
+    /// Uses `DashMap` for lock-free concurrent reads. Writes (cache miss → insert)
+    /// are rare after the first collection cycle and confined to the shard level.
+    /// Deadlock-safe: `parse_node_id_cached` always drops the read guard before
+    /// calling `entry()`, so no nested guard holding is possible.
+    node_id_cache: DashMap<String, NodeId>,
 
     /// Subscription mode config.
     subscribe_enabled: bool,
@@ -84,7 +94,7 @@ impl OpcUaHandle {
     pub fn new(
         inner: Arc<OpcUaChannel>,
         publisher: Arc<dyn NorthwardPublisher>,
-        ctx: &ng_gateway_sdk::SouthwardInitContext,
+        ctx: &SouthwardInitContext,
     ) -> Self {
         let subscribe_enabled = inner.collection_type == CollectionType::Report
             && inner.config.read_mode == OpcUaReadMode::Subscribe;
@@ -99,7 +109,8 @@ impl OpcUaHandle {
             session: ArcSwapOption::from(None),
             reconnect: std::sync::OnceLock::new(),
             read_chunk_size: AtomicU64::new(0),
-            node_id_cache: RwLock::new(HashMap::new()),
+            consecutive_timeouts: AtomicU64::new(0),
+            node_id_cache: DashMap::new(),
             subscribe_enabled,
             subscribe_batch_size: ctx
                 .runtime_channel
@@ -136,6 +147,37 @@ impl OpcUaHandle {
         if let Some(h) = self.reconnect.get() {
             let _ = h.try_request_reconnect(reason);
         }
+    }
+
+    /// Record a read timeout and request reconnect only after exceeding the threshold.
+    ///
+    /// Returns `true` if a reconnect was triggered.
+    #[inline]
+    fn record_timeout_and_maybe_reconnect(&self) -> bool {
+        let count = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
+        let threshold = self.inner.config.max_timeouts.max(1);
+        if count >= threshold {
+            tracing::warn!(
+                consecutive_timeouts = count,
+                threshold,
+                "OPC UA consecutive read timeouts exceeded threshold; requesting reconnect"
+            );
+            self.try_request_reconnect("opcua consecutive read timeouts");
+            true
+        } else {
+            tracing::debug!(
+                consecutive_timeouts = count,
+                threshold,
+                "OPC UA read timeout (below reconnect threshold)"
+            );
+            false
+        }
+    }
+
+    /// Reset consecutive timeout counter (called on any successful read).
+    #[inline]
+    fn reset_timeout_counter(&self) {
+        self.consecutive_timeouts.store(0, Ordering::Relaxed);
     }
 
     /// Best-effort update read chunk size from server capacity probe.
@@ -239,21 +281,29 @@ impl OpcUaHandle {
     }
 
     /// Parse NodeId from string with an internal cache.
-    /// Returns None if parsing fails.
+    ///
+    /// Fast path (cache hit): shard-level read lock only, returns clone.
+    /// Slow path (cache miss): parse string, insert via `entry()` API.
+    ///
+    /// # Deadlock safety
+    /// The `get()` guard is always dropped before `entry()` is called,
+    /// so no nested DashMap guard holding can occur.
     #[inline]
     fn parse_node_id_cached(&self, node_id_str: &str) -> Option<NodeId> {
-        if let Ok(guard) = self.node_id_cache.read() {
-            if let Some(id) = guard.get(node_id_str) {
-                return Some(id.clone());
-            }
+        // Fast path: shard-level read lock, released immediately on return.
+        if let Some(entry) = self.node_id_cache.get(node_id_str) {
+            return Some(entry.value().clone());
         }
-        if let Ok(parsed) = NodeId::from_str(node_id_str) {
-            if let Ok(mut w) = self.node_id_cache.write() {
-                w.entry(node_id_str.to_string()).or_insert(parsed.clone());
-            }
-            return Some(parsed);
-        }
-        None
+        // Guard from `get()` is dropped here — safe to call `entry()` below.
+
+        // Slow path: parse and insert (rare after first collection cycle).
+        let parsed = NodeId::from_str(node_id_str).ok()?;
+        self.node_id_cache
+            .entry(node_id_str.to_string())
+            .or_insert(parsed)
+            .value()
+            .clone()
+            .into()
     }
 
     #[inline]
@@ -439,11 +489,11 @@ impl SouthwardHandle for OpcUaHandle {
             }
         }
 
-        // Execute all chunks concurrently via try_join_all.
-        // OPC UA sessions support concurrent Read service calls; the underlying
-        // secure channel serialises wire frames, but the transport layer pipelines
-        // requests so total latency is approximately one round-trip rather than
-        // `N_chunks * RTT`.
+        // Execute all chunks concurrently via join_all (not try_join_all).
+        //
+        // OPC UA sessions support concurrent Read service calls. Using `join_all`
+        // preserves partial results: successful chunks produce data while failed
+        // chunks are logged and skipped. Only when ALL chunks fail do we return Err.
         let futs = chunk_ranges.iter().map(|&(start, end)| {
             let nodes_chunk = &nodes_to_read[start..end];
             let session = Arc::clone(&session);
@@ -459,16 +509,31 @@ impl SouthwardHandle for OpcUaHandle {
                         "OPC UA read status: {sc}"
                     ))),
                     Err(_) => {
-                        self.try_request_reconnect("opcua read timeout");
+                        self.record_timeout_and_maybe_reconnect();
                         Err(DriverError::Timeout(timeout_duration))
                     }
                 }
             }
         });
-        let chunk_results = futures::future::try_join_all(futs).await?;
+        let chunk_results = futures::future::join_all(futs).await;
+
+        let mut any_success = false;
+        let mut last_err: Option<DriverError> = None;
 
         // Decode and distribute results into per-device buffers.
-        for (start, end, values) in chunk_results {
+        for r in chunk_results {
+            let (start, end, values) = match r {
+                Ok(v) => {
+                    any_success = true;
+                    self.reset_timeout_counter();
+                    v
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OPC UA chunk read failed; skipping chunk");
+                    last_err = Some(e);
+                    continue;
+                }
+            };
             let points_chunk = &points[start..end];
             for (p, dv) in points_chunk.iter().zip(values.iter()) {
                 if dv.status.as_ref().map(|s| s.is_bad()).unwrap_or(false) {
@@ -490,6 +555,13 @@ impl SouthwardHandle for OpcUaHandle {
                     },
                 );
             }
+        }
+
+        // If every chunk failed, propagate the last error.
+        if !any_success && !chunk_ranges.is_empty() {
+            return Err(last_err.unwrap_or(DriverError::ExecutionError(
+                "All OPC UA read chunks failed".to_string(),
+            )));
         }
 
         let ts = Utc::now();
@@ -557,12 +629,13 @@ impl SouthwardHandle for OpcUaHandle {
                     "OPC UA write status: {sc}"
                 ))),
                 Err(_) => {
-                    self.try_request_reconnect("opcua write timeout");
+                    self.record_timeout_and_maybe_reconnect();
                     Err(DriverError::Timeout(timeout_duration))
                 }
             };
 
         let sc_list = res?;
+        self.reset_timeout_counter();
         if sc_list.iter().any(|s| !s.is_good()) {
             return Err(DriverError::ExecutionError(format!(
                 "Some writes failed: {:?}",
@@ -622,7 +695,7 @@ impl SouthwardHandle for OpcUaHandle {
             match tokio::time::timeout(timeout_duration, session.write(&[write])).await {
                 Ok(inner) => inner.map_err(|e| DriverError::ExecutionError(e.to_string())),
                 Err(_) => {
-                    self.try_request_reconnect("opcua write_point timeout");
+                    self.record_timeout_and_maybe_reconnect();
                     Err(DriverError::Timeout(timeout_duration))
                 }
             }
@@ -634,6 +707,7 @@ impl SouthwardHandle for OpcUaHandle {
         };
 
         let sc_list = res?;
+        self.reset_timeout_counter();
         if sc_list.iter().any(|s| !s.is_good()) {
             return Err(DriverError::ExecutionError(format!(
                 "OPC UA write failed: {:?}",

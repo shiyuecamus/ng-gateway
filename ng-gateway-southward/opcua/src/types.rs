@@ -60,6 +60,13 @@ pub struct OpcUaChannelConfig {
     /// Batch size for create/modify/delete monitored items
     #[serde(default = "OpcUaChannelConfig::default_subscribe_batch_size")]
     pub subscribe_batch_size: usize,
+    /// Number of consecutive read timeouts before requesting a reconnect.
+    ///
+    /// A single timeout may be caused by the server processing a complex node;
+    /// repeated timeouts strongly indicate a transport problem. Set to 1 for
+    /// aggressive reconnect (legacy behaviour).
+    #[serde(default = "OpcUaChannelConfig::default_max_timeouts")]
+    pub max_timeouts: u64,
 }
 
 impl OpcUaChannelConfig {
@@ -77,6 +84,10 @@ impl OpcUaChannelConfig {
 
     fn default_subscribe_batch_size() -> usize {
         256
+    }
+
+    fn default_max_timeouts() -> u64 {
+        3
     }
 }
 
