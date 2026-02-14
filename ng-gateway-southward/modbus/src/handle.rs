@@ -131,12 +131,6 @@ impl ModbusHandle {
             ModbusConnection::Tcp { .. } => self.inner.config.tcp_pool_size.clamp(1, 32) as usize,
             ModbusConnection::Rtu { .. } => 1,
         };
-        tracing::info!(
-            channel_id = self.inner.id,
-            tcp_pool_size = self.inner.config.tcp_pool_size,
-            effective_size = size,
-            "Modbus effective pool size calculated"
-        );
         size
     }
 

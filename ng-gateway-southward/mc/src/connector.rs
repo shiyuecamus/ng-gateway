@@ -59,11 +59,7 @@ impl McConnector {
     /// Effective pool size derived from channel configuration.
     #[inline]
     fn effective_pool_size(&self) -> usize {
-        self.channel
-            .config
-            .concurrent_requests
-            .unwrap_or(1)
-            .max(1) as usize
+        self.channel.config.concurrent_requests.unwrap_or(1).max(1) as usize
     }
 }
 

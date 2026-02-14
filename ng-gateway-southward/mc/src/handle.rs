@@ -169,11 +169,7 @@ impl McHandle {
 
     /// Effective pool size derived from channel configuration.
     pub(crate) fn effective_pool_size(&self) -> usize {
-        self.inner
-            .config
-            .concurrent_requests
-            .unwrap_or(1)
-            .max(1) as usize
+        self.inner.config.concurrent_requests.unwrap_or(1).max(1) as usize
     }
 
     /// Compute word-length (MC "points") for a given data type.
