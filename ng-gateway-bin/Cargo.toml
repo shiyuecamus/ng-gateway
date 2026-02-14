@@ -35,6 +35,10 @@ features = ["derive"]
 [dependencies.casbin]
 workspace = true
 
+# Memory Allocator — Linux only (see main.rs for rationale)
+[target.'cfg(target_os = "linux")'.dependencies.tikv-jemallocator]
+workspace = true
+
 [features]
 # Forward feature for single-binary distribution: embed UI assets into the gateway binary.
 ui-embedded = ["ng-gateway-web/ui-embedded"]

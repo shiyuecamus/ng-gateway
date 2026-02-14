@@ -1,3 +1,25 @@
+/// Use jemalloc as the global memory allocator on Linux.
+///
+/// This replaces glibc's default malloc, which is known for aggressive arena
+/// pre-allocation (up to 8 × CPU cores × 64 MB), causing inflated RSS in
+/// containerized (Docker/Linux) environments.
+///
+/// The `unprefixed_malloc_on_supported_platforms` feature ensures that
+/// jemalloc also exports global `malloc`/`free` symbols, so all dynamically
+/// loaded cdylib drivers and plugins (via `dlopen`) transparently inherit
+/// jemalloc through the linker's symbol resolution order.
+///
+/// On macOS this is intentionally **disabled** because macOS uses two-level
+/// namespaces for dylib symbol resolution — `.dylib` plugins always bind
+/// `malloc`/`free` to `libSystem.B.dylib` regardless of what the host
+/// exports. Enabling jemalloc on macOS would cause a cross-allocator
+/// mismatch (host frees with jemalloc what the cdylib allocated with
+/// system malloc), leading to immediate SEGFAULT on driver/plugin load.
+/// macOS's built-in allocator is already efficient, so no action is needed.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use casbin::CachedEnforcer;
 use clap::Parser;
 use ng_gateway_common::{

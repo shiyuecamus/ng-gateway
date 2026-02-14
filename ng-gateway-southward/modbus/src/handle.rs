@@ -14,7 +14,7 @@ use super::{
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::future::join_all;
+use futures_util::StreamExt;
 use ng_gateway_sdk::{
     downcast_parameters, supervision::ReconnectHandle, AccessMode, CollectItem, CollectionGroupKey,
     CollectorConcurrencyProfile, DataType, DeviceBuffers, DriverError, DriverResult,
@@ -278,13 +278,26 @@ impl ModbusHandle {
         //
         // Safety: each `Context` is guarded by `Mutex` (single-flight). Concurrency is
         // achieved by using multiple contexts (connections) from the pool.
-        let batch_parallelism = self.effective_pool_size().clamp(1, 8);
-        let mut results: Vec<(usize, NorthwardReadResult)> = Vec::with_capacity(batches_len);
-        let mut i = 0usize;
-        while i < batches.len() {
-            let end = (i + batch_parallelism).min(batches.len());
-            let batches_ref = &batches;
-            let futs = (i..end).map(|idx| async move {
+        // Concurrency limit per slave: use full pool size (Mutex already serializes
+        // per-connection). Removing the old `.clamp(1, 8)` hard cap so that all
+        // pool connections can be utilised simultaneously.
+        let batch_concurrency = self.effective_pool_size().max(1);
+
+        // Execute ALL read batches through a single `buffer_unordered` stream.
+        //
+        // Why: the old wave model (`join_all` per chunk of N) created a "convoy
+        // effect" — the first-polled group monopolised most pool connections,
+        // and `join_all` forced every batch in a wave to complete before the
+        // next wave could start. Replacing it with `buffer_unordered` lets
+        // each batch fire as soon as a connection becomes available, with no
+        // artificial synchronisation barrier between waves.
+        //
+        // Safety: each `Context` is guarded by `Mutex` (single-flight per
+        // connection). `buffer_unordered(batch_concurrency)` limits how many
+        // futures are polled concurrently so we don't over-subscribe the pool.
+        let batches_ref = &batches;
+        let results: Vec<(usize, NorthwardReadResult)> = futures_util::stream::iter(0..batches_len)
+            .map(|idx| async move {
                 let batch = &batches_ref[idx];
                 let op_label = match batch.function {
                     ModbusFunctionCode::ReadCoils => "ReadCoils",
@@ -328,22 +341,19 @@ impl ModbusHandle {
                     .await?;
 
                 Ok::<(usize, NorthwardReadResult), DriverError>((idx, op_res))
-            });
-            // Use `join_all` (not `try_join_all`) to preserve partial results.
-            // Failed batches are logged and skipped; their points will have no
-            // value in this cycle. Only when ALL batches across ALL waves fail
-            // do we propagate an error.
-            let chunk = join_all(futs).await;
-            for r in chunk {
+            })
+            .buffer_unordered(batch_concurrency)
+            .filter_map(|r| async {
                 match r {
-                    Ok(item) => results.push(item),
+                    Ok(item) => Some(item),
                     Err(e) => {
                         tracing::warn!(error = %e, "Modbus read batch failed; skipping batch");
+                        None
                     }
                 }
-            }
-            i = end;
-        }
+            })
+            .collect()
+            .await;
 
         if results.is_empty() && !batches.is_empty() {
             return Err(DriverError::ExecutionError(

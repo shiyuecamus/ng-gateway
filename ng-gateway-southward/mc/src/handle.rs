@@ -173,7 +173,7 @@ impl McHandle {
             .config
             .concurrent_requests
             .unwrap_or(1)
-            .clamp(1, 8) as usize
+            .max(1) as usize
     }
 
     /// Compute word-length (MC "points") for a given data type.

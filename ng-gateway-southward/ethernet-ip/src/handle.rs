@@ -225,7 +225,7 @@ impl SouthwardHandle for EthernetIpHandle {
         // Semaphore + FuturesUnordered. Unlike wave-based execution, completed
         // batches immediately free a concurrency slot for the next batch,
         // eliminating sync-point stalls.
-        let concurrency = pool.pool_size().clamp(1, 8);
+        let concurrency = pool.pool_size().max(1);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
         let batches: Vec<&[Arc<EthernetIpPoint>]> = points.chunks(batch_size).collect();
 

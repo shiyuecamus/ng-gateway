@@ -373,6 +373,16 @@ features = ["json", "rustls-native-certs", "stream"]
 [workspace.dependencies.surge-ping]
 version = "0.8"
 
+# Memory Allocator
+# Use jemalloc as the global allocator on Linux to reduce memory fragmentation
+# caused by glibc's default malloc arena strategy (especially in containers).
+# The `unprefixed_malloc_on_supported_platforms` feature exports jemalloc's
+# malloc/free as global symbols, ensuring cdylib drivers/plugins loaded via
+# dlopen also benefit from jemalloc through symbol resolution.
+[workspace.dependencies.tikv-jemallocator]
+version = "0.6"
+features = ["unprefixed_malloc_on_supported_platforms"]
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration — ng-gateway
 #
