@@ -594,9 +594,9 @@ pub trait Driver: DowncastSync + Send + Sync {
 
     /// Collection concurrency capability profile for this driver instance.
     ///
-    /// The Collector uses this to automatically adapt:
-    /// - how many `collect_data()` calls may run concurrently (cross-group concurrency)
-    /// - whether calls that share the same `CollectionGroupKey` must be serialized
+    /// The Collector uses this to bound the number of concurrent `collect_data()` calls
+    /// (cross-group concurrency). Intra-group parallelism is the driver's responsibility
+    /// inside `collect_data()`.
     ///
     /// # Performance
     /// This method must be **fast** and must not allocate.

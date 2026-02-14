@@ -2,6 +2,16 @@
 //!
 //! `ThingsBoardHandle` is published by the SDK supervisor when the plugin is Connected/Ready.
 //! It implements `ng_gateway_sdk::NorthwardHandle` for high-throughput uplink publishing.
+//!
+//! # Design
+//!
+//! All MQTT publish calls use `try_publish()` (non-blocking) instead of `publish().await`
+//! (blocking). This keeps `process_data` CPU-only and consistent with the Kafka/Pulsar
+//! outbound-queue pattern:
+//!
+//! - rumqttc `AsyncClient` has an internal bounded channel (sized by `outbound_queue_capacity`).
+//! - `try_publish` enqueues a message without waiting; returns immediately if full.
+//! - The `EventLoop::poll()` in `Session::run()` drains the channel and performs actual I/O.
 
 use super::{
     config::{MessageFormat, ThingsBoardPluginConfig},
@@ -9,7 +19,7 @@ use super::{
     topics::Topics,
 };
 use ng_gateway_sdk::{NorthwardData, NorthwardError, NorthwardHandle, NorthwardResult, TargetType};
-use rumqttc::{AsyncClient, QoS};
+use rumqttc::{AsyncClient, ClientError, QoS};
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -50,6 +60,23 @@ impl ThingsBoardHandle {
         self.config.communication.max_payload_bytes.max(256)
     }
 
+    /// Map a rumqttc `ClientError` to a `NorthwardError`.
+    ///
+    /// `TryRequest` indicates the internal channel rejected the message (typically full),
+    /// which maps to `PublishFailed` (backpressure). Other errors are transport-level.
+    #[inline]
+    fn map_publish_error(err: ClientError) -> NorthwardError {
+        match err {
+            ClientError::TryRequest(_) => NorthwardError::PublishFailed {
+                platform: "thingsboard".to_string(),
+                reason: "MQTT outbound queue full".to_string(),
+            },
+            other => NorthwardError::MqttError {
+                reason: other.to_string(),
+            },
+        }
+    }
+
     /// Hot-path telemetry publisher (Gateway API) that enforces `max_payload_bytes`.
     ///
     /// Payload shape:
@@ -59,7 +86,8 @@ impl ThingsBoardHandle {
     /// - Single pass over point values.
     /// - No backtracking / no repeated full-map serialization.
     /// - Only per-point temporary serialization into a reusable scratch buffer.
-    async fn publish_telemetry_chunked(
+    /// - Uses `try_publish` (non-blocking) to avoid I/O on the AppActor worker.
+    fn publish_telemetry_chunked(
         &self,
         topic: &str,
         device_name: &str,
@@ -74,20 +102,14 @@ impl ThingsBoardHandle {
         for pv in point_values.iter() {
             if let Some(out) = chunker.push(pv.point_key.as_ref(), &pv.value)? {
                 self.client
-                    .publish(topic, qos, retain, out)
-                    .await
-                    .map_err(|e| NorthwardError::MqttError {
-                        reason: e.to_string(),
-                    })?;
+                    .try_publish(topic, qos, retain, out)
+                    .map_err(Self::map_publish_error)?;
             }
         }
         if let Some(bytes) = chunker.finish() {
             self.client
-                .publish(topic, qos, retain, bytes)
-                .await
-                .map_err(|e| NorthwardError::MqttError {
-                    reason: e.to_string(),
-                })?;
+                .try_publish(topic, qos, retain, bytes)
+                .map_err(Self::map_publish_error)?;
         }
 
         Ok(())
@@ -97,7 +119,7 @@ impl ThingsBoardHandle {
     ///
     /// Payload shape:
     /// `{ "<device>": { k1:v1, k2:v2, ... } }`
-    async fn publish_attributes_chunked(
+    fn publish_attributes_chunked(
         &self,
         topic: &str,
         device_name: &str,
@@ -111,20 +133,14 @@ impl ThingsBoardHandle {
         for pv in point_values.iter() {
             if let Some(out) = chunker.push(pv.point_key.as_ref(), &pv.value)? {
                 self.client
-                    .publish(topic, qos, retain, out)
-                    .await
-                    .map_err(|e| NorthwardError::MqttError {
-                        reason: e.to_string(),
-                    })?;
+                    .try_publish(topic, qos, retain, out)
+                    .map_err(Self::map_publish_error)?;
             }
         }
         if let Some(bytes) = chunker.finish() {
             self.client
-                .publish(topic, qos, retain, bytes)
-                .await
-                .map_err(|e| NorthwardError::MqttError {
-                    reason: e.to_string(),
-                })?;
+                .try_publish(topic, qos, retain, bytes)
+                .map_err(Self::map_publish_error)?;
         }
 
         Ok(())
@@ -144,8 +160,7 @@ impl NorthwardHandle for ThingsBoardHandle {
                         &telemetry.device_name,
                         ts,
                         &telemetry.values,
-                    )
-                    .await?;
+                    )?;
                 }
                 NorthwardData::Attributes(attributes) => {
                     let topic = Topics::gateway_attributes();
@@ -153,8 +168,7 @@ impl NorthwardHandle for ThingsBoardHandle {
                         &topic,
                         &attributes.device_name,
                         &attributes.client_attributes,
-                    )
-                    .await?;
+                    )?;
                 }
                 NorthwardData::DeviceConnected(device_connected) => {
                     let bytes = serde_json::to_vec(&json!({
@@ -166,11 +180,8 @@ impl NorthwardHandle for ThingsBoardHandle {
                     })?;
 
                     self.client
-                        .publish(Topics::gateway_connect(), self.qos(), self.retain(), bytes)
-                        .await
-                        .map_err(|e| NorthwardError::MqttError {
-                            reason: e.to_string(),
-                        })?;
+                        .try_publish(Topics::gateway_connect(), self.qos(), self.retain(), bytes)
+                        .map_err(Self::map_publish_error)?;
                 }
                 NorthwardData::DeviceDisconnected(device_disconnected) => {
                     let bytes = serde_json::to_vec(&json!({
@@ -181,16 +192,13 @@ impl NorthwardHandle for ThingsBoardHandle {
                     })?;
 
                     self.client
-                        .publish(
+                        .try_publish(
                             Topics::gateway_disconnect(),
                             self.qos(),
                             self.retain(),
                             bytes,
                         )
-                        .await
-                        .map_err(|e| NorthwardError::MqttError {
-                            reason: e.to_string(),
-                        })?;
+                        .map_err(Self::map_publish_error)?;
                 }
                 NorthwardData::WritePointResponse(resp) => {
                     // ThingsBoard northward currently does not require a write-point reply.
@@ -267,11 +275,8 @@ impl NorthwardHandle for ThingsBoardHandle {
                             })?;
 
                             self.client
-                                .publish(Topics::gateway_rpc(), self.qos(), false, bytes)
-                                .await
-                                .map_err(|e| NorthwardError::MqttError {
-                                    reason: e.to_string(),
-                                })?;
+                                .try_publish(Topics::gateway_rpc(), self.qos(), false, bytes)
+                                .map_err(Self::map_publish_error)?;
                         }
                         TargetType::Gateway => {
                             let topic = Topics::device_rpc_response_topic(&resp.request_id);
@@ -293,11 +298,8 @@ impl NorthwardHandle for ThingsBoardHandle {
                             })?;
 
                             self.client
-                                .publish(topic, self.qos(), false, bytes)
-                                .await
-                                .map_err(|e| NorthwardError::MqttError {
-                                    reason: e.to_string(),
-                                })?;
+                                .try_publish(topic, self.qos(), false, bytes)
+                                .map_err(Self::map_publish_error)?;
                         }
                     }
                 }

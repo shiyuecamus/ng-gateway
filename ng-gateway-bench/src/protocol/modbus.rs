@@ -189,7 +189,7 @@ pub fn build_modbus_channel_runtime(
     );
     let driver: SupervisedDriver<ModbusConnector> = SupervisedDriver::new_with_concurrency_profile(
         loop_,
-        CollectorConcurrencyProfile::from_io_lanes(args.tcp_pool_size as usize),
+        CollectorConcurrencyProfile::concurrent(args.tcp_pool_size as usize),
     );
     let driver: Arc<dyn Driver> = Arc::new(driver);
 

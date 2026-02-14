@@ -147,6 +147,14 @@ pub struct CommunicationConfig {
     /// MQTT clean session flag
     #[serde(default = "CommunicationConfig::default_clean_session")]
     pub clean_session: bool,
+    /// Outbound queue capacity for MQTT publish requests.
+    ///
+    /// This controls the rumqttc internal channel size. `process_data` uses
+    /// non-blocking `try_publish` to enqueue messages; the EventLoop drains
+    /// the queue asynchronously. A larger value absorbs short bursts from the
+    /// collector without dropping data.
+    #[serde(default = "CommunicationConfig::default_outbound_queue_capacity")]
+    pub outbound_queue_capacity: usize,
 }
 
 impl CommunicationConfig {
@@ -196,6 +204,10 @@ impl CommunicationConfig {
     fn default_clean_session() -> bool {
         false
     }
+
+    fn default_outbound_queue_capacity() -> usize {
+        1024
+    }
 }
 
 impl Default for CommunicationConfig {
@@ -207,6 +219,7 @@ impl Default for CommunicationConfig {
             max_payload_bytes: CommunicationConfig::default_max_payload_bytes(),
             keep_alive: CommunicationConfig::default_keep_alive(),
             clean_session: CommunicationConfig::default_clean_session(),
+            outbound_queue_capacity: CommunicationConfig::default_outbound_queue_capacity(),
         }
     }
 }

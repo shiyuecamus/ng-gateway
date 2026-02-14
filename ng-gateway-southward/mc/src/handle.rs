@@ -235,10 +235,7 @@ impl SouthwardHandle for McHandle {
 
     #[inline]
     fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
-        // per_group_key stays 1: all devices in a channel form a single group,
-        // and collect_data() handles pool-level distribution internally. Splitting
-        // at the Collector level would break planner coalescing of adjacent addresses.
-        CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
+        CollectorConcurrencyProfile::concurrent(self.effective_pool_size())
     }
 
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {

@@ -1,93 +1,81 @@
 //! Collection concurrency capability description for southward drivers.
 //!
 //! The gateway Collector needs a driver-provided, **allocation-free** description of how much
-//! concurrency is safe and useful. This is not only about "how many futures can we poll", but
+//! concurrency is safe and useful. This is not about "how many futures can we poll", but
 //! about protocol semantics:
+//!
 //! - Some transports (e.g., Modbus RTU on a shared serial bus) must be strictly serialized.
 //! - Some drivers own multiple independent I/O lanes (e.g., TCP connection pool) and can safely
 //!   run multiple collect calls concurrently.
 //!
-//! This module provides `CollectorConcurrencyProfile` for expressing:
-//! - **cross-group concurrency** (global in-flight `collect_data()` calls)
-//! - **intra-group-key concurrency** (max in-flight calls that share the same `CollectionGroupKey`)
-//! - **I/O lane count** (informational / sizing hint, typically equals pool size)
+//! # Design philosophy
+//!
+//! The Collector does **not** control intra-group parallelism — that is the driver's
+//! responsibility inside `collect_data()`.  This profile only describes **cross-group**
+//! concurrency: how many independent `GroupCall`s can be in flight at the same time.
 
 use core::num::NonZeroUsize;
 
-/// A driver-provided capability profile that the Collector uses to automatically adapt concurrency.
+/// A driver-provided concurrency capability that the Collector uses to automatically
+/// adapt scheduling.
 ///
-/// # Field meanings
-/// - `global_max_inflight`: Maximum number of concurrent in-flight `collect_data()` calls for this
-///   driver instance (cross-group concurrency).
-/// - `per_group_key_max_inflight`: Maximum number of concurrent in-flight `collect_data()` calls
-///   that share the same physical `CollectionGroupKey` (intra-group-key concurrency).
-/// - `io_lanes`: Number of independent I/O lanes owned by the driver (e.g. TCP pool size).
-///   This is a sizing hint and may be equal to `global_max_inflight` for most drivers.
+/// # Examples
 ///
-/// # Contracts
-/// - All values are guaranteed to be >= 1.
+/// | Protocol          | Typical value        | Reason                                    |
+/// |-------------------|----------------------|-------------------------------------------|
+/// | Modbus RTU        | `serial()`           | Shared serial bus, strictly one call       |
+/// | Modbus TCP (n=4)  | `concurrent(4)`      | 4 TCP connections = 4 groups in parallel   |
+/// | S7 (single conn)  | `serial()`           | One PLC connection, one call at a time     |
+/// | EtherNet/IP (n=4) | `concurrent(4)`      | Connection pool size                       |
+///
+/// # Contract
+/// - `max_concurrency` is guaranteed >= 1.
 /// - This type is `Copy` and must be cheap to return on hot paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CollectorConcurrencyProfile {
-    pub global_max_inflight: NonZeroUsize,
-    pub per_group_key_max_inflight: NonZeroUsize,
-    pub io_lanes: NonZeroUsize,
+    /// Maximum number of concurrent in-flight `collect_data()` calls for this
+    /// driver instance.
+    ///
+    /// The Collector uses this to bound `buffer_unordered` and semaphore permits.
+    /// A value of 1 means strictly serialized collection.
+    pub max_concurrency: NonZeroUsize,
 }
 
 impl CollectorConcurrencyProfile {
-    /// Strictly serialized profile (safe default).
-    #[inline]
-    pub fn serial() -> Self {
-        // SAFETY: literal 1 is non-zero.
-        let one = unsafe { NonZeroUsize::new_unchecked(1) };
-        Self {
-            global_max_inflight: one,
-            per_group_key_max_inflight: one,
-            io_lanes: one,
-        }
-    }
-
-    /// Create a profile from a known I/O lane count.
+    /// Strictly serialized profile: one `collect_data()` call at a time.
     ///
-    /// This sets:
-    /// - `io_lanes = lanes`
-    /// - `global_max_inflight = lanes`
-    /// - `per_group_key_max_inflight = 1` (safe default)
+    /// This is the safe default for serial-bus protocols (Modbus RTU, etc.)
+    /// and single-connection drivers.
     #[inline]
-    pub fn from_io_lanes(lanes: usize) -> Self {
-        let lanes = lanes.max(1);
-        // SAFETY: lanes is >= 1 after `max(1)`.
-        let lanes = NonZeroUsize::new(lanes).unwrap();
+    pub const fn serial() -> Self {
         // SAFETY: literal 1 is non-zero.
-        let one = unsafe { NonZeroUsize::new_unchecked(1) };
         Self {
-            global_max_inflight: lanes,
-            per_group_key_max_inflight: one,
-            io_lanes: lanes,
+            max_concurrency: unsafe { NonZeroUsize::new_unchecked(1) },
         }
     }
 
-    /// Override the global max in-flight value (must be >= 1).
+    /// Concurrent profile: up to `n` in-flight `collect_data()` calls.
+    ///
+    /// Typically set to the I/O pool size (e.g., TCP connection count).
+    /// Falls back to 1 if `n` is 0.
     #[inline]
-    pub fn with_global_max_inflight(mut self, v: usize) -> Self {
-        let v = NonZeroUsize::new(v.max(1)).unwrap_or(self.global_max_inflight);
-        self.global_max_inflight = v;
-        self
+    pub fn concurrent(n: usize) -> Self {
+        let n = n.max(1);
+        Self {
+            // SAFETY: n >= 1 after `max(1)`.
+            max_concurrency: unsafe { NonZeroUsize::new_unchecked(n) },
+        }
     }
 
-    /// Override per-group-key max in-flight value (must be >= 1).
+    /// Returns the maximum concurrency as a plain `usize`.
     #[inline]
-    pub fn with_per_group_key_max_inflight(mut self, v: usize) -> Self {
-        let v = NonZeroUsize::new(v.max(1)).unwrap_or(self.per_group_key_max_inflight);
-        self.per_group_key_max_inflight = v;
-        self
+    pub const fn get(&self) -> usize {
+        self.max_concurrency.get()
     }
 
-    /// Override I/O lane count (must be >= 1).
+    /// Returns `true` if this profile is strictly serialized (`max_concurrency == 1`).
     #[inline]
-    pub fn with_io_lanes(mut self, v: usize) -> Self {
-        let v = NonZeroUsize::new(v.max(1)).unwrap_or(self.io_lanes);
-        self.io_lanes = v;
-        self
+    pub const fn is_serial(&self) -> bool {
+        self.max_concurrency.get() == 1
     }
 }

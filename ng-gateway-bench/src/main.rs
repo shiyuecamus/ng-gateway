@@ -87,7 +87,7 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     modbus_address_step: u16,
     /// TCP pool size per channel (default 1).
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 10)]
     modbus_tcp_pool_size: u16,
 
     // ---------------- OPC UA defaults (from your environment) ----------------

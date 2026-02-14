@@ -192,7 +192,7 @@ impl Driver for RuntimeAwareDriver {
 
             // Initialize collect concurrency after start.
             let profile = inner.collector_concurrency_profile();
-            let collect_max = profile.global_max_inflight.get();
+            let collect_max = profile.get();
             if collect_max > 1 {
                 collect_sem.add_permits(collect_max.saturating_sub(1));
             }

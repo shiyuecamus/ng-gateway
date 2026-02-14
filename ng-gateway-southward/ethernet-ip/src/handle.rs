@@ -178,10 +178,7 @@ impl SouthwardHandle for EthernetIpHandle {
 
     #[inline]
     fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
-        // per_group_key stays 1: collect_data() handles pool distribution internally
-        // via Semaphore + FuturesUnordered. Collector-level splitting would add
-        // Mutex contention without benefit.
-        CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
+        CollectorConcurrencyProfile::concurrent(self.effective_pool_size())
     }
 
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {

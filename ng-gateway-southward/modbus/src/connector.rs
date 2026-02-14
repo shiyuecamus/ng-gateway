@@ -111,13 +111,11 @@ impl Connector for ModbusConnector {
 
     #[inline]
     fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
-        let lanes = match &self.channel.config.connection {
+        let n = match &self.channel.config.connection {
             ModbusConnection::Tcp { .. } => self.channel.config.tcp_pool_size.clamp(1, 32) as usize,
             ModbusConnection::Rtu { .. } => 1usize,
         };
-        // For Modbus, we keep per-slave serialization at the Collector layer by default,
-        // and rely on internal batching/connection-pool parallelism inside the handle.
-        CollectorConcurrencyProfile::from_io_lanes(lanes)
+        CollectorConcurrencyProfile::concurrent(n)
     }
 
     async fn connect(

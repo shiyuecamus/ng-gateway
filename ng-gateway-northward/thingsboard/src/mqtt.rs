@@ -67,8 +67,12 @@ pub(super) fn connect_mqtt_client(
     mqtt_options.set_keep_alive(Duration::from_secs(config.communication.keep_alive as u64));
     mqtt_options.set_clean_session(config.communication.clean_session);
 
-    // Create client and event loop
-    let (client, event_loop) = AsyncClient::new(mqtt_options, 100);
+    // Create client and event loop.
+    // The capacity controls rumqttc's internal request channel. `try_publish` will
+    // return `TrySendError::Full` when this buffer is exhausted, providing non-blocking
+    // backpressure aligned with the Kafka/Pulsar outbound queue pattern.
+    let capacity = config.communication.outbound_queue_capacity.max(10);
+    let (client, event_loop) = AsyncClient::new(mqtt_options, capacity);
 
     Ok((client, event_loop))
 }

@@ -92,7 +92,7 @@ impl Connector for McConnector {
 
     #[inline]
     fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
-        CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
+        CollectorConcurrencyProfile::concurrent(self.effective_pool_size())
     }
 
     async fn connect(

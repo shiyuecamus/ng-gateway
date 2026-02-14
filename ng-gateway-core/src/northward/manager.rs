@@ -17,6 +17,7 @@ use super::{
     subscription_sync::{compute_sync_plan, DeviceSyncStatus, SubscriptionSyncTracker, SyncPlan},
 };
 use dashmap::DashMap;
+use futures::future::join_all;
 use ng_gateway_common::metrics::NGMetricsHub;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{
@@ -106,30 +107,49 @@ impl NGNorthwardManager {
             return;
         }
 
-        // Send to all subscribed apps
-        for app_id in app_ids {
-            // IMPORTANT: never hold DashMap guards across `.await`.
-            let actor = self
-                .app_actors
-                .get(&app_id)
-                .map(|entry| Arc::clone(entry.value()));
-            if let Some(actor) = actor {
-                match actor.send_data(Arc::clone(&filtered_data)).await {
-                    Ok(true) => {
-                        self.metrics_hub.inc_northward_data_routed();
-                    }
-                    Ok(false) => {
-                        // Dropped due to backpressure (queue full or timeout)
-                        debug!("Data dropped by app {} (backpressure)", app_id);
-                    }
-                    Err(e) => {
-                        error!("Failed to send data to app {}: {}", app_id, e);
+        // Collect (app_id, actor) pairs first so DashMap guards are released before
+        // any `.await`. Then fan out all send_data calls concurrently via `join_all`
+        // to prevent a slow Block-policy app from stalling other apps.
+        let targets: Vec<_> = app_ids
+            .filter_map(|app_id| {
+                let actor = self
+                    .app_actors
+                    .get(&app_id)
+                    .map(|entry| Arc::clone(entry.value()));
+                match actor {
+                    Some(a) => Some((app_id, a)),
+                    None => {
+                        warn!("App {} not found in actors (stale subscription?)", app_id);
                         self.metrics_hub.inc_northward_routing_errors();
+                        None
                     }
                 }
-            } else {
-                warn!("App {} not found in actors (stale subscription?)", app_id);
-                self.metrics_hub.inc_northward_routing_errors();
+            })
+            .collect();
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let results = join_all(targets.into_iter().map(|(app_id, actor)| {
+            let data = Arc::clone(&filtered_data);
+            async move { (app_id, actor.send_data(data).await) }
+        }))
+        .await;
+
+        for (app_id, result) in results {
+            match result {
+                Ok(true) => {
+                    self.metrics_hub.inc_northward_data_routed();
+                }
+                Ok(false) => {
+                    // Dropped due to backpressure (queue full or timeout)
+                    debug!("Data dropped by app {} (backpressure)", app_id);
+                }
+                Err(e) => {
+                    error!("Failed to send data to app {}: {}", app_id, e);
+                    self.metrics_hub.inc_northward_routing_errors();
+                }
             }
         }
     }

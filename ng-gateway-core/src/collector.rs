@@ -9,8 +9,8 @@ use ng_gateway_common::metrics::{
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{core::metrics::CollectorMetricsSnapshot, settings::Collector};
 use ng_gateway_sdk::{
-    CollectItem, CollectionGroupKey, CollectorConcurrencyProfile, Driver, NorthwardData,
-    RetryController, RetryDecision, RetryPolicy, RuntimeDevice, RuntimePoint,
+    CollectItem, CollectionGroupKey, Driver, NorthwardData, RetryController, RetryDecision,
+    RetryPolicy, RuntimeDevice, RuntimePoint,
 };
 use std::{
     collections::HashMap,
@@ -321,27 +321,22 @@ impl NGCollector {
 
     /// Build driver group calls from device entries.
     ///
-    /// # Performance
-    /// This keeps the batching strategy in one place: first group by driver-provided key,
-    /// then emit singleton calls for devices without a key.
+    /// Groups devices by driver-provided `CollectionGroupKey`. Devices without a key
+    /// become singleton calls. Each key produces exactly one `GroupCall` — intra-group
+    /// parallelism is the driver's responsibility inside `collect_data()`.
     #[inline]
-    fn build_group_calls(
-        driver: &Arc<dyn Driver>,
-        entries: Vec<DeviceEntry>,
-        profile: CollectorConcurrencyProfile,
-    ) -> Vec<GroupCall> {
-        let mut groups = Vec::new();
-
-        // Second-level grouping by driver-provided group key.
+    fn build_group_calls(driver: &Arc<dyn Driver>, entries: Vec<DeviceEntry>) -> Vec<GroupCall> {
         let mut keyed: HashMap<CollectionGroupKey, Vec<DeviceEntry>> = HashMap::new();
         let mut singles: Vec<DeviceEntry> = Vec::new();
 
-        for e in entries.into_iter() {
+        for e in entries {
             match driver.collection_group_key(e.runtime_device.as_ref()) {
                 Some(k) => keyed.entry(k).or_default().push(e),
                 None => singles.push(e),
             }
         }
+
+        let mut groups = Vec::with_capacity(keyed.len() + singles.len());
 
         for (_k, mut vec) in keyed {
             vec.sort_by_key(|e| e.device_id);
@@ -349,39 +344,12 @@ impl NGCollector {
                 .into_iter()
                 .map(|e| (e.runtime_device, e.points))
                 .collect();
-            if items.is_empty() {
-                continue;
-            }
-
-            // Optional intra-group-key parallelism:
-            // If the driver declares `per_group_key_max_inflight > 1`, the Collector may split
-            // one physical group into multiple `collect_data()` calls that share the same key.
-            //
-            // This is a capability-driven opt-in. The safe default is to keep it serialized.
-            let desired_chunks = profile
-                .per_group_key_max_inflight
-                .get()
-                .min(profile.global_max_inflight.get())
-                .min(profile.io_lanes.get())
-                .min(items.len().max(1));
-
-            if desired_chunks <= 1 {
+            if !items.is_empty() {
                 groups.push(GroupCall { items });
-                continue;
-            }
-
-            let chunk_size = items.len().div_ceil(desired_chunks);
-            for chunk in items.chunks(chunk_size) {
-                if chunk.is_empty() {
-                    continue;
-                }
-                groups.push(GroupCall {
-                    items: chunk.to_vec(),
-                });
             }
         }
 
-        for e in singles.into_iter() {
+        for e in singles {
             groups.push(GroupCall {
                 items: vec![(e.runtime_device, e.points)],
             });
@@ -627,7 +595,7 @@ impl NGCollector {
         )?;
 
         let profile = driver.collector_concurrency_profile();
-        let groups = Self::build_group_calls(&driver, entries, profile);
+        let groups = Self::build_group_calls(&driver, entries);
         if groups.is_empty() {
             return Ok(());
         }
@@ -640,7 +608,7 @@ impl NGCollector {
         let prom = southward_manager.get_channel_metric_handles(channel_id);
         let total_budget = Duration::from_millis(config.collection_timeout_ms());
         let retry_policy = config.retry_policy();
-        let max_in_flight = profile.global_max_inflight.get();
+        let max_in_flight = profile.get();
 
         // Execute groups concurrently without spawning per-device tasks.
         //

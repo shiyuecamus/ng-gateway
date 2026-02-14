@@ -434,7 +434,7 @@ impl SouthwardHandle for ModbusHandle {
 
     #[inline]
     fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
-        CollectorConcurrencyProfile::from_io_lanes(self.effective_pool_size())
+        CollectorConcurrencyProfile::concurrent(self.effective_pool_size())
     }
 
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {

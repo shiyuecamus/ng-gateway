@@ -113,8 +113,7 @@ impl Connector for EthernetIpConnector {
 
     #[inline]
     fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
-        let lanes = self.channel.config.pool_size.clamp(1, 32) as usize;
-        CollectorConcurrencyProfile::from_io_lanes(lanes)
+        CollectorConcurrencyProfile::concurrent(self.channel.config.pool_size.clamp(1, 32) as usize)
     }
 
     async fn connect(
