@@ -11,7 +11,7 @@ export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 # Config via env with sane defaults
 REGISTRY="${REGISTRY:-}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ng}"
-VERSION="${VERSION:-local}"
+VERSION="${VERSION:-latest}"
 PLATFORM="${PLATFORM:-}"
 TAG_LATEST="${TAG_LATEST:-false}"
 

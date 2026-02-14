@@ -7,11 +7,11 @@
 #
 # Usage:
 #   # 1. Build gateway image first (from repo root):
-#   docker build -f deploy/docker/gateway.Dockerfile -t ng-gateway:local .
+#   docker build -f deploy/docker/gateway.Dockerfile -t ng-gateway:latest .
 #
 #   # 2. Start the full bench stack:
-#   cd deploy/compose
-#   docker compose -f docker-compose.bench.yaml up -d
+#   cd deploy/compose/bench
+#   docker compose up -d
 #
 #   # 3. Access:
 #   #    - Grafana:    http://localhost:3000  (admin / admin)
@@ -20,7 +20,7 @@
 #   #    - Gateway:    http://localhost:8978
 #
 #   # 4. Stop:
-#   docker compose -f docker-compose.bench.yaml down
+#   docker compose down
 # =============================================================================
 
 services:
@@ -28,7 +28,7 @@ services:
   # NG Gateway – The system under test
   # ---------------------------------------------------------------------------
   gateway:
-    image: ${GATEWAY_IMAGE:-ng-gateway}:${GATEWAY_TAG:-local}
+    image: ${GATEWAY_IMAGE:-shiyuecamus/ng-gateway}:${GATEWAY_TAG:-latest}
     container_name: ng-gateway
     restart: unless-stopped
     ports:
@@ -61,10 +61,16 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=2s
+      - --store_container_labels=true
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
       - /sys:/sys:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
     privileged: true
@@ -81,8 +87,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./observability/prometheus/prometheus.bench.yml:/etc/prometheus/prometheus.yml:ro
-      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ng-prometheus-data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -107,8 +112,8 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_PATHS_PROVISIONING: /etc/grafana/provisioning
     volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./observability/grafana/dashboards-bench:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - ng-grafana-data:/var/lib/grafana
     depends_on:
       - prometheus

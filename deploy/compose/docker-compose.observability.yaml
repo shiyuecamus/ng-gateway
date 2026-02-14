@@ -37,7 +37,7 @@ services:
       - prometheus
 
   gateway:
-    image: ${GATEWAY_IMAGE:-ng-gateway}:${GATEWAY_TAG:-local}
+    image: ${GATEWAY_IMAGE:-shiyuecamus/ng-gateway}:${GATEWAY_TAG:-latest}
     container_name: ng-gateway
     restart: unless-stopped
     ports:

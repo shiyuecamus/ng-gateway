@@ -89,7 +89,7 @@ Prometheus 预置了两条抓取路径：
 ```
 
 支持的环境变量（不传则使用默认值）：
-- `VERSION`：镜像 tag（默认 `local`）
+- `VERSION`：镜像 tag（默认 `latest`）
 - `IMAGE_PREFIX`：镜像名前缀（默认 `ng`，最终镜像名为 `${IMAGE_PREFIX}-gateway`）
 - `REGISTRY`：可选镜像仓库前缀（如 `ghcr.io/xxx`）
 - `PLATFORM`：可选平台（如 `linux/amd64`），会透传到 `docker build --platform`

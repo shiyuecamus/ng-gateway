@@ -7,8 +7,8 @@
 # =============================================================================
 
 global:
-  scrape_interval: 5s
-  evaluation_interval: 5s
+  scrape_interval: 2s
+  evaluation_interval: 2s
 
 rule_files:
   - /etc/prometheus/rules/*.yml

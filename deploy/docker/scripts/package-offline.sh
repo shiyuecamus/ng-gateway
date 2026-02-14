@@ -203,7 +203,7 @@ docker volume create gateway-plugins >/dev/null
 
 # 读取镜像名（优先 .env，其次 fallback）
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-ng-gateway}"
-GATEWAY_TAG="${GATEWAY_TAG:-local}"
+GATEWAY_TAG="${GATEWAY_TAG:-latest}"
 GATEWAY_HTTP_PORT="${GATEWAY_HTTP_PORT:-8978}"
 GATEWAY_WS_PORT="${GATEWAY_WS_PORT:-8979}"
 
