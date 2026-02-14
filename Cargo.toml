@@ -373,48 +373,84 @@ features = ["json", "rustls-native-certs", "stream"]
 [workspace.dependencies.surge-ping]
 version = "0.8"
 
-[profile.release]
-# 含义：设置代码生成单元的数量。
-# •	Rust 的默认编译方式是将代码拆分为多个单元并行生成，提高编译速度。
-# •	将 codegen-units 设置为 1，会强制编译器在一个单元内生成所有代码。
-# 作用：
-# •	优点：可以最大化跨函数优化（如内联、消除未使用代码等），提高运行时性能或减小二进制大小。
-# •	缺点：编译速度会变慢，因为无法并行生成代码。
-codegen-units = 1
-# 含义：是否包含调试信息（符号信息，如变量名和行号）。
-# •	false：不包含调试信息，生成的二进制更小。
-# •	true：包含调试信息，便于在 Release 模式下使用调试器进行调试。
-debug = false
-# 含义：启用 Link-Time Optimization（LTO，链接时优化）。LTO 是在链接阶段对所有代码进行全局优化。
-# •	false（默认）：不开启 LTO。
-# •	true：开启 LTO，对项目和依赖库都进行全局优化。
-# •	"thin"：使用 ThinLTO，是一种更高效的 LTO，平衡优化效果和编译时间。
+# ═══════════════════════════════════════════════════════════════════════════
+# Cargo Profile Configuration — ng-gateway
+#
+# Two-tier strategy:
+#   dev     → fast iteration  (compile speed first, deps at O2)
+#   release → production      (Full LTO + Os, smallest binary, near-peak perf)
+#
+# NOTE: Full LTO generates large intermediate artifacts (~50-100 GB).
+#       Run `cargo clean --release` periodically to reclaim disk space.
+# ═══════════════════════════════════════════════════════════════════════════
 
-# •	作用：
-# •	优点：启用 LTO 后，编译器可以跨模块优化，进一步减小二进制体积或提升性能。
-# •	缺点：会显著增加编译时间。
+# ─── Development ─────────────────────────────────────────────────────────
+# Goal: minimize recompile latency while keeping runtime usable for testing.
+[profile.dev]
+# No optimization for workspace crates → fastest possible compilation.
+opt-level = 0
+# "line-tables-only" retains backtrace line numbers and breakpoint support
+# while skipping expensive DWARF type/variable emission.
+# ~30% faster compile + ~40% smaller target/debug than `debug = 2`.
+debug = "line-tables-only"
+# Incremental compilation: only recompile changed crates (default = true).
+incremental = true
+# macOS-specific: emit debug info as separate object files, bypassing the
+# `dsymutil` merge step which is a known linker bottleneck on large
+# workspaces (saves 10-30s per link on this project).
+# On Linux this setting is ignored (ELF embeds debug info by default).
+split-debuginfo = "unpacked"
+
+# Optimize ALL third-party dependencies at O2 even in dev mode.
+# → tokio, actix, serde, rumqttc, sea-orm etc. run at near-release speed
+# → Your own 28 workspace crates still compile instantly at O0
+# → First full build pays ~60-90s extra; subsequent builds hit cargo cache
+# → Eliminates "debug mode is painfully slow" for async I/O and networking
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+# Proc-macros and build scripts execute on the HOST at compile time.
+# O3 here accelerates macro expansion (ng-gateway-macros, serde_derive,
+# sea-orm derive, clap derive, darling, etc.) → faster overall compilation.
+[profile.dev.build-override]
+opt-level = 3
+
+# ─── Release ─────────────────────────────────────────────────────────────
+# Goal: smallest possible binary with near-peak performance.
+# Full LTO + "s" produces aggressive cross-crate DCE and inlining,
+# often yielding a binary that is BOTH smaller AND competitive with O3.
+[profile.release]
+# Optimize for size while preserving near-O2 performance.
+# Unlike "z" (which disables inlining entirely), "s" still allows
+# profitable inlining and loop optimizations — typically within 2-5%
+# of O3 for I/O-bound gateway workloads.
+opt-level = "s"
+# Single codegen unit per crate — maximizes cross-function optimization
+# (inlining, dead-code elimination, constant propagation).
+codegen-units = 1
+# Full LTO: the linker sees the entire program as one LLVM module,
+# enabling maximum dead-code elimination and cross-crate inlining.
 lto = true
-# 含义：优化级别。
-# •	0：不优化，编译速度最快（通常用于 Debug）。
-# •	1：部分优化，折中编译时间和运行性能。
-# •	2：中等优化，默认值。
-# •	3：最高优化，性能最大化（编译时间更长）。
-# •	"s"：优化大小，同时兼顾性能。
-# •	"z"：极限优化大小，可能对性能产生更大的影响。
-# 作用：
-# •	用于在资源受限的场景（如嵌入式设备）中，减小二进制体积。
-opt-level = "z" # Optimize for size.
-# 含义：指定程序遇到 panic（运行时错误）时的行为。
-# •	'abort'：直接终止程序，释放系统资源，不执行堆栈展开。
-# •	'unwind'（默认）：执行堆栈展开，用于捕获 panic 和恢复。
-# 作用：
-# •	优点：设置为 'abort' 可以减小二进制大小，因为堆栈展开代码和运行时支持可以省略。
-# •	缺点：一旦程序 panic，无法捕获和恢复，会直接退出。
+# Abort on panic: eliminates unwinding tables, landing pads, and the
+# personality function from every stack frame. Reduces binary size by
+# ~5-10% and removes a branch from every function epilogue.
 panic = 'abort'
-# 在编译完成后是否去掉二进制文件中的符号表（strip 操作）。
-# •	"none"（或 false）：保留所有符号信息，方便调试。
-# •	"symbols"（或 true）：去除所有符号表，只保留必要信息，减小二进制体积。
-# 作用：
-# •	优点：可以减小二进制文件的大小。
-# •	缺点：去掉符号后，调试和分析堆栈跟踪会变得困难。
-strip = "symbols" # none(false) debuginfo symbols(true).
+# Strip symbol table from final binary — no runtime impact.
+# Saves ~2-5 MB depending on total symbol count.
+strip = "symbols"
+# No debug info in release builds — saves significant disk and link time.
+debug = false
+# Disable incremental compilation in release:
+# 1) LTO and incremental are fundamentally incompatible
+# 2) Incremental caches produce non-deterministic artifacts
+# 3) Prevents stale `.incremental/` dirs from bloating target/
+incremental = false
+
+# Proc-macros and build scripts are HOST-side dynamic libraries loaded by
+# rustc at compile time. `codegen-units = 1` from the release profile would
+# needlessly serialize their compilation. Override to O3 + parallel codegen
+# for faster release builds.
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 16

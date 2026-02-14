@@ -1,0 +1,121 @@
+# =============================================================================
+# NG Gateway – Benchmark Stack (cAdvisor + Prometheus + Grafana)
+#
+# Purpose:
+#   Container-level resource monitoring for performance benchmarking.
+#   Produces dashboards comparable to NeuronEX Kubernetes monitoring screenshots.
+#
+# Usage:
+#   # 1. Build gateway image first (from repo root):
+#   docker build -f deploy/docker/gateway.Dockerfile -t ng-gateway:local .
+#
+#   # 2. Start the full bench stack:
+#   cd deploy/compose
+#   docker compose -f docker-compose.bench.yaml up -d
+#
+#   # 3. Access:
+#   #    - Grafana:    http://localhost:3000  (admin / admin)
+#   #    - Prometheus: http://localhost:9090
+#   #    - cAdvisor:   http://localhost:8080
+#   #    - Gateway:    http://localhost:8978
+#
+#   # 4. Stop:
+#   docker compose -f docker-compose.bench.yaml down
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # NG Gateway – The system under test
+  # ---------------------------------------------------------------------------
+  gateway:
+    image: ${GATEWAY_IMAGE:-ng-gateway}:${GATEWAY_TAG:-local}
+    container_name: ng-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_HTTP_PORT:-8978}:5678"
+      - "${GATEWAY_WS_PORT:-8979}:5679"
+    volumes:
+      - gateway-data:/app/data
+      - gateway-drivers:/app/drivers/custom
+      - gateway-plugins:/app/plugins/custom
+    # Resource limits — mirrors NeuronEX benchmark conditions.
+    # Adjust to match your target deployment profile.
+    deploy:
+      resources:
+        limits:
+          cpus: "${BENCH_CPU_LIMIT:-1.0}"
+          memory: "${BENCH_MEM_LIMIT:-1000M}"
+        reservations:
+          cpus: "${BENCH_CPU_RESERVE:-0.5}"
+          memory: "${BENCH_MEM_RESERVE:-256M}"
+
+  # ---------------------------------------------------------------------------
+  # cAdvisor – Container-level resource metrics (CPU / Memory / Network / Disk)
+  #
+  # This is exactly what Kubernetes kubelet uses internally.
+  # Exposes Prometheus-compatible /metrics endpoint.
+  # ---------------------------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.51.0
+    container_name: ng-cadvisor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+
+  # ---------------------------------------------------------------------------
+  # Prometheus – Scrapes cAdvisor for container-level resource metrics
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ng-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.bench.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - ng-prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    depends_on:
+      - cadvisor
+      - gateway
+
+  # ---------------------------------------------------------------------------
+  # Grafana – cAdvisor container resource dashboards only
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ng-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards-bench:/var/lib/grafana/dashboards:ro
+      - ng-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  ng-prometheus-data:
+  ng-grafana-data:
+  gateway-data:
+  gateway-drivers:
+  gateway-plugins:
