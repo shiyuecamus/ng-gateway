@@ -30,6 +30,13 @@ impl ValueCodec {
             )));
         }
 
+        // Fast path: identity transform + same types → zero-cost passthrough.
+        // Mirrors the combined early-exit in `wire_to_logical_value` to avoid
+        // descending into `numeric_identity_logical_to_wire` just to clone.
+        if logical_dt == wire_dt && t.is_identity_numeric() {
+            return Ok(value.clone());
+        }
+
         if !logical_dt.is_numeric() || !wire_dt.is_numeric() {
             return Self::non_numeric_logical_to_wire(value, logical_dt, wire_dt, t);
         }

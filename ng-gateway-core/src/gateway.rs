@@ -55,8 +55,8 @@ use ng_gateway_repository::{
 };
 use ng_gateway_sdk::{
     validate_and_resolve_action_inputs, AccessMode, ClientRpcResponse, Command, DriverError,
-    NorthwardData, NorthwardEvent, TargetType, ValueCodec, WritePoint, WritePointError,
-    WritePointErrorKind, WritePointResponse,
+    NGValue, NorthwardData, NorthwardEvent, RuntimePoint, TargetType, ValueCodec, WritePoint,
+    WritePointError, WritePointErrorKind, WritePointResponse,
 };
 use sea_orm::{DatabaseConnection, IntoActiveModel};
 use std::{
@@ -217,6 +217,36 @@ impl WriteSerializers {
             .or_insert(Arc::new(Semaphore::new(1)))
             .clone()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Write-point pipeline: shared types & helpers
+// ---------------------------------------------------------------------------
+
+/// Validated write request ready for driver execution.
+///
+/// Produced by [`NGGateway::resolve_write`], consumed by [`NGGateway::execute_write`].
+/// Carries all metadata needed for response building, metrics, and driver dispatch.
+///
+/// # Design rationale
+/// Separating *resolve + validate* (sync, no I/O) from *execute* (async, I/O)
+/// keeps the validation phase independently unit-testable and allows callers
+/// to instrument each phase with their own tracing / metrics.
+pub(crate) struct ResolvedWrite {
+    /// Point identifier (primary key).
+    pub point_id: i32,
+    /// Device identifier (for response building and metrics labels).
+    pub device_id: i32,
+    /// Channel identifier (for semaphore lookup and metrics).
+    pub channel_id: i32,
+    /// Device name snapshot (cheap `Arc<str>` clone for response payloads).
+    pub device_name: Arc<str>,
+    /// Point key snapshot (e.g. `"p1"`, used by northward response payloads).
+    pub point_key: Arc<str>,
+    /// Runtime point handle for driver dispatch.
+    pub point: Arc<dyn RuntimePoint>,
+    /// Wire-encoded value produced by `ValueCodec::logical_to_wire_value`.
+    pub wire_value: NGValue,
 }
 
 #[allow(unused)]
@@ -1068,131 +1098,51 @@ impl PointRuntimeCmd for NGGateway {
         &self,
         device_id: i32,
         point_key: String,
-        value: ng_gateway_sdk::NGValue,
+        value: serde_json::Value,
         timeout_ms: Option<u64>,
     ) -> NGResult<()> {
-        // 1. Resolve the point from device_id + point_key via the runtime index.
+        // 1. Resolve point_id from (device_id, point_key).
         let points = self.southward_manager.get_device_points(device_id);
         let runtime_point = points
             .iter()
             .find(|p| p.key() == point_key)
-            .ok_or_else(|| {
-                NGError::Error(format!(
-                    "point '{}' not found on device {}",
-                    point_key, device_id
-                ))
-            })?;
+            .ok_or(NGError::Error(format!(
+                "point '{}' not found on device {}",
+                point_key, device_id
+            )))?;
         let point_id = runtime_point.id();
 
-        // 2. Get point entry (meta + runtime point) for validation.
-        let (meta, point) = self
+        // 2. Get expected DataType for JSON → NGValue conversion.
+        let (meta, _) = self
             .southward_manager
             .get_point_entry(point_id)
-            .ok_or_else(|| {
-                NGError::Error(format!(
-                    "point entry {} not found in runtime index",
-                    point_id
-                ))
-            })?;
-
-        // 3. Access mode validation.
-        if !matches!(meta.access_mode, AccessMode::Write | AccessMode::ReadWrite) {
-            return Err(NGError::Error(format!(
-                "point '{}' on device {} is not writable",
-                point_key, device_id
-            )));
-        }
-
-        // 4. Data type validation (northward sends logical value).
+            .ok_or(NGError::Error(format!(
+                "point entry {} not found in runtime index",
+                point_id
+            )))?;
         let expected_dt = meta.logical_data_type();
-        if !value.validate_datatype(expected_dt) {
-            return Err(NGError::Error(format!(
-                "type mismatch: expected {:?}, got {:?}",
-                expected_dt,
-                value.data_type()
-            )));
-        }
 
-        // 5. Range validation (numeric only).
-        if let (Some(min), Some(max)) = (meta.min_value, meta.max_value) {
-            if let Ok(n) = f64::try_from(&value) {
-                if n < min || n > max {
-                    return Err(NGError::Error(format!(
-                        "value out of range: {} not in [{}, {}]",
-                        n, min, max
-                    )));
-                }
-            }
-        }
+        // 3. Convert raw JSON value to correctly-typed NGValue.
+        //    This is the key fix for the Float32/Float64 mismatch: JSON has no
+        //    concept of narrow numeric types, so we use the point's declared
+        //    DataType to produce the right NGValue variant.
+        let ng_value = NGValue::try_from_json_scalar(expected_dt, &value).ok_or(NGError::Error(
+            format!("cannot convert JSON value to {:?}: {}", expected_dt, value),
+        ))?;
 
-        // 6. Channel connection validation.
-        if !self.southward_manager.is_channel_connected(meta.channel_id) {
-            return Err(NGError::Error(format!(
-                "channel {} not connected",
-                meta.channel_id
-            )));
-        }
+        // 4. Shared pipeline: resolve + validate + execute.
+        let resolved = Self::resolve_write(&self.southward_manager, point_id, &ng_value)
+            .map_err(|e| NGError::Error(e.message))?;
 
-        // 7. Logical → wire value conversion (strong failure: never write incorrect values).
-        let wire_value = ValueCodec::logical_to_wire_value(
-            &value,
-            expected_dt,
-            point.wire_data_type(),
-            point.transform(),
+        Self::execute_write(
+            &self.southward_manager,
+            &self.write_serializers,
+            &self.metrics_hub,
+            &resolved,
+            timeout_ms,
         )
-        .map_err(|e| NGError::Error(e.to_string()))?;
-
-        // 8. Per-channel write serialization (shared with northward pipeline).
-        let sem = self.write_serializers.semaphore_for(meta.channel_id);
-        let start = Instant::now();
-
-        let permit = match timeout_ms {
-            Some(ms) => {
-                let total = Duration::from_millis(ms);
-                match timeout(total, sem.clone().acquire_owned()).await {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(_)) => {
-                        return Err(NGError::Error(
-                            "write serializer semaphore closed".to_string(),
-                        ));
-                    }
-                    Err(_) => {
-                        return Err(NGError::Timeout(Duration::from_millis(ms)));
-                    }
-                }
-            }
-            None => sem
-                .acquire_owned()
-                .await
-                .map_err(|_| NGError::Error("write serializer semaphore closed".to_string()))?,
-        };
-
-        // 9. Remaining timeout budget (subtract queue wait from overall budget).
-        let remaining_timeout_ms = timeout_ms.map(|ms| {
-            let elapsed = start.elapsed();
-            let total = Duration::from_millis(ms);
-            let rem = total.checked_sub(elapsed).unwrap_or_default();
-            rem.as_millis().min(u64::MAX as u128) as u64
-        });
-
-        // 10. Snapshot driver and device config (release DashMap guard before await).
-        let device = self
-            .southward_manager
-            .get_device(device_id)
-            .ok_or_else(|| NGError::Error(format!("device {} not found in runtime", device_id)))?;
-        let driver = Arc::clone(&device.driver);
-        let device_cfg = Arc::clone(&device.config);
-        drop(device);
-
-        // 11. Execute driver write (still serialized by permit).
-        let write_res = driver
-            .write_point(device_cfg, point, &wire_value, remaining_timeout_ms)
-            .await;
-        drop(permit);
-
-        write_res
-            .map(|_| ())
-            .map_err(|e| NGError::Error(e.to_string()))
+        .await
+        .map_err(|e| NGError::Error(e.message))
     }
 }
 
@@ -1942,6 +1892,11 @@ impl NGGateway {
         }
     }
 
+    /// Handle a write-point event from a northward plugin.
+    ///
+    /// Delegates to the shared two-phase pipeline ([`Self::resolve_write`] +
+    /// [`Self::execute_write`]) and translates the result into a
+    /// [`WritePointResponse`] sent back to the originating northward app.
     async fn handle_write_point(
         app_id: i32,
         req: WritePoint,
@@ -1950,272 +1905,18 @@ impl NGGateway {
         metrics_hub: &Arc<NGMetricsHub>,
         write_serializers: &Arc<WriteSerializers>,
     ) {
-        // Single lookup for both meta + runtime point (hot-path optimization).
-        let Some((meta, point)) = southward_manager.get_point_entry(req.point_id) else {
-            let resp = WritePointResponse::failed(
-                req.request_id.clone(),
-                req.point_id,
-                0,
-                Arc::<str>::from("unknown"),
-                Arc::<str>::from("unknown"),
-                WritePointError::new(
-                    WritePointErrorKind::NotFound,
-                    format!("point {} not found", req.point_id),
-                ),
-                Utc::now(),
-            );
-            northward_manager
-                .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
-                .await;
-            return;
-        };
-
-        // From here, we can always include device_id in response.
-        let device_id = meta.device_id;
-        let channel_id = meta.channel_id;
-        let device_name = Arc::clone(&meta.device_name);
-        let point_key = Arc::clone(&meta.point_key);
-
-        // Access mode validation
-        if !matches!(meta.access_mode, AccessMode::Write | AccessMode::ReadWrite) {
-            let resp = WritePointResponse::failed(
-                req.request_id.clone(),
-                req.point_id,
-                device_id,
-                Arc::clone(&device_name),
-                Arc::clone(&point_key),
-                WritePointError::new(WritePointErrorKind::NotWriteable, "point is not writeable"),
-                Utc::now(),
-            );
-            northward_manager
-                .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
-                .await;
-            return;
-        }
-
-        // Datatype validation (northward sends logical value).
-        let expected_dt = meta.logical_data_type();
-        if !req.value.validate_datatype(expected_dt) {
-            let resp = WritePointResponse::failed(
-                req.request_id.clone(),
-                req.point_id,
-                device_id,
-                Arc::clone(&device_name),
-                Arc::clone(&point_key),
-                WritePointError::new(
-                    WritePointErrorKind::TypeMismatch,
-                    format!(
-                        "type mismatch: expected {:?}, got {:?}",
-                        expected_dt,
-                        req.value.data_type()
-                    ),
-                ),
-                Utc::now(),
-            );
-            northward_manager
-                .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
-                .await;
-            return;
-        }
-
-        // Range validation (numeric only)
-        if let (Some(min), Some(max)) = (meta.min_value, meta.max_value) {
-            if let Ok(n) = f64::try_from(&req.value) {
-                if n < min || n > max {
-                    let resp = WritePointResponse::failed(
-                        req.request_id.clone(),
-                        req.point_id,
-                        device_id,
-                        Arc::clone(&device_name),
-                        Arc::clone(&point_key),
-                        WritePointError::new(
-                            WritePointErrorKind::OutOfRange,
-                            format!("out of range: {n} not in [{min}, {max}]"),
-                        ),
-                        Utc::now(),
-                    );
-                    northward_manager
-                        .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
-                        .await;
-                    return;
-                }
-            }
-        }
-
-        // Channel connection validation
-        if !southward_manager.is_channel_connected(meta.channel_id) {
-            let resp = WritePointResponse::failed(
-                req.request_id.clone(),
-                req.point_id,
-                device_id,
-                Arc::clone(&device_name),
-                Arc::clone(&point_key),
-                WritePointError::new(
-                    WritePointErrorKind::NotConnected,
-                    format!("channel {} not connected", meta.channel_id),
-                ),
-                Utc::now(),
-            );
-            northward_manager
-                .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
-                .await;
-            return;
-        }
-
-        // Destructure request to avoid cloning the payload.
-        let WritePoint {
-            request_id,
-            point_id,
-            value,
-            timeout_ms,
-            ..
-        } = req;
-
-        // Convert logical -> wire value before acquiring the channel write lock.
-        // Strong failure policy: never write incorrect values to devices.
-        let wire_value = match ValueCodec::logical_to_wire_value(
-            &value,
-            expected_dt,
-            point.wire_data_type(),
-            point.transform(),
-        ) {
-            Ok(v) => v,
+        // Phase 1: resolve + validate (sync).
+        let resolved = match Self::resolve_write(southward_manager, req.point_id, &req.value) {
+            Ok(r) => r,
             Err(e) => {
-                let kind = match &e {
-                    DriverError::ValidationError(msg) => {
-                        if msg.contains("out of range") {
-                            WritePointErrorKind::OutOfRange
-                        } else {
-                            WritePointErrorKind::TypeMismatch
-                        }
-                    }
-                    _ => WritePointErrorKind::DriverError,
-                };
-                northward_manager
-                    .send_to_app(
-                        Arc::new(NorthwardData::WritePointResponse(
-                            WritePointResponse::failed(
-                                request_id.clone(),
-                                point_id,
-                                device_id,
-                                Arc::clone(&device_name),
-                                Arc::clone(&point_key),
-                                WritePointError::new(kind, e.to_string()),
-                                Utc::now(),
-                            ),
-                        )),
-                        app_id,
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        // Serialize writes per channel.
-        let sem = write_serializers.semaphore_for(meta.channel_id);
-        let start = Instant::now();
-        let control_driver = southward_manager
-            .snapshot_channel_driver_label(meta.channel_id)
-            .unwrap_or(Arc::<str>::from("unknown"));
-        let control = metrics_hub
-            .register_control_channel_metrics(meta.channel_id, Arc::clone(&control_driver))
-            .ok();
-        let permit = match timeout_ms {
-            Some(ms) => {
-                let total = Duration::from_millis(ms);
-                match timeout(total, sem.clone().acquire_owned()).await {
-                    Ok(Ok(p)) => {
-                        if let Some(h) = &control {
-                            h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
-                        }
-                        Some((p, total))
-                    }
-                    Ok(Err(_)) => None,
-                    Err(_) => {
-                        if let Some(h) = &control {
-                            h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
-                            h.inc_write_request(ControlResult::Timeout);
-                        }
-                        let resp = WritePointResponse::failed(
-                            request_id.clone(),
-                            point_id,
-                            device_id,
-                            Arc::clone(&device_name),
-                            Arc::clone(&point_key),
-                            WritePointError::new(
-                                WritePointErrorKind::QueueTimeout,
-                                format!("queue timeout after {ms}ms"),
-                            ),
-                            Utc::now(),
-                        );
-                        northward_manager
-                            .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
-                            .await;
-                        return;
-                    }
-                }
-            }
-            None => match sem.clone().acquire_owned().await {
-                Ok(p) => {
-                    if let Some(h) = &control {
-                        h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
-                    }
-                    Some((p, Duration::from_millis(0)))
-                }
-                Err(_) => None,
-            },
-        };
-
-        let Some((permit, total_timeout)) = permit else {
-            if let Some(h) = &control {
-                h.observe_write_queue_wait_seconds(start.elapsed().as_secs_f64());
-                h.inc_write_request(ControlResult::Fail);
-            }
-            let resp = WritePointResponse::failed(
-                request_id.clone(),
-                point_id,
-                device_id,
-                Arc::clone(&device_name),
-                Arc::clone(&point_key),
-                WritePointError::new(
-                    WritePointErrorKind::DriverError,
-                    "failed to acquire channel write lock",
-                ),
-                Utc::now(),
-            );
-            northward_manager
-                .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
-                .await;
-            return;
-        };
-
-        // Remaining budget (best-effort): subtract queue wait time from overall timeout.
-        let remaining_timeout_ms = match timeout_ms {
-            Some(_ms) => {
-                let elapsed = start.elapsed();
-                let total = total_timeout;
-                let rem = total.checked_sub(elapsed).unwrap_or_default();
-                let rem_ms = rem.as_millis().min(u64::MAX as u128) as u64;
-                Some(rem_ms.max(1))
-            }
-            None => None,
-        };
-
-        // Snapshot device + point and release dashmap refs before awaiting.
-        let device = match southward_manager.get_device(device_id) {
-            Some(d) => d,
-            None => {
-                drop(permit);
+                // Point lookup may have failed — use best-effort fallback context.
                 let resp = WritePointResponse::failed(
-                    request_id.clone(),
-                    point_id,
-                    device_id,
-                    Arc::clone(&device_name),
-                    Arc::clone(&point_key),
-                    WritePointError::new(
-                        WritePointErrorKind::NotFound,
-                        format!("device {} not found", device_id),
-                    ),
+                    req.request_id.clone(),
+                    req.point_id,
+                    0,
+                    Arc::<str>::from("unknown"),
+                    Arc::<str>::from("unknown"),
+                    e,
                     Utc::now(),
                 );
                 northward_manager
@@ -2224,61 +1925,44 @@ impl NGGateway {
                 return;
             }
         };
-        let driver = Arc::clone(&device.driver);
-        let device_cfg = Arc::clone(&device.config);
-        drop(device);
 
-        // Execute driver write (still serialized by permit).
-        let prom = southward_manager.get_channel_metric_handles(channel_id);
-        let io_start = Instant::now();
-        let write_res = driver
-            .write_point(device_cfg, point, &wire_value, remaining_timeout_ms)
-            .await;
-        if let Some(h) = &prom {
-            let elapsed = io_start.elapsed();
-            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
-            let elapsed_seconds = elapsed.as_secs_f64();
-            if write_res.is_ok() {
-                h.record_io_success(elapsed_ns, elapsed_seconds);
-            } else {
-                h.record_io_failed(elapsed_ns, elapsed_seconds);
-            }
-        }
-        if let Some(h) = &control {
-            let elapsed = io_start.elapsed().as_secs_f64();
-            if write_res.is_ok() {
-                h.inc_write_request(ControlResult::Success);
-                h.observe_write_execute_seconds(ControlResult::Success, elapsed);
-            } else {
-                h.inc_write_request(ControlResult::Fail);
-                h.observe_write_execute_seconds(ControlResult::Fail, elapsed);
-            }
-        }
+        // Snapshot response context from resolved metadata (cheap Arc clones).
+        let point_id = resolved.point_id;
+        let device_id = resolved.device_id;
+        let device_name = Arc::clone(&resolved.device_name);
+        let point_key = Arc::clone(&resolved.point_key);
 
-        drop(permit);
-
-        let resp = match write_res {
-            Ok(_r) => WritePointResponse::success(
-                request_id,
+        // Phase 2: serialize + execute (async, I/O).
+        let resp = match Self::execute_write(
+            southward_manager,
+            write_serializers,
+            metrics_hub,
+            &resolved,
+            req.timeout_ms,
+        )
+        .await
+        {
+            Ok(()) => WritePointResponse::success(
+                req.request_id,
                 point_id,
                 device_id,
                 device_name,
                 point_key,
-                Some(value),
+                Some(req.value),
                 Utc::now(),
             ),
             Err(e) => WritePointResponse::failed(
-                request_id.clone(),
+                req.request_id.clone(),
                 point_id,
                 device_id,
-                Arc::clone(&device_name),
-                Arc::clone(&point_key),
-                WritePointError::new(WritePointErrorKind::DriverError, e.to_string()),
+                device_name,
+                point_key,
+                e,
                 Utc::now(),
             ),
         };
 
-        // Control-plane replies must not be dropped; give it a bounded send timeout.
+        // Control-plane replies must not be dropped.
         northward_manager
             .send_to_app(Arc::new(NorthwardData::WritePointResponse(resp)), app_id)
             .await;
@@ -2450,6 +2134,251 @@ impl NGGateway {
 
         info!("Gateway resumed successfully");
         Ok(())
+    }
+
+    /// Phase 1 — Resolve point, validate constraints, and convert to wire value.
+    ///
+    /// This is a **synchronous** validation pass — no I/O, no async, no locks.
+    /// All checks are performed before any per-channel semaphore is acquired.
+    ///
+    /// # Validation steps (in order)
+    /// 1. Point lookup via `get_point_entry`
+    /// 2. Access-mode check (must be `Write` or `ReadWrite`)
+    /// 3. Data-type check (`value.validate_datatype`)
+    /// 4. Range check (numeric min/max when configured)
+    /// 5. Channel connection check
+    /// 6. Logical → wire value conversion (`ValueCodec`)
+    ///
+    /// # Errors
+    /// Returns [`WritePointError`] with a structured [`WritePointErrorKind`] so
+    /// both the HTTP API path and the northward event path can map it into their
+    /// respective response formats.
+    fn resolve_write(
+        southward_manager: &NGSouthwardManager,
+        point_id: i32,
+        value: &NGValue,
+    ) -> Result<ResolvedWrite, WritePointError> {
+        // 1. Point lookup.
+        let (meta, point) =
+            southward_manager
+                .get_point_entry(point_id)
+                .ok_or(WritePointError::new(
+                    WritePointErrorKind::NotFound,
+                    format!("point {} not found in runtime index", point_id),
+                ))?;
+
+        let device_id = meta.device_id;
+        let channel_id = meta.channel_id;
+        let device_name = Arc::clone(&meta.device_name);
+        let point_key = Arc::clone(&meta.point_key);
+
+        // 2. Access-mode validation.
+        if !matches!(meta.access_mode, AccessMode::Write | AccessMode::ReadWrite) {
+            return Err(WritePointError::new(
+                WritePointErrorKind::NotWriteable,
+                format!(
+                    "point '{}' on device {} is not writable (mode={:?})",
+                    point_key, device_id, meta.access_mode
+                ),
+            ));
+        }
+
+        // 3. Data-type validation (northward sends logical value).
+        let expected_dt = meta.logical_data_type();
+        if !value.validate_datatype(expected_dt) {
+            return Err(WritePointError::new(
+                WritePointErrorKind::TypeMismatch,
+                format!(
+                    "type mismatch: expected {:?}, got {:?}",
+                    expected_dt,
+                    value.data_type()
+                ),
+            ));
+        }
+
+        // 4. Range validation (numeric only, when configured).
+        if let (Some(min), Some(max)) = (meta.min_value, meta.max_value) {
+            if let Ok(n) = f64::try_from(value) {
+                if n < min || n > max {
+                    return Err(WritePointError::new(
+                        WritePointErrorKind::OutOfRange,
+                        format!("value out of range: {} not in [{}, {}]", n, min, max),
+                    ));
+                }
+            }
+        }
+
+        // 5. Channel connection validation.
+        if !southward_manager.is_channel_connected(channel_id) {
+            return Err(WritePointError::new(
+                WritePointErrorKind::NotConnected,
+                format!("channel {} not connected", channel_id),
+            ));
+        }
+
+        // 6. Logical → wire value conversion.
+        // Strong failure policy: never write incorrect values to devices.
+        let wire_value = ValueCodec::logical_to_wire_value(
+            value,
+            expected_dt,
+            point.wire_data_type(),
+            point.transform(),
+        )
+        .map_err(|e| {
+            let kind = match &e {
+                DriverError::ValidationError(msg) if msg.contains("out of range") => {
+                    WritePointErrorKind::OutOfRange
+                }
+                DriverError::ValidationError(_) => WritePointErrorKind::TypeMismatch,
+                _ => WritePointErrorKind::DriverError,
+            };
+            WritePointError::new(kind, e.to_string())
+        })?;
+
+        Ok(ResolvedWrite {
+            point_id,
+            device_id,
+            channel_id,
+            device_name,
+            point_key,
+            point,
+            wire_value,
+        })
+    }
+
+    /// Phase 2 — Acquire per-channel write lock and execute driver I/O.
+    ///
+    /// Takes a validated [`ResolvedWrite`] produced by [`Self::resolve_write`] and:
+    /// 1. Acquires the per-channel semaphore (with optional timeout budget).
+    /// 2. Computes remaining timeout after queue wait.
+    /// 3. Snapshots the device driver (releases DashMap guard before await).
+    /// 4. Delegates to `driver.write_point()`.
+    /// 5. Records queue-wait and I/O metrics via `metrics_hub`.
+    ///
+    /// # Metrics
+    /// Both the HTTP API path and the northward event path share this method,
+    /// so control-plane and I/O metrics are recorded uniformly for all writes.
+    async fn execute_write(
+        southward_manager: &NGSouthwardManager,
+        write_serializers: &WriteSerializers,
+        metrics_hub: &NGMetricsHub,
+        resolved: &ResolvedWrite,
+        timeout_ms: Option<u64>,
+    ) -> Result<(), WritePointError> {
+        let channel_id = resolved.channel_id;
+        let device_id = resolved.device_id;
+
+        // ── Metrics handles (best-effort, never fail the write) ──
+        let control_driver = southward_manager
+            .snapshot_channel_driver_label(channel_id)
+            .unwrap_or(Arc::<str>::from("unknown"));
+        let control = metrics_hub
+            .register_control_channel_metrics(channel_id, Arc::clone(&control_driver))
+            .ok();
+        let prom = southward_manager.get_channel_metric_handles(channel_id);
+
+        // ── 1. Per-channel write serialization ──
+        let sem = write_serializers.semaphore_for(channel_id);
+        let queue_start = Instant::now();
+
+        let permit = match timeout_ms {
+            Some(ms) => {
+                let total = Duration::from_millis(ms);
+                match timeout(total, sem.clone().acquire_owned()).await {
+                    Ok(Ok(p)) => {
+                        if let Some(h) = &control {
+                            h.observe_write_queue_wait_seconds(queue_start.elapsed().as_secs_f64());
+                        }
+                        p
+                    }
+                    Ok(Err(_)) => {
+                        return Err(WritePointError::new(
+                            WritePointErrorKind::DriverError,
+                            "write serializer semaphore closed",
+                        ));
+                    }
+                    Err(_) => {
+                        if let Some(h) = &control {
+                            h.observe_write_queue_wait_seconds(queue_start.elapsed().as_secs_f64());
+                            h.inc_write_request(ControlResult::Timeout);
+                        }
+                        return Err(WritePointError::new(
+                            WritePointErrorKind::QueueTimeout,
+                            format!("queue timeout after {}ms", ms),
+                        ));
+                    }
+                }
+            }
+            None => {
+                let p = sem.acquire_owned().await.map_err(|_| {
+                    WritePointError::new(
+                        WritePointErrorKind::DriverError,
+                        "write serializer semaphore closed",
+                    )
+                })?;
+                if let Some(h) = &control {
+                    h.observe_write_queue_wait_seconds(queue_start.elapsed().as_secs_f64());
+                }
+                p
+            }
+        };
+
+        // ── 2. Remaining timeout budget ──
+        let remaining_timeout_ms = timeout_ms.map(|ms| {
+            let total = Duration::from_millis(ms);
+            let rem = total.checked_sub(queue_start.elapsed()).unwrap_or_default();
+            (rem.as_millis().min(u64::MAX as u128) as u64).max(1)
+        });
+
+        // ── 3. Snapshot device + driver (release DashMap guard before await) ──
+        let device = southward_manager
+            .get_device(device_id)
+            .ok_or(WritePointError::new(
+                WritePointErrorKind::NotFound,
+                format!("device {} not found in runtime", device_id),
+            ))?;
+        let driver = Arc::clone(&device.driver);
+        let device_cfg = Arc::clone(&device.config);
+        drop(device);
+
+        // ── 4. Execute driver write (still serialized by permit) ──
+        let io_start = Instant::now();
+        let write_res = driver
+            .write_point(
+                device_cfg,
+                Arc::clone(&resolved.point),
+                &resolved.wire_value,
+                remaining_timeout_ms,
+            )
+            .await;
+
+        // ── 5. Record I/O metrics ──
+        if let Some(h) = &prom {
+            let elapsed = io_start.elapsed();
+            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+            let elapsed_seconds = elapsed.as_secs_f64();
+            if write_res.is_ok() {
+                h.record_io_success(elapsed_ns, elapsed_seconds);
+            } else {
+                h.record_io_failed(elapsed_ns, elapsed_seconds);
+            }
+        }
+        if let Some(h) = &control {
+            let elapsed = io_start.elapsed().as_secs_f64();
+            if write_res.is_ok() {
+                h.inc_write_request(ControlResult::Success);
+                h.observe_write_execute_seconds(ControlResult::Success, elapsed);
+            } else {
+                h.inc_write_request(ControlResult::Fail);
+                h.observe_write_execute_seconds(ControlResult::Fail, elapsed);
+            }
+        }
+
+        drop(permit);
+
+        write_res
+            .map(|_| ())
+            .map_err(|e| WritePointError::new(WritePointErrorKind::DriverError, e.to_string()))
     }
 }
 

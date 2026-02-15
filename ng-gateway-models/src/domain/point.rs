@@ -3,7 +3,7 @@ use crate::{
     entities::point::ActiveModel,
     enums::common::{AccessMode, DataPointType, DataType},
 };
-use ng_gateway_sdk::{DriverError, FromValidatedRow, NGValue, RowMappingContext, ValidatedRow};
+use ng_gateway_sdk::{DriverError, FromValidatedRow, RowMappingContext, ValidatedRow};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, ModelTrait};
 use serde::{Deserialize, Serialize};
 use serde_aux::prelude::*;
@@ -259,6 +259,11 @@ pub struct UpdatePoint {
 ///
 /// Used by `POST /api/point/write` to dispatch a synchronous write
 /// through the gateway to the underlying southward driver.
+///
+/// The `value` field is kept as raw `serde_json::Value` intentionally:
+/// JSON has no concept of f32 vs f64 (or i8 vs i64), so we defer the
+/// conversion to `NGValue` until the gateway resolves the point's
+/// expected `DataType` and calls `NGValue::try_from_json_scalar`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WritePointPayload {
@@ -266,8 +271,9 @@ pub struct WritePointPayload {
     pub device_id: i32,
     /// Point key within the device (e.g. `"p1"`).
     pub point_key: String,
-    /// Logical value to write (northward semantics, deserialized from JSON).
-    pub value: NGValue,
+    /// Raw JSON value to write; converted to `NGValue` by the gateway
+    /// using the point's declared `DataType`.
+    pub value: serde_json::Value,
     /// Optional overall timeout in milliseconds (queue wait + driver I/O).
     #[serde(default)]
     pub timeout_ms: Option<u64>,

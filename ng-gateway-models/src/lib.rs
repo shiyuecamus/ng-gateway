@@ -36,7 +36,7 @@ use ng_gateway_error::{
     storage::{CacheError, StorageError},
     NGResult,
 };
-use ng_gateway_sdk::{ConnectionState, NGValue, NorthwardData};
+use ng_gateway_sdk::{ConnectionState, NorthwardData};
 use sea_orm::DatabaseConnection;
 use settings::Settings;
 use std::{sync::Arc, time::Duration};
@@ -419,16 +419,21 @@ pub trait PointRuntimeCmd: DowncastSync + Send + Sync + 'static {
     /// access mode / data type / range, converts logical → wire value, and
     /// delegates to the underlying driver with per-channel serialization.
     ///
+    /// The `value` is accepted as raw `serde_json::Value` because JSON has no
+    /// concept of narrow numeric types (f32 vs f64, i8 vs i64, etc.).  The
+    /// implementation uses `NGValue::try_from_json_scalar` with the point's
+    /// declared `DataType` to produce the correctly-typed `NGValue`.
+    ///
     /// # Arguments
     /// * `device_id`  - Target device identifier (primary key).
     /// * `point_key`  - Point key within the device (e.g. `"p1"`).
-    /// * `value`      - Logical value to write (northward semantics).
+    /// * `value`      - Raw JSON value; converted to `NGValue` internally.
     /// * `timeout_ms` - Optional overall timeout in milliseconds (queue wait + driver I/O).
     async fn write_point(
         &self,
         device_id: i32,
         point_key: String,
-        value: NGValue,
+        value: serde_json::Value,
         timeout_ms: Option<u64>,
     ) -> NGResult<()>;
 }
