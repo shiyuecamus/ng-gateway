@@ -127,11 +127,10 @@ impl ModbusHandle {
 
     #[inline]
     fn effective_pool_size(&self) -> usize {
-        let size = match &self.inner.config.connection {
+        match &self.inner.config.connection {
             ModbusConnection::Tcp { .. } => self.inner.config.tcp_pool_size.clamp(1, 32) as usize,
             ModbusConnection::Rtu { .. } => 1,
-        };
-        size
+        }
     }
 
     #[inline]

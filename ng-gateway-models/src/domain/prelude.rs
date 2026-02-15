@@ -27,7 +27,9 @@ pub use crate::domain::{
         TcpConnectRequest, TcpConnectResponse,
     },
     plugin::{NewPlugin, PluginInfo, PluginPageParams, UpdatePlugin},
-    point::{NewPoint, PointInfo, PointPageParams, UpdatePoint},
+    point::{
+        NewPoint, PointInfo, PointPageParams, UpdatePoint, WritePointPayload, WritePointResult,
+    },
     relation::{NewRelation, RelationDelete, RelationInfo, RelationQuery, UpdateRelation},
     role::{
         ChangeRoleStatus, NewRole, NewRoleWithId, RoleInfo, RolePageParams, SimpleRole, UpdateRole,

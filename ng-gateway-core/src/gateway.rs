@@ -266,6 +266,14 @@ pub struct NGGateway {
     forwarding_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Northward events task handle for graceful shutdown
     northward_events_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Per-channel write serializers shared by both northward pipeline and web API.
+    ///
+    /// # Notes
+    /// Using a single shared instance guarantees that concurrent write requests
+    /// from different entry points (northward plugin events vs REST API) are
+    /// properly serialized per channel, preventing driver flooding.
+    write_serializers: Arc<WriteSerializers>,
+
     /// Cancellation token for tasks
     shutdown_token: CancellationToken,
 }
@@ -454,6 +462,7 @@ impl Gateway for NGGateway {
             start_time: Some(Utc::now()),
             forwarding_tasks: Arc::new(RwLock::new(Vec::new())),
             northward_events_tasks: Arc::new(RwLock::new(Vec::new())),
+            write_serializers: Arc::new(WriteSerializers::default()),
             shutdown_token: CancellationToken::new(),
         });
 
@@ -1054,6 +1063,137 @@ impl PointRuntimeCmd for NGGateway {
         }
         Ok(())
     }
+
+    async fn write_point(
+        &self,
+        device_id: i32,
+        point_key: String,
+        value: ng_gateway_sdk::NGValue,
+        timeout_ms: Option<u64>,
+    ) -> NGResult<()> {
+        // 1. Resolve the point from device_id + point_key via the runtime index.
+        let points = self.southward_manager.get_device_points(device_id);
+        let runtime_point = points
+            .iter()
+            .find(|p| p.key() == point_key)
+            .ok_or_else(|| {
+                NGError::Error(format!(
+                    "point '{}' not found on device {}",
+                    point_key, device_id
+                ))
+            })?;
+        let point_id = runtime_point.id();
+
+        // 2. Get point entry (meta + runtime point) for validation.
+        let (meta, point) = self
+            .southward_manager
+            .get_point_entry(point_id)
+            .ok_or_else(|| {
+                NGError::Error(format!(
+                    "point entry {} not found in runtime index",
+                    point_id
+                ))
+            })?;
+
+        // 3. Access mode validation.
+        if !matches!(meta.access_mode, AccessMode::Write | AccessMode::ReadWrite) {
+            return Err(NGError::Error(format!(
+                "point '{}' on device {} is not writable",
+                point_key, device_id
+            )));
+        }
+
+        // 4. Data type validation (northward sends logical value).
+        let expected_dt = meta.logical_data_type();
+        if !value.validate_datatype(expected_dt) {
+            return Err(NGError::Error(format!(
+                "type mismatch: expected {:?}, got {:?}",
+                expected_dt,
+                value.data_type()
+            )));
+        }
+
+        // 5. Range validation (numeric only).
+        if let (Some(min), Some(max)) = (meta.min_value, meta.max_value) {
+            if let Ok(n) = f64::try_from(&value) {
+                if n < min || n > max {
+                    return Err(NGError::Error(format!(
+                        "value out of range: {} not in [{}, {}]",
+                        n, min, max
+                    )));
+                }
+            }
+        }
+
+        // 6. Channel connection validation.
+        if !self.southward_manager.is_channel_connected(meta.channel_id) {
+            return Err(NGError::Error(format!(
+                "channel {} not connected",
+                meta.channel_id
+            )));
+        }
+
+        // 7. Logical → wire value conversion (strong failure: never write incorrect values).
+        let wire_value = ValueCodec::logical_to_wire_value(
+            &value,
+            expected_dt,
+            point.wire_data_type(),
+            point.transform(),
+        )
+        .map_err(|e| NGError::Error(e.to_string()))?;
+
+        // 8. Per-channel write serialization (shared with northward pipeline).
+        let sem = self.write_serializers.semaphore_for(meta.channel_id);
+        let start = Instant::now();
+
+        let permit = match timeout_ms {
+            Some(ms) => {
+                let total = Duration::from_millis(ms);
+                match timeout(total, sem.clone().acquire_owned()).await {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(_)) => {
+                        return Err(NGError::Error(
+                            "write serializer semaphore closed".to_string(),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(NGError::Timeout(Duration::from_millis(ms)));
+                    }
+                }
+            }
+            None => sem
+                .acquire_owned()
+                .await
+                .map_err(|_| NGError::Error("write serializer semaphore closed".to_string()))?,
+        };
+
+        // 9. Remaining timeout budget (subtract queue wait from overall budget).
+        let remaining_timeout_ms = timeout_ms.map(|ms| {
+            let elapsed = start.elapsed();
+            let total = Duration::from_millis(ms);
+            let rem = total.checked_sub(elapsed).unwrap_or_default();
+            rem.as_millis().min(u64::MAX as u128) as u64
+        });
+
+        // 10. Snapshot driver and device config (release DashMap guard before await).
+        let device = self
+            .southward_manager
+            .get_device(device_id)
+            .ok_or_else(|| NGError::Error(format!("device {} not found in runtime", device_id)))?;
+        let driver = Arc::clone(&device.driver);
+        let device_cfg = Arc::clone(&device.config);
+        drop(device);
+
+        // 11. Execute driver write (still serialized by permit).
+        let write_res = driver
+            .write_point(device_cfg, point, &wire_value, remaining_timeout_ms)
+            .await;
+        drop(permit);
+
+        write_res
+            .map(|_| ())
+            .map_err(|e| NGError::Error(e.to_string()))
+    }
 }
 
 #[async_trait]
@@ -1568,10 +1708,10 @@ impl NGGateway {
         northward_manager: Arc<NGNorthwardManager>,
         southward_manager: Arc<NGSouthwardManager>,
         metrics_hub: Arc<NGMetricsHub>,
+        write_serializers: Arc<WriteSerializers>,
         token: CancellationToken,
         mut events_rx: EventsReceiver,
     ) -> tokio::task::JoinHandle<()> {
-        let write_serializers = Arc::new(WriteSerializers::default());
         tokio::spawn(
             async move {
                 info!("🚀 Unified northward event processor started");
@@ -1667,6 +1807,7 @@ impl NGGateway {
             Arc::clone(&self.northward_manager),
             Arc::clone(&self.southward_manager),
             Arc::clone(&self.metrics_hub),
+            Arc::clone(&self.write_serializers),
             self.shutdown_token.clone(),
             rx,
         );
@@ -1695,6 +1836,7 @@ impl NGGateway {
             Arc::clone(&self.northward_manager),
             Arc::clone(&self.southward_manager),
             Arc::clone(&self.metrics_hub),
+            Arc::clone(&self.write_serializers),
             self.shutdown_token.clone(),
             events_rx,
         );

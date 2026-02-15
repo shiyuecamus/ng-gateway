@@ -3,7 +3,7 @@ use crate::{
     entities::point::ActiveModel,
     enums::common::{AccessMode, DataPointType, DataType},
 };
-use ng_gateway_sdk::{DriverError, FromValidatedRow, RowMappingContext, ValidatedRow};
+use ng_gateway_sdk::{DriverError, FromValidatedRow, NGValue, RowMappingContext, ValidatedRow};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, ModelTrait};
 use serde::{Deserialize, Serialize};
 use serde_aux::prelude::*;
@@ -253,4 +253,32 @@ pub struct UpdatePoint {
     pub transform_negate: bool,
     /// Driver configuration payload
     pub driver_config: Json,
+}
+
+/// Request payload for writing a value to a single point (control-plane).
+///
+/// Used by `POST /api/point/write` to dispatch a synchronous write
+/// through the gateway to the underlying southward driver.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WritePointPayload {
+    /// Target device identifier (primary key).
+    pub device_id: i32,
+    /// Point key within the device (e.g. `"p1"`).
+    pub point_key: String,
+    /// Logical value to write (northward semantics, deserialized from JSON).
+    pub value: NGValue,
+    /// Optional overall timeout in milliseconds (queue wait + driver I/O).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Response body for a write-point operation.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WritePointResult {
+    /// Whether the write succeeded.
+    pub success: bool,
+    /// End-to-end elapsed time in milliseconds.
+    pub elapsed_ms: u128,
 }

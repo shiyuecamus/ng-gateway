@@ -1,22 +1,36 @@
 # ng-gateway-bench
 
-`ng-gateway-bench` 是一个 **基于场景的性能基准测试工具**，用于压测 ng-gateway 的南向驱动（当前包含 Modbus / OPC UA），并输出 Markdown 表格结果。
+`ng-gateway-bench` 是一个 **基于场景的性能基准测试工具**，用于压测 ng-gateway 的南向驱动（Modbus / OPC UA）以及网关 HTTP API 写点链路，并输出 Markdown 表格结果。
 
 ## 测量内容
 
-- **数据采集（Collection）**：周期调度下的端到端 `Driver::collect_data()` 执行情况（在场景频率下持续运行）
-- **数据下发（Downlink）**：在采集同时进行 `Driver::write_point()` 的响应时间（场景 7）
-- **资源摘要（best-effort）**
+- **数据采集（Collection）** — 场景 1–7
+  - 周期调度下的端到端 `Driver::collect_data()` 执行情况
+- **驱动层数据下发（Driver Downlink）** — 场景 7
+  - 在采集同时进行 `Driver::write_point()` 的响应时间
+- **API 数据下发（API Downlink）** — 场景 8
+  - 通过 HTTP `POST /api/point/write` 测试完整链路延迟：HTTP → 认证 → 网关验证 → 值转换 → 通道串行化 → 驱动写入 → HTTP 响应
+- **资源摘要（best-effort）** — 场景 1–7
   - **CPU 使用(avg)**：当前进程的平均 CPU 使用率（采样平均）
   - **内存使用(peak RSS)**：当前进程在测试窗口内的 RSS 峰值
   - **网络带宽消耗**：整机网卡累计字节数差分/时间（`receive: ... transmit: ...`，注意是**系统级**，非进程级）
 
 ## 场景说明
 
-场景定义在代码中（`ng-gateway-bench/src/scenarios.rs`），目前包含：
+场景定义在 `ng-gateway-bench/src/scenarios.rs`：
 
-- **场景 1~6**：只测采集（不同 channel/device/频率组合）
-- **场景 7**：采集 + 下发（默认下发 100 个点，默认 50 次）
+| 场景 | 类型 | 说明 |
+|---:|---|---|
+| 1 | 采集 | 1 ch · 10 dev · 1k pts · 1000 ms |
+| 2 | 采集 | 5 ch · 10 dev · 1k pts · 1000 ms |
+| 3 | 采集 | 10 ch · 10 dev · 1k pts · 1000 ms |
+| 4 | 采集 | 1 ch · 1 dev · 1k pts · 100 ms |
+| 5 | 采集 | 5 ch · 1 dev · 1k pts · 100 ms |
+| 6 | 采集 | 10 ch · 1 dev · 1k pts · 100 ms |
+| 7 | 采集 + 驱动下发 | 10 ch · 10 dev · 1k pts · 1000 ms + driver `write_point` |
+| 8 | API 写点 | 纯 HTTP API `write_point` 延迟测试（无需本地驱动） |
+
+> **场景 8** 不建立本地通道/驱动，bench 仅作为 HTTP 客户端向运行中的网关发送写点请求。需要通过 `--api-base-url` 指定网关地址。
 
 ## 快速开始
 
@@ -24,124 +38,198 @@
 
 由于 Rust 链接限制（多个驱动包含相同的 C-ABI 符号），测试不同协议时需要使用不同的 `--features` 参数。
 
-### 测试 Modbus
-
-默认开启 Modbus feature，无需额外参数。
+### Modbus — 采集测试（场景 1–6）
 
 ```bash
-# 运行单个场景 (场景 3)
-cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 3
+# 运行单个场景
+cargo run --release -p ng-gateway-bench -- --protocol modbus --scenario 3
 
-# 运行所有场景 (1..=7)
-cargo run --release --bin ng-gateway-bench -- --protocol modbus --all-scenarios
+# 运行所有场景（1–7，场景 8 需要 --api-base-url 才会包含）
+cargo run --release -p ng-gateway-bench -- --protocol modbus --all-scenarios
 ```
 
-### 测试 OPC UA
+### Modbus — 混合负载测试（场景 7：采集 + 驱动下发）
+
+```bash
+cargo run --release -p ng-gateway-bench -- \
+  --protocol modbus \
+  --scenario 7 \
+  --downlink-points 100 \
+  --downlink-iterations 50 \
+  --downlink-timeout-ms 3000
+```
+
+### Modbus — API 写点延迟测试（场景 8）
+
+```bash
+cargo run --release -p ng-gateway-bench -- \
+  --protocol modbus \
+  --scenario 8 \
+  --api-base-url http://192.168.1.11:8978 \
+  --api-username system_admin \
+  --api-password system_admin \
+  --api-device-id-start 1 \
+  --api-device-id-end 100 \
+  --api-point-key-prefix p \
+  --api-points-per-device 1000 \
+  --api-downlink-iterations 100 \
+  --api-downlink-timeout-ms 3000
+```
+
+### OPC UA — 采集测试
 
 必须显式**禁用默认 feature** 并 **开启 opcua feature**。
 
 ```bash
-# 运行单个场景 (场景 3)
-cargo run --release --bin ng-gateway-bench --no-default-features --features opcua -- --protocol opcua --scenario 3
+# 运行单个场景
+cargo run --release -p ng-gateway-bench --no-default-features --features opcua -- \
+  --protocol opcua --scenario 3
 
-# 运行所有场景 (1..=7)
-cargo run --release --bin ng-gateway-bench --no-default-features --features opcua -- --protocol opcua --all-scenarios
+# 运行所有场景
+cargo run --release -p ng-gateway-bench --no-default-features --features opcua -- \
+  --protocol opcua --all-scenarios
 ```
 
-### 调整预热/测量时长（更接近稳态）
+### OPC UA — API 写点延迟测试（场景 8）
 
 ```bash
-cargo run --release --bin ng-gateway-bench --no-default-features --features opcua -- \
-  --protocol opcua --scenario 3 --warmup-secs 10 --duration-secs 60
+cargo run --release -p ng-gateway-bench --no-default-features --features opcua -- \
+  --protocol opcua \
+  --scenario 8 \
+  --api-base-url http://192.168.1.11:8978 \
+  --api-username system_admin \
+  --api-password system_admin \
+  --api-device-id-start 1 \
+  --api-device-id-end 100 \
+  --api-point-key-prefix p \
+  --api-points-per-device 1000 \
+  --api-downlink-iterations 100 \
+  --api-downlink-timeout-ms 3000
 ```
 
-### 调整资源采样间隔（更细粒度/更低开销）
+### 全场景一次跑完（1–8）
 
 ```bash
-cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 3 --sample-interval-ms 200
+cargo run --release -p ng-gateway-bench -- \
+  --protocol modbus \
+  --all-scenarios \
+  --api-base-url http://192.168.1.11:8978 \
+  --api-username system_admin \
+  --api-password system_admin \
+  --api-device-id-start 1 \
+  --api-device-id-end 100 \
+  --api-downlink-iterations 100
 ```
 
-### 场景 7：调整下发点数/次数/超时
+> `--all-scenarios` 会自动运行 1–8。若未提供 `--api-base-url`，场景 8 将被静默跳过。
+
+### 调整预热/测量时长
 
 ```bash
-cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 7 \
-  --downlink-points 100 --downlink-iterations 100 --downlink-timeout-ms 3000
+cargo run --release -p ng-gateway-bench -- \
+  --protocol modbus --scenario 3 --warmup-secs 10 --duration-secs 60
 ```
 
-## 参数说明（全部参数）
+### 调整资源采样间隔
+
+```bash
+cargo run --release -p ng-gateway-bench -- \
+  --protocol modbus --scenario 3 --sample-interval-ms 200
+```
+
+## 参数说明
 
 ### 运行控制
 
-- **`--protocol <modbus|opcua>`**
-  - 选择要测试的协议
-  - 默认：`modbus`
-- **`--scenario <1..=7>`**
-  - 选择单个场景 id
-  - 与 `--all-scenarios` 二选一
-- **`--all-scenarios`**
-  - 顺序执行所有场景（1..=7）
-  - 说明：为了结果稳定，默认按场景串行执行，避免互相干扰
-- **`--warmup-secs <seconds>`**
-  - 预热时长（秒）
-  - 预热阶段会正常采集，但**不记录**采集统计；用来避开冷启动抖动（首次连接/缓存/任务调度稳定）
-  - 默认：`5`
-- **`--duration-secs <seconds>`**
-  - 正式测量时长（秒）
-  - 默认：`20`
-- **`--sample-interval-ms <ms>`**
-  - 资源采样间隔（毫秒），用于 CPU/RSS/网络速率的采样汇总
-  - 默认：`500`
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--protocol <modbus\|opcua>` | 选择协议 | `modbus` |
+| `--scenario <1..=8>` | 选择单个场景 | — |
+| `--all-scenarios` | 顺序执行所有场景 | `false` |
+| `--warmup-secs <s>` | 预热时长（不记录统计） | `5` |
+| `--duration-secs <s>` | 正式测量时长 | `20` |
+| `--sample-interval-ms <ms>` | CPU/RSS/网络采样间隔 | `500` |
 
 ### Modbus 参数
 
-- **`--modbus-host <ip/hostname>`**：Modbus TCP server 地址，默认：`8.155.153.52`
-- **`--modbus-port <u16>`**：端口，默认：`502`
-- **`--modbus-slave-id <u8>`**：UnitId/SlaveId 起始值（base），默认：`1`
-- **`--modbus-slave-id-max <u8>`**：UnitId/SlaveId 最大值（max），默认：`10`
-  - 说明：bench 会按 device（跨 channel 的全局序号）在 `[base..=max]` 范围内轮询分配从站号；将 `max` 设为 `1` 等价于所有 device 都用 `1`
-- **`--modbus-address-base <u16>`**：寄存器起始地址，默认：`0`
-- **`--modbus-address-step <u16>`**：点位地址步进（寄存器单位），默认：`2`
-  - 说明：本 bench 将 **Float32 映射为 2 个寄存器**（`quantity = 2`），因此默认 step=2
-- **`--modbus-tcp-pool-size <u16>`**：每个 channel 的 TCP 连接池大小，默认：`1`
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--modbus-host` | Modbus TCP server 地址 | `8.155.153.52` |
+| `--modbus-port` | 端口 | `502` |
+| `--modbus-slave-id` | UnitId/SlaveId 起始值 | `1` |
+| `--modbus-slave-id-max` | UnitId/SlaveId 最大值（轮询分配） | `10` |
+| `--modbus-address-base` | 寄存器起始地址 | `0` |
+| `--modbus-address-step` | 点位地址步进（寄存器单位） | `2` |
+| `--modbus-tcp-pool-size` | 每个 channel 的 TCP 连接池大小 | `10` |
 
 ### OPC UA 参数
 
-- **`--opcua-endpoint <url>`**：OPC UA endpoint URL
-  - 默认：`opc.tcp://192.168.66.8:53530/OPCUA/SimulationServer`
-- **`--opcua-application-name <string>`**：客户端 application name（用于会话/日志标识）
-  - 默认：`SimulationServer@shiyuecamus-MacBook-Pro`
-- **`--opcua-application-uri <string>`**：客户端 application URI
-  - 默认：`urn:shiyuecamus-MacBook-Pro.local:0PCUA:SimulationServer`
-- **`--opcua-node-id-start <u32>`**：点位 NodeId 起始（本 bench 使用 `ns=3;i=<start..start+count>`）
-  - 默认：`1002`
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--opcua-endpoint` | OPC UA endpoint URL | `opc.tcp://192.168.66.8:53530/...` |
+| `--opcua-application-name` | 客户端 application name | `SimulationServer@shiyuecamus-MacBook-Pro` |
+| `--opcua-application-uri` | 客户端 application URI | `urn:shiyuecamus-MacBook-Pro.local:...` |
+| `--opcua-node-id-start` | 点位 NodeId 起始 (`ns=3;i=<start>`) | `1002` |
 
-### 下发参数（仅场景 7 生效）
+### 驱动下发参数（场景 7）
 
-- **`--downlink-points <usize>`**：下发点位数量，默认：`100`
-- **`--downlink-iterations <usize>`**：下发测试次数，默认：`50`
-- **`--downlink-timeout-ms <u64>`**：单次 `write_point` 超时（毫秒），默认：`3000`
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--downlink-points` | 下发点位数量 | `100` |
+| `--downlink-iterations` | 下发测试次数 | `50` |
+| `--downlink-timeout-ms` | 单次 `write_point` 超时 | `3000` |
 
-## 默认环境（与你当前环境一致）
+### API 下发参数（场景 8）
 
-- **OPC UA（Prosys Simulation Server）**
-  - endpoint：`opc.tcp://192.168.66.8:53530/OPCUA/SimulationServer`
-  - 点位：`ns=3;i=1001..`（通常 1000 个点）
-- **Modbus TCP（阿里云模拟器）**
-  - host：`8.155.153.52`
-  - port：`502`
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--api-base-url` | 网关 API 地址（如 `http://192.168.1.11:8978`） | — (必填) |
+| `--api-username` | 登录用户名 | `system_admin` |
+| `--api-password` | 登录密码 | `system_admin` |
+| `--api-version` | API 版本头 | `v1` |
+| `--api-device-id-start` | 设备 ID 起始（含） | `1` |
+| `--api-device-id-end` | 设备 ID 结束（含） | `100` |
+| `--api-point-key-prefix` | 点位 key 前缀（如 `p` → `p1`…`p1000`） | `p` |
+| `--api-points-per-device` | 每设备点位数 | `1000` |
+| `--api-downlink-iterations` | 写点测试次数 | `100` |
+| `--api-downlink-timeout-ms` | 单次写超时（毫秒） | `3000` |
 
-## 重要说明：Modbus Float32 映射
+## 输出说明
+
+### 数据采集性能表（场景 1–7）
+
+```
+| 场景 | 协议 | Channel数量 | 每个Channel设备数 | 每个设备点位数 | 采集频率 | 总计点位 | 点位类型 | 内存使用(peak RSS) | CPU 使用(avg) | 网络带宽消耗 |
+```
+
+> 场景 8 不出现在此表中（bench 进程不做采集）。
+
+### 数据下发延迟表（场景 7 & 8）
+
+```
+| 场景 | 协议 | 下发方式 | 设备范围 | 点位数/设备 | 测试次数 | 成功 | 失败 | 最小响应时间 | 最大响应时间 | 平均响应时间 |
+```
+
+- **下发方式**：`driver write_point`（场景 7）或 `API write_point`（场景 8）
+- **设备范围**：场景 8 显示 `1..=100` 形式；场景 7 显示 `-`
+
+## 重要说明
+
+### Modbus Float32 映射
 
 本 benchmark 将每个 Float32 点位建模为 **2 个 Modbus Holding Registers**（`quantity = 2`），默认地址布局为：
 
-- point 0 -> address 0（寄存器 0..1）
-- point 1 -> address 2（寄存器 2..3）
+- point 0 → address 0（寄存器 0..1）
+- point 1 → address 2（寄存器 2..3）
 - ...
 
-如果你的 simulator 地址布局不同，请调整：
+如果你的 simulator 地址布局不同，请调整 `--modbus-address-base` 和 `--modbus-address-step`。
 
-- `--modbus-address-base`
-- `--modbus-address-step`
+### 场景 8 前置条件
+
+- 网关必须已启动并可达
+- 网关中已创建好目标设备和点位（设备 ID 和点位 key 需与 CLI 参数匹配）
+- bench 会先调用 `/api/auth/login` 获取 Bearer token，然后复用该 token 发送所有写点请求
 
 ## 生成压测用 DevicePoints 点位表（Excel）
 
@@ -149,33 +237,17 @@ cargo run --release --bin ng-gateway-bench -- --protocol modbus --scenario 7 \
 
 - `{driver}-scenario{S}-channel{N}-device-points.xlsx`
 
-说明：
-
-- 文件为标准 **XLSX**（zip/XML）。
-- 每个文件代表 **一个 channel** 的导入数据（一张表里包含该 channel 的所有 device + points 行）。
-
-### 直接运行 Rust 生成器（二进制）
-
 ```bash
-# 生成 Modbus 的 scenario 1..7（默认 feature=modbus）
-cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables -- \
+# 生成 Modbus 的 scenario 1..7
+cargo run --release -p ng-gateway-bench --bin gen_point_tables -- \
   --all --out-dir generated --locale zh-CN
 
-# 生成 OPC UA 的 scenario 1..7（必须切换 features）
-cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables \
+# 生成 OPC UA 的 scenario 1..7
+cargo run --release -p ng-gateway-bench --bin gen_point_tables \
   --no-default-features --features opcua -- \
   --all --out-dir generated --locale zh-CN
 
 # 只生成某几个场景
-cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables -- \
+cargo run --release -p ng-gateway-bench --bin gen_point_tables -- \
   --scenarios 1,3,7 --out-dir generated --locale zh-CN
-
-# 快速冒烟（用 --all 但覆盖规模，避免生成超大文件）
-cargo run --release --manifest-path ng-gateway-bench/Cargo.toml --bin gen_point_tables -- \
-  --all --channels 1 --devices-per-channel 1 --points-per-device 10 \
-  --out-dir /tmp/ng-point-tables-smoke --locale zh-CN
-
-# Modbus：如果你的模拟器只建了 10 个从站，建议保持默认（slaveId 会分布在 1..=10）
-# 也可以显式设置：
-#   --modbus-slave-id-max 10
 ```

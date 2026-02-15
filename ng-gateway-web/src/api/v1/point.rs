@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use actix_web::{http::Method, web};
 use actix_web_validator::{Json, Path, Query};
@@ -8,7 +8,7 @@ use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE,
     domain::prelude::{
         BatchDeletePayload, ClearByDevicePayload, NewPoint, PageResult, PathId, PointInfo,
-        PointPageParams, UpdatePoint,
+        PointPageParams, UpdatePoint, WritePointPayload, WritePointResult,
     },
     enums::common::{EntityType, Operation},
     rbac::PermRule,
@@ -46,6 +46,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/detail/{id}", web::get().to(get_by_id))
         .route("/batch-delete", web::post().to(batch_delete))
         .route("/clear", web::post().to(clear))
+        .route("/write", web::post().to(write))
         .route("/{id}", web::delete().to(delete));
 }
 
@@ -132,6 +133,13 @@ pub(crate) async fn init_rbac_rules(
                     Operation::Delete,
                 )?)
                 .or(has_scope("point:delete")?),
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/write"),
+            has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?
+                .or(has_resource_operation(EntityType::Point, Operation::Write)?)
+                .or(has_scope("point:write")?),
         ),
     ];
 
@@ -327,5 +335,54 @@ pub async fn clear(
     match state.gateway.delete_points(ids).await {
         Ok(_) => Ok(WebResponse::ok(true)),
         Err(e) => Ok(WebResponse::error(&e.to_string())),
+    }
+}
+
+/// Write a value to a specific point on a device (control-plane).
+///
+/// # Endpoint
+/// `POST /api/point/write`
+///
+/// # Authorization
+/// Requires `system_admin` role or point write permission
+///
+/// # Request Body
+/// ```json
+/// {
+///   "deviceId": 1,
+///   "pointKey": "p1",
+///   "value": 123.456,
+///   "timeoutMs": 3000
+/// }
+/// ```
+///
+/// # Returns
+/// - `WebResult<WebResponse<WritePointResponse>>`: success flag + elapsed time
+#[instrument(name = "point-write", skip(state, body))]
+pub async fn write(
+    body: actix_web::web::Json<WritePointPayload>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<WritePointResult>> {
+    let payload = body.into_inner();
+    let start = Instant::now();
+
+    match state
+        .gateway
+        .write_point(
+            payload.device_id,
+            payload.point_key,
+            payload.value,
+            payload.timeout_ms,
+        )
+        .await
+    {
+        Ok(_) => {
+            let elapsed_ms = start.elapsed().as_millis();
+            Ok(WebResponse::ok(WritePointResult {
+                success: true,
+                elapsed_ms,
+            }))
+        }
+        Err(e) => Err(WebError::from(e)),
     }
 }

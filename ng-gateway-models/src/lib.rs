@@ -36,7 +36,7 @@ use ng_gateway_error::{
     storage::{CacheError, StorageError},
     NGResult,
 };
-use ng_gateway_sdk::{ConnectionState, NorthwardData};
+use ng_gateway_sdk::{ConnectionState, NGValue, NorthwardData};
 use sea_orm::DatabaseConnection;
 use settings::Settings;
 use std::{sync::Arc, time::Duration};
@@ -411,6 +411,26 @@ pub trait PointRuntimeCmd: DowncastSync + Send + Sync + 'static {
 
     /// Batch delete points (DB delete + runtime remove, transactional with compensation)
     async fn delete_points(&self, ids: Vec<i32>) -> NGResult<()>;
+
+    /// Write a value to a specific point identified by device ID and point key.
+    ///
+    /// This is the web-API entry point for control-plane writes. The gateway
+    /// implementation resolves the point from the runtime index, validates
+    /// access mode / data type / range, converts logical → wire value, and
+    /// delegates to the underlying driver with per-channel serialization.
+    ///
+    /// # Arguments
+    /// * `device_id`  - Target device identifier (primary key).
+    /// * `point_key`  - Point key within the device (e.g. `"p1"`).
+    /// * `value`      - Logical value to write (northward semantics).
+    /// * `timeout_ms` - Optional overall timeout in milliseconds (queue wait + driver I/O).
+    async fn write_point(
+        &self,
+        device_id: i32,
+        point_key: String,
+        value: NGValue,
+        timeout_ms: Option<u64>,
+    ) -> NGResult<()>;
 }
 
 #[async_trait::async_trait]
