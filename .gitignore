@@ -47,6 +47,9 @@ dist/
 # Backup files
 *.bak
 
+# Roadmap documents (local only)
+/roadmap/
+
 # By default, don't ignore .github directory!
 !.github/
 !.github/**
