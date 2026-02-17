@@ -26,7 +26,7 @@
 ---
 
 <p align="center">
-  <img alt="NG Gateway Web UI - Dashboard" width="900" src="https://i.postimg.cc/sxq899QS/ng_home.png" />
+  <img alt="NG Gateway Web UI - Dashboard" width="900" src="https://i.postimg.cc/QMSmdkgX/ng-home.png" />
   <br />
   <br />
   <img alt="NG Gateway Web UI - Channel Observability" width="900" src="https://i.postimg.cc/2yMJFFbn/ng_channel.png" />
