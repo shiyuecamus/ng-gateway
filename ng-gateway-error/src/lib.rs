@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod init;
 pub mod rbac;
 pub mod storage;

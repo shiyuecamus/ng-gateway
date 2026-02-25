@@ -20,7 +20,8 @@ pub use ng_gateway_error::{NGError, NGResult};
 // Legacy app context (keeping for backward compatibility)
 use log::Logger;
 use ng_gateway_models::constants::{
-    BUILTIN_DIR, CERT_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR, LOG_DIR, PKI_DIR, PLUGIN_DIR,
+    AI_ALGORITHMS_DIR, AI_MODELS_DIR, BUILTIN_DIR, CERT_DIR, CUSTOM_DIR, DATA_DIR, DRIVER_DIR,
+    LOG_DIR, PKI_DIR, PLUGIN_DIR,
 };
 use ng_gateway_models::{
     initializer::BuiltinSynchronizer, settings::Settings, CacheProvider, CasbinService, DbManager,
@@ -450,6 +451,9 @@ fn ensure_runtime_directories() -> NGResult<()> {
         Path::new(DRIVER_DIR).join(CUSTOM_DIR),
         Path::new(PLUGIN_DIR).join(BUILTIN_DIR),
         Path::new(PLUGIN_DIR).join(CUSTOM_DIR),
+        // AI asset directories (models + WASM algorithms).
+        Path::new(AI_MODELS_DIR).to_path_buf(),
+        Path::new(AI_ALGORITHMS_DIR).to_path_buf(),
     ];
 
     for dir in dirs {

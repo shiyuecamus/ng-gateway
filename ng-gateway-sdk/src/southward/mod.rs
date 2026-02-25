@@ -126,11 +126,15 @@ macro_rules! ng_driver_factory {
                 );
 
                 // NOTE: `Connector::new(ctx)` MUST be sync and MUST NOT perform I/O.
-                let observer = ctx.observer_factory.create_southward(
+                let observer_factory = ctx
+                    .extensions
+                    .get_or_default(|| ::std::sync::Arc::new($crate::supervision::NoopObserverFactory));
+                let observer = $crate::supervision::ObserverFactory::create_southward(
+                    &*observer_factory,
                     $crate::supervision::SouthwardObserverLabels {
                         channel_id: ctx.channel_id,
                         driver_kind: ::std::sync::Arc::<str>::from($driver_type),
-                    }
+                    },
                 );
 
                 // IMPORTANT:
@@ -259,12 +263,15 @@ macro_rules! ng_driver_factory {
                     driver_type = $driver_type
                 );
 
-                let observer = ctx.observer_factory.create_southward(
-                    $crate::supervision::SouthwardObserverLabels {
-                        channel_id: ctx.channel_id,
-                        driver_kind: ::std::sync::Arc::<str>::from($driver_type),
-                    }
-                );
+                let observer = ctx
+                    .extensions
+                    .get_or_default(|| ::std::sync::Arc::new($crate::supervision::NoopObserverFactory))
+                    .create_southward(
+                        $crate::supervision::SouthwardObserverLabels {
+                            channel_id: ctx.channel_id,
+                            driver_kind: ::std::sync::Arc::<str>::from($driver_type),
+                        },
+                    );
 
                 // IMPORTANT: honor per-channel retry policy from `ConnectionPolicy`.
                 let retry_policy = ctx.runtime_channel.connection_policy().backoff.clone();

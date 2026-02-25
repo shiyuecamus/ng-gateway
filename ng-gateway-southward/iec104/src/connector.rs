@@ -12,8 +12,8 @@ use super::{
 use ng_gateway_sdk::{
     connect_tcp_metered_with_timeout,
     supervision::{Connector, Session, SessionContext},
-    DriverError, DriverResult, FailureKind, FailurePhase, SouthwardInitContext,
-    SouthwardTransportMeter,
+    DriverError, DriverResult, FailureKind, FailurePhase, NoopSouthwardTransportMeter,
+    SouthwardInitContext, SouthwardTransportMeter,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,6 +29,9 @@ pub struct Iec104Connector {
 impl Iec104Connector {
     /// Create the connector from init context (no I/O).
     pub fn from_init(ctx: SouthwardInitContext) -> DriverResult<Self> {
+        let transport_meter = ctx
+            .extensions
+            .get_or_default(|| Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>);
         let channel = Arc::clone(&ctx.runtime_channel)
             .downcast_arc::<Iec104Channel>()
             .map_err(|_| DriverError::ConfigurationError("Invalid Iec104Channel".to_string()))?;
@@ -43,7 +46,7 @@ impl Iec104Connector {
         Ok(Self {
             handle,
             channel,
-            transport_meter: ctx.transport_meter,
+            transport_meter,
         })
     }
 

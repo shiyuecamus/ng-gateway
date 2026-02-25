@@ -1,5 +1,6 @@
 //! V1 version API routes
 mod action;
+mod ai;
 mod app;
 mod app_sub;
 mod auth;
@@ -84,7 +85,8 @@ fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
             .service(web::scope(app::ROUTER_PREFIX).configure(app::configure_routes))
             .service(web::scope(app_sub::ROUTER_PREFIX).configure(app_sub::configure_routes))
             .service(web::scope(net_debug::ROUTER_PREFIX).configure(net_debug::configure_routes))
-            .service(web::scope(system::ROUTER_PREFIX).configure(system::configure_routes)),
+            .service(web::scope(system::ROUTER_PREFIX).configure(system::configure_routes))
+            .service(web::scope(ai::ROUTER_PREFIX).configure(ai::configure_routes)),
     );
 }
 
@@ -141,6 +143,9 @@ pub async fn init_rbac_rules(
 
     // System settings module rules
     system::init_rbac_rules(router_prefix, perm_checker).await?;
+
+    // AI module rules
+    ai::init_rbac_rules(router_prefix, perm_checker).await?;
 
     Ok(())
 }

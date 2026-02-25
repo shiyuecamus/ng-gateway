@@ -40,6 +40,24 @@ randomization_factor = 0.2
 multiplier = 2.0
 max_elapsed_time_ms = 5000
 
+# AI Processing Engine
+[general.ai]
+enabled = true
+models_dir = "./ai/models"
+algorithms_dir = "./ai/algorithms"
+max_concurrent_inferences = 4
+decoder_workers = 2
+
+[general.ai.inference]
+execution_provider = "cpu"
+intra_op_threads = 0
+inter_op_threads = 0
+enable_mem_pattern = true
+
+[general.ai.wasm]
+fuel_limit = 1000000
+memory_limit = 16777216
+
 # Logging (top-level)
 [logging.control]
 # Default TTL for override leases in milliseconds (applies to channel/app/... scopes).

@@ -3,6 +3,7 @@
 {{- $gatewayDataHasSC := or (default "" .Values.persistence.gatewayData.storageClass) $globalStorageClass }}
 {{- $gatewayDriversHasSC := or (default "" .Values.persistence.gatewayDrivers.storageClass) $globalStorageClass }}
 {{- $gatewayPluginsHasSC := or (default "" .Values.persistence.gatewayPlugins.storageClass) $globalStorageClass }}
+{{- $gatewayAiHasSC := or (default "" .Values.persistence.gatewayAi.storageClass) $globalStorageClass }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -103,6 +104,8 @@ spec:
               mountPath: /app/drivers/custom
             - name: gateway-plugins
               mountPath: /app/plugins/custom
+            - name: gateway-ai
+              mountPath: /app/ai
       volumes:
         {{- if and .Values.persistence.gatewayData.enabled $gatewayDataHasSC }}
         - name: gateway-data
@@ -126,6 +129,14 @@ spec:
             claimName: {{ include "ng-gateway.fullname" . }}-plugins
         {{- else }}
         - name: gateway-plugins
+          emptyDir: {}
+        {{- end }}
+        {{- if and .Values.persistence.gatewayAi.enabled $gatewayAiHasSC }}
+        - name: gateway-ai
+          persistentVolumeClaim:
+            claimName: {{ include "ng-gateway.fullname" . }}-ai
+        {{- else }}
+        - name: gateway-ai
           emptyDir: {}
         {{- end }}
       {{- with .Values.gateway.nodeSelector }}

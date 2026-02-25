@@ -16,9 +16,7 @@ serde_repr = { version = "0.1" }
 serde_json = { version = "1.0" }
 async-trait = { version = "0.1" }
 chrono = { version = "0.4" }
-async-opcua = { git = "https://github.com/FreeOpcUa/async-opcua", rev = "696044cededa847b3c10e2407cf85fe89edf6c88", features = [
-  "client",
-] }
+async-opcua = { version = "0.18", features = ["client"] }
 arc-swap = { version = "1.7" }
 dashmap = { version = "6.1" }
 backoff = { version = "0.4" }

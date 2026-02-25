@@ -20,10 +20,11 @@ use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use ng_gateway_common::metrics::southward::SouthwardChannelMetricHandles;
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::entities::prelude::ChannelModel;
+use ng_gateway_models::{ai::api::AiEngineApi, entities::prelude::ChannelModel};
 use ng_gateway_sdk::{
-    ConnectionState, DeviceState, Driver, Phase, RuntimeAction, RuntimeChannel, RuntimeDevice,
-    RuntimePoint, SouthwardInitContext,
+    supervision::ObserverFactory, ConnectionState, DeviceState, Driver, Extensions, Phase,
+    RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext,
+    SouthwardTransportMeter,
 };
 use std::{
     collections::HashMap,
@@ -239,6 +240,23 @@ impl NGSouthwardManager {
             }
         }
 
+        let mut extensions = Extensions::new();
+        extensions.insert::<Arc<dyn SouthwardTransportMeter>>(Arc::new(
+            ChannelBoundTransportMeter::new(Arc::clone(&prom)),
+        ));
+        extensions.insert::<Arc<dyn ObserverFactory>>(Arc::new(
+            SouthwardChannelObserverFactory::new(
+                runtime_channel.id(),
+                Arc::clone(&prom),
+                Arc::clone(&self.metrics_hub),
+                Arc::clone(&self.runtime.index),
+                Arc::clone(southward_data_bus),
+            ),
+        ));
+        if let Some(ref engine) = self.ai_engine {
+            extensions.insert::<Arc<dyn AiEngineApi>>(Arc::clone(engine));
+        }
+
         let ctx = SouthwardInitContext {
             devices,
             points_by_device,
@@ -248,14 +266,7 @@ impl NGSouthwardManager {
                 Arc::clone(&prom),
             )),
             channel_id: runtime_channel.id(),
-            transport_meter: Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom))),
-            observer_factory: Arc::new(SouthwardChannelObserverFactory::new(
-                runtime_channel.id(),
-                Arc::clone(&prom),
-                Arc::clone(&self.metrics_hub),
-                Arc::clone(&self.runtime.index),
-                Arc::clone(southward_data_bus),
-            )),
+            extensions,
         };
 
         // Create driver and wrap.
@@ -406,6 +417,23 @@ impl NGSouthwardManager {
             }
         }
 
+        let mut extensions = Extensions::new();
+        extensions.insert::<Arc<dyn SouthwardTransportMeter>>(Arc::new(
+            ChannelBoundTransportMeter::new(Arc::clone(&prom)),
+        ));
+        extensions.insert::<Arc<dyn ObserverFactory>>(Arc::new(
+            SouthwardChannelObserverFactory::new(
+                channel_id,
+                Arc::clone(&prom),
+                Arc::clone(&self.metrics_hub),
+                Arc::clone(&self.runtime.index),
+                Arc::clone(southward_data_bus),
+            ),
+        ));
+        if let Some(ref engine) = self.ai_engine {
+            extensions.insert::<Arc<dyn AiEngineApi>>(Arc::clone(engine));
+        }
+
         SouthwardInitContext {
             devices,
             points_by_device,
@@ -415,14 +443,7 @@ impl NGSouthwardManager {
                 Arc::clone(&prom),
             )),
             channel_id,
-            transport_meter: Arc::new(ChannelBoundTransportMeter::new(Arc::clone(&prom))),
-            observer_factory: Arc::new(SouthwardChannelObserverFactory::new(
-                channel_id,
-                Arc::clone(&prom),
-                Arc::clone(&self.metrics_hub),
-                Arc::clone(&self.runtime.index),
-                Arc::clone(southward_data_bus),
-            )),
+            extensions,
         }
     }
 }

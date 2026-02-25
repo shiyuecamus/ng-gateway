@@ -2,9 +2,8 @@ use ng_driver_ethernet_ip::types::{
     EthernetIpChannel, EthernetIpChannelConfig, EthernetIpDevice, EthernetIpPoint,
 };
 use ng_gateway_sdk::{
-    supervision::NoopObserverFactory, AccessMode, CollectionType, ConnectionPolicy,
-    ConnectionState, DataPointType, DataType, NoopSouthwardTransportMeter, NorthwardData,
-    NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
+    AccessMode, CollectionType, ConnectionPolicy, ConnectionState, DataPointType, DataType,
+    NorthwardData, NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
     SouthwardInitContext, Status, Transform,
 };
 use std::{
@@ -147,8 +146,7 @@ pub fn build_init_context(
         runtime_channel,
         publisher: Arc::new(TestPublisher),
         channel_id,
-        transport_meter: Arc::new(NoopSouthwardTransportMeter),
-        observer_factory: Arc::new(NoopObserverFactory),
+        extensions: Default::default(),
     };
 
     (ctx, device_arc, runtime_points)

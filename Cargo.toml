@@ -26,6 +26,8 @@ members = [
   "ng-gateway-northward/pulsar",
   "ng-gateway-northward/kafka",
   "ng-gateway-xtask",
+  "ng-gateway-ai",
+  "ng-gateway-southward/camera",
 ]
 resolver = "2"
 
@@ -40,6 +42,7 @@ version = "0.1.0"
 [patch.crates-io]
 # Force all workspace crates (including drivers) to use the local SDK during development.
 ng-gateway-sdk = { path = "./ng-gateway-sdk" }
+ng-gateway-ai = { path = "./ng-gateway-ai" }
 
 # External NG common api
 [workspace.dependencies.node-grove-common-api]
@@ -64,6 +67,8 @@ path = "./ng-gateway-common"
 path = "./ng-gateway-repository"
 [workspace.dependencies.ng-gateway-core]
 path = "./ng-gateway-core"
+[workspace.dependencies.ng-gateway-ai]
+path = "./ng-gateway-ai"
 
 # Tracing
 [workspace.dependencies.tracing]
@@ -290,6 +295,7 @@ version = "2.3"
 # Date and Time
 [workspace.dependencies.chrono]
 version = "0.4"
+features = ["serde"]
 [workspace.dependencies.time]
 version = "0.3"
 

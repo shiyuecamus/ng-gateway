@@ -1,6 +1,8 @@
 #[allow(clippy::needless_update)]
 mod action;
 #[allow(clippy::needless_update)]
+mod ai;
+#[allow(clippy::needless_update)]
 mod app;
 #[allow(clippy::needless_update)]
 mod app_sub;

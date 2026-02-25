@@ -14,12 +14,7 @@ description = "SDK for building NG Gateway southward drivers and northward plugi
 keywords = ["iot", "gateway", "sdk", "plugin", "driver"]
 categories = ["network-programming", "asynchronous"]
 
-include = [
-  "Cargo.toml",
-  "README.md",
-  "build.rs",
-  "src/**",
-]
+include = ["Cargo.toml", "README.md", "build.rs", "src/**"]
 
 
 [dependencies]

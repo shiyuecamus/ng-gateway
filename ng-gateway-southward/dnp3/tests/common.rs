@@ -3,9 +3,9 @@ use ng_driver_dnp3::types::{
     Dnp3Parameter, Dnp3Point, Dnp3PointGroup,
 };
 use ng_gateway_sdk::{
-    supervision::NoopObserverFactory, AccessMode, CollectionType, ConnectionPolicy, DataPointType,
-    DataType, NoopSouthwardTransportMeter, NorthwardData, NorthwardPublisher, ReportType,
-    RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext, Status, Transform,
+    AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, NorthwardData,
+    NorthwardPublisher, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
+    SouthwardInitContext, Status, Transform,
 };
 use std::{
     collections::HashMap,
@@ -261,8 +261,7 @@ pub fn build_init_context(
         runtime_channel,
         publisher,
         channel_id,
-        transport_meter: Arc::new(NoopSouthwardTransportMeter),
-        observer_factory: Arc::new(NoopObserverFactory),
+        extensions: Default::default(),
     };
 
     (ctx, device_arc, runtime_points)

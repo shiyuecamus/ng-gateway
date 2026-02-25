@@ -200,6 +200,7 @@ echo "[准备] 创建持久化 volumes..."
 docker volume create gateway-data >/dev/null
 docker volume create gateway-drivers >/dev/null
 docker volume create gateway-plugins >/dev/null
+docker volume create gateway-ai >/dev/null
 
 # 读取镜像名（优先 .env，其次 fallback）
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-ng-gateway}"
@@ -232,6 +233,7 @@ docker run -d \
   -v gateway-data:/app/data \
   -v gateway-drivers:/app/drivers/custom \
   -v gateway-plugins:/app/plugins/custom \
+  -v gateway-ai:/app/ai \
   "${GATEWAY_IMAGE}:${GATEWAY_TAG}"
 
 # 等待服务启动
@@ -334,6 +336,7 @@ docker restart ng-gateway
 - \`gateway-data\`: 网关数据（SQLite 等）
 - \`gateway-drivers\`: 自定义驱动目录
 - \`gateway-plugins\`: 自定义插件目录
+- \`gateway-ai\`: AI 资产（模型 + WASM 算法）
 
 ## 故障排查
 1. 确保 Docker 已正确安装

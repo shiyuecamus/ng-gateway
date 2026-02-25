@@ -14,8 +14,7 @@ pub mod template;
 pub(crate) mod types;
 
 use crate::{
-    supervision::{NoopObserverFactory, ObserverFactory},
-    ConnectionState, ExtensionStore, NorthwardResult,
+    southward::model::Extensions, ConnectionState, ExtensionStore, NorthwardResult, RetryPolicy,
 };
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
@@ -68,36 +67,34 @@ use tokio::sync::{broadcast, mpsc, watch};
 /// ```
 #[derive(Clone)]
 pub struct NorthwardInitContext {
+    // ── Domain data (always required) ──────────────────────────────
+    /// App ID for logging and metrics.
+    pub app_id: i32,
+    /// App name for identification.
+    pub app_name: String,
+    /// Plugin-specific configuration.
+    pub config: Arc<dyn PluginConfig>,
+    /// Retry policy for connection management with exponential backoff.
+    pub retry_policy: RetryPolicy,
+
+    // ── Core services (always required) ────────────────────────────
     /// Extension store for plugin-specific persistent data (host-owned storage).
     pub extension_store: Arc<dyn ExtensionStore>,
-    /// App ID for logging and metrics
-    pub app_id: i32,
-    /// App name for identification
-    pub app_name: String,
-    /// Plugin-specific configuration
-    pub config: Arc<dyn PluginConfig>,
-    /// Channel for sending business events (RPC, Command, Attribute)
+    /// Channel for sending business events (RPC, Command, Attribute).
     pub events_tx: mpsc::Sender<NorthwardEvent>,
     /// Read-only runtime API for high-throughput encoding paths.
     ///
     /// Plugins should treat this as a stable interface and avoid depending on
     /// gateway core internal data structures.
     pub runtime: Arc<dyn NorthwardRuntimeApi>,
-    /// Retry policy for connection management with exponential backoff
-    pub retry_policy: crate::RetryPolicy,
-    /// Host-provided supervision observer factory (low-frequency control plane).
-    pub observer_factory: Arc<dyn ObserverFactory>,
-}
 
-impl NorthwardInitContext {
-    /// Attach a disabled/no-op observer configuration.
+    // ── Extensions (optional, host-injected) ───────────────────────
+    /// Type-erased extension storage for host-injected capabilities.
     ///
-    /// This is intended for tests and offline tools that do not run inside the gateway host.
-    #[inline]
-    pub fn with_noop_observer(mut self) -> Self {
-        self.observer_factory = Arc::new(NoopObserverFactory);
-        self
-    }
+    /// Contains optional infrastructure services (observer factory) and
+    /// future domain-specific extensions. Use [`Extensions::get_or_default`]
+    /// or [`Extensions::get_cloned`] for access.
+    pub extensions: Extensions,
 }
 
 /// Define and export a northward plugin factory and metadata for dynamic loading.
@@ -191,11 +188,15 @@ macro_rules! ng_plugin_factory {
                 );
 
                 // NOTE: `new(ctx)` MUST be sync and MUST NOT perform I/O.
-                let observer = ctx.observer_factory.create_northward(
+                let observer_factory = ctx
+                    .extensions
+                    .get_or_default(|| ::std::sync::Arc::new($crate::supervision::NoopObserverFactory));
+                let observer = $crate::supervision::ObserverFactory::create_northward(
+                    &*observer_factory,
                     $crate::supervision::NorthwardObserverLabels {
                         app_id: ctx.app_id,
                         plugin_kind: ::std::sync::Arc::<str>::from($plugin_type),
-                    }
+                    },
                 );
 
                 let retry_policy = ctx.retry_policy;
@@ -284,11 +285,15 @@ macro_rules! ng_plugin_factory {
                     plugin_type = $plugin_type
                 );
 
-                let observer = ctx.observer_factory.create_northward(
+                let observer_factory = ctx
+                    .extensions
+                    .get_or_default(|| ::std::sync::Arc::new($crate::supervision::NoopObserverFactory));
+                let observer = $crate::supervision::ObserverFactory::create_northward(
+                    &*observer_factory,
                     $crate::supervision::NorthwardObserverLabels {
                         app_id: ctx.app_id,
                         plugin_kind: ::std::sync::Arc::<str>::from($plugin_type),
-                    }
+                    },
                 );
 
                 let retry_policy = ctx.retry_policy;

@@ -38,6 +38,7 @@ services:
       - gateway-data:/app/data
       - gateway-drivers:/app/drivers/custom
       - gateway-plugins:/app/plugins/custom
+      - gateway-ai:/app/ai
     # Resource limits — mirrors NeuronEX benchmark conditions.
     # Adjust to match your target deployment profile.
     deploy:
@@ -124,3 +125,4 @@ volumes:
   gateway-data:
   gateway-drivers:
   gateway-plugins:
+  gateway-ai:

@@ -222,6 +222,9 @@ pub struct General {
     /// Southward communication configuration
     #[serde(default)]
     pub southward: Southward,
+    /// AI Processing Engine configuration
+    #[serde(default)]
+    pub ai: AiEngineConfig,
 }
 
 impl Default for General {
@@ -233,6 +236,7 @@ impl Default for General {
             collector: Collector::default(),
             northward: Northward::default(),
             southward: Southward::default(),
+            ai: AiEngineConfig::default(),
         }
     }
 }
@@ -1583,5 +1587,133 @@ impl Northward {
 
     fn start_timeout_ms_default() -> AtomicU64Setting {
         AtomicU64Setting::new(5000)
+    }
+}
+
+// ── AI Processing Engine configuration ────────────────────────────
+
+/// Top-level AI engine configuration.
+///
+/// Maps to `[general.ai]` in `gateway.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiEngineConfig {
+    /// Enable/disable the AI engine.
+    #[serde(default = "AiEngineConfig::default_enabled")]
+    pub enabled: bool,
+    /// Directory for model files (.onnx, .trt, .xml).
+    #[serde(default = "AiEngineConfig::default_models_dir")]
+    pub models_dir: PathBuf,
+    /// Directory for custom WASM algorithm modules.
+    #[serde(default = "AiEngineConfig::default_algorithms_dir")]
+    pub algorithms_dir: PathBuf,
+    /// Maximum concurrent inferences across all pipelines.
+    #[serde(default = "AiEngineConfig::default_max_concurrent")]
+    pub max_concurrent_inferences: usize,
+    /// Number of frame decoder worker threads.
+    #[serde(default = "AiEngineConfig::default_decoder_workers")]
+    pub decoder_workers: usize,
+    /// Inference-specific configuration.
+    #[serde(default)]
+    pub inference: InferenceConfig,
+    /// WASM runtime configuration.
+    #[serde(default)]
+    pub wasm: WasmConfig,
+}
+
+impl Default for AiEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            models_dir: Self::default_models_dir(),
+            algorithms_dir: Self::default_algorithms_dir(),
+            max_concurrent_inferences: Self::default_max_concurrent(),
+            decoder_workers: Self::default_decoder_workers(),
+            inference: InferenceConfig::default(),
+            wasm: WasmConfig::default(),
+        }
+    }
+}
+
+impl AiEngineConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_models_dir() -> PathBuf {
+        PathBuf::from("./ai/models")
+    }
+    fn default_algorithms_dir() -> PathBuf {
+        PathBuf::from("./ai/algorithms")
+    }
+    fn default_max_concurrent() -> usize {
+        4
+    }
+    fn default_decoder_workers() -> usize {
+        2
+    }
+}
+
+/// ONNX Runtime inference configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceConfig {
+    /// Execution provider: "cpu", "cuda", "tensorrt", "openvino".
+    #[serde(default = "InferenceConfig::default_execution_provider")]
+    pub execution_provider: String,
+    /// Number of intra-op threads per ONNX session (0 = auto).
+    #[serde(default)]
+    pub intra_op_threads: usize,
+    /// Number of inter-op threads (0 = auto).
+    #[serde(default)]
+    pub inter_op_threads: usize,
+    /// Enable memory pattern optimization.
+    #[serde(default = "InferenceConfig::default_enable_mem_pattern")]
+    pub enable_mem_pattern: bool,
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            execution_provider: Self::default_execution_provider(),
+            intra_op_threads: 0,
+            inter_op_threads: 0,
+            enable_mem_pattern: true,
+        }
+    }
+}
+
+impl InferenceConfig {
+    fn default_execution_provider() -> String {
+        "cpu".to_string()
+    }
+    fn default_enable_mem_pattern() -> bool {
+        true
+    }
+}
+
+/// WASM algorithm runtime configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmConfig {
+    /// Fuel limit per WASM invocation (prevents infinite loops).
+    #[serde(default = "WasmConfig::default_fuel_limit")]
+    pub fuel_limit: u64,
+    /// Memory limit per WASM instance (bytes).
+    #[serde(default = "WasmConfig::default_memory_limit")]
+    pub memory_limit: usize,
+}
+
+impl Default for WasmConfig {
+    fn default() -> Self {
+        Self {
+            fuel_limit: Self::default_fuel_limit(),
+            memory_limit: Self::default_memory_limit(),
+        }
+    }
+}
+
+impl WasmConfig {
+    fn default_fuel_limit() -> u64 {
+        16 * 1024 * 1024
+    }
+    fn default_memory_limit() -> usize {
+        16 * 1024 * 1024
     }
 }

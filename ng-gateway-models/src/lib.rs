@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod cache;
 pub mod casbin;
 pub mod constants;
@@ -13,6 +14,7 @@ pub mod settings;
 pub mod web;
 
 use crate::{
+    ai::api::AiEngineApi,
     cache::NGBaseCache,
     casbin::{CasbinCmd, CasbinResult},
     core::metrics::GatewayStatusSnapshot,
@@ -326,6 +328,13 @@ pub trait Gateway:
 
     /// Get the realtime monitor hub for accessing device connection states
     fn realtime_monitor_hub(&self) -> Arc<dyn RealtimeMonitorHub>;
+
+    /// Get a handle to the AI Processing Engine (if enabled).
+    ///
+    /// Returns `None` when the AI engine is disabled in configuration.
+    /// Web API handlers use this to serve AI status, model, pipeline,
+    /// and snapshot endpoints.
+    fn ai_engine(&self) -> Option<Arc<dyn AiEngineApi>>;
 
     /// Apply runtime tuning changes for collector-related settings.
     ///

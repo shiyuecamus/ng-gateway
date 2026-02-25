@@ -40,6 +40,9 @@ pub const CERT_DIR: &str = "./certs";
 pub const PKI_DIR: &str = "./pki";
 pub const DRIVER_DIR: &str = "./drivers";
 pub const PLUGIN_DIR: &str = "./plugins";
+pub const AI_DIR: &str = "./ai";
+pub const AI_MODELS_DIR: &str = "./ai/models";
+pub const AI_ALGORITHMS_DIR: &str = "./ai/algorithms";
 pub const BUILTIN_DIR: &str = "builtin";
 pub const CUSTOM_DIR: &str = "custom";
 

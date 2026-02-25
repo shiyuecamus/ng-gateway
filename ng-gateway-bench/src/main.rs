@@ -221,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
             ScenarioKind::ApiWritePoint => {
                 let client = api_client
                     .as_ref()
-                    .ok_or_else(|| anyhow!("--api-base-url is required for scenario 8"))?;
+                    .ok_or(anyhow!("--api-base-url is required for scenario 8"))?;
                 run_api_scenario(&cli, scenario, client).await?
             }
         };
@@ -575,7 +575,7 @@ async fn build_api_client(cli: &Cli) -> anyhow::Result<ApiClient> {
     let base = cli
         .api_base_url
         .as_deref()
-        .ok_or_else(|| anyhow!("--api-base-url is required for API downlink"))?;
+        .ok_or(anyhow!("--api-base-url is required for API downlink"))?;
     let base = base.trim_end_matches('/');
 
     let client = reqwest::Client::builder()
@@ -613,7 +613,7 @@ async fn build_api_client(cli: &Cli) -> anyhow::Result<ApiClient> {
 
     let token = body
         .data
-        .ok_or_else(|| anyhow!("login response missing data"))?
+        .ok_or(anyhow!("login response missing data"))?
         .token;
 
     tracing::info!("API login successful, token acquired");

@@ -13,7 +13,8 @@ use ng_gateway_sdk::{
     connect_serial_metered, connect_tcp_metered_with_timeout,
     supervision::{Connector, Session, SessionContext},
     CollectorConcurrencyProfile, DriverError, DriverResult, FailureKind, FailurePhase,
-    SerialConnectConfig, SouthwardInitContext, SouthwardTransportMeter,
+    NoopSouthwardTransportMeter, SerialConnectConfig, SouthwardInitContext,
+    SouthwardTransportMeter,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio_modbus::client::{rtu, tcp};
@@ -97,6 +98,9 @@ impl Connector for ModbusConnector {
     where
         Self: Sized,
     {
+        let transport_meter = ctx
+            .extensions
+            .get_or_default(|| Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>);
         let channel = ctx
             .runtime_channel
             .downcast_arc::<ModbusChannel>()
@@ -104,7 +108,7 @@ impl Connector for ModbusConnector {
         let handle = Arc::new(ModbusHandle::new(Arc::clone(&channel)));
         Ok(Self {
             channel,
-            transport_meter: ctx.transport_meter,
+            transport_meter,
             handle,
         })
     }

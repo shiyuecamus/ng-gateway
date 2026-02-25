@@ -8,6 +8,7 @@
 //! - **Low cardinality by default**: do not put device/point identifiers into labels.
 //! - **One registry**: all crates register metrics into the same registry.
 
+pub mod ai;
 pub mod channel;
 pub mod collector;
 pub mod control;
@@ -17,6 +18,7 @@ pub mod southward;
 mod system;
 
 use self::{
+    ai::AiMetricsHub,
     collector::{CollectorMetricsHub, CollectorResult},
     control::{ControlChannelMetricHandles, ControlMetricsHub},
     northward::{NorthwardAppMetricHandles, NorthwardMetricsHub},
@@ -70,6 +72,7 @@ pub struct NGMetricsHub {
     southward: SouthwardMetricsHub,
     collector: CollectorMetricsHub,
     control: ControlMetricsHub,
+    ai: AiMetricsHub,
 
     // Snapshot-only: gateway-level derived error rate state (best-effort).
     last_error_rate_total_errors: AtomicU64,
@@ -95,6 +98,7 @@ impl NGMetricsHub {
         let southward = SouthwardMetricsHub::new(&registry)?;
         let collector = CollectorMetricsHub::new(&registry)?;
         let control = ControlMetricsHub::new(&registry)?;
+        let ai = AiMetricsHub::new(&registry)?;
 
         Ok(Self {
             registry,
@@ -104,6 +108,7 @@ impl NGMetricsHub {
             southward,
             collector,
             control,
+            ai,
             last_error_rate_total_errors: AtomicU64::new(0),
             last_error_rate_ts_ms: AtomicU64::new(0),
         })
@@ -119,6 +124,12 @@ impl NGMetricsHub {
     #[inline]
     pub(crate) fn queue(&self) -> &QueueMetricsHub {
         &self.queue
+    }
+
+    /// Access AI engine metrics hub.
+    #[inline]
+    pub fn ai(&self) -> &AiMetricsHub {
+        &self.ai
     }
 
     /// Refresh scrape-time metrics to keep the exposition accurate.

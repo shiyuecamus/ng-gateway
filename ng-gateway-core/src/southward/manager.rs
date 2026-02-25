@@ -15,6 +15,7 @@ use ng_gateway_common::metrics::{
     southward::SouthwardChannelMetricHandles, NGMetricsHub, SouthwardChannelSnapshotParams,
 };
 use ng_gateway_models::{
+    ai::api::AiEngineApi,
     core::metrics::{ChannelStatsSnapshot, SouthwardManagerMetricsSnapshot},
     settings::Southward,
     SouthwardManager,
@@ -25,11 +26,16 @@ use tokio_util::sync::CancellationToken;
 
 impl NGSouthwardManager {
     #[inline]
-    /// Create a new data manager
+    /// Create a new data manager.
+    ///
+    /// `ai_engine` is an optional handle to the AI Processing Engine. When
+    /// present, it is automatically injected into every driver's init context
+    /// so camera drivers can submit frames for AI analysis.
     pub fn new(
         southward_registry: SouthwardRegistry,
         metrics_hub: Arc<NGMetricsHub>,
         snapshot_gc_cfg: Arc<Southward>,
+        ai_engine: Option<Arc<dyn AiEngineApi>>,
     ) -> Self {
         let index = Arc::new(RuntimeIndex::new());
         let snapshot_gc = Arc::new(SnapshotGcRuntime {
@@ -46,6 +52,7 @@ impl NGSouthwardManager {
             runtime,
             southward_registry,
             metrics_hub,
+            ai_engine,
         }
     }
 

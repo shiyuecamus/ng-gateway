@@ -63,6 +63,37 @@ randomization_factor = 0.2
 multiplier = 2.0
 max_elapsed_time_ms = 5000
 
+# AI Processing Engine
+[general.ai]
+# Enable/disable the AI engine.
+enabled = true
+# Directory for model files (.onnx, .trt, .xml).
+models_dir = "./ai/models"
+# Directory for custom WASM algorithm modules.
+algorithms_dir = "./ai/algorithms"
+# Maximum concurrent inferences across all pipelines.
+max_concurrent_inferences = 4
+# Number of frame decoder worker threads.
+decoder_workers = 2
+
+# ONNX Runtime inference configuration
+[general.ai.inference]
+# Execution provider: "cpu", "cuda", "tensorrt", "openvino".
+execution_provider = "cpu"
+# Number of intra-op threads per ONNX session (0 = auto).
+intra_op_threads = 0
+# Number of inter-op threads (0 = auto).
+inter_op_threads = 0
+# Enable memory pattern optimization.
+enable_mem_pattern = true
+
+# WASM algorithm runtime configuration
+[general.ai.wasm]
+# Fuel limit per WASM invocation (prevents infinite loops).
+fuel_limit = 1000000
+# Memory limit per WASM instance (bytes, default 16 MB).
+memory_limit = 16777216
+
 # Logging (top-level)
 [logging.control]
 # Default TTL for override leases in milliseconds (applies to channel/app/... scopes).

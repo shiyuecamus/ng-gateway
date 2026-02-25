@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use ng_gateway_common::metrics::{southward::SouthwardChannelMetricHandles, NGMetricsHub};
 use ng_gateway_models::{
+    ai::api::AiEngineApi,
     entities::prelude::{ActionModel, ChannelModel, DeviceModel, PointModel},
     settings::Southward,
 };
@@ -290,4 +291,10 @@ pub struct NGSouthwardManager {
     pub(crate) southward_registry: SouthwardRegistry,
     /// Metrics hub (single source of truth).
     pub(crate) metrics_hub: Arc<NGMetricsHub>,
+    /// AI Processing Engine handle (injected into driver init contexts).
+    ///
+    /// `None` when the AI engine is disabled in configuration.
+    /// When present, it is inserted into every `SouthwardInitContext.extensions`
+    /// so that camera drivers can submit frames for AI analysis.
+    pub(crate) ai_engine: Option<Arc<dyn AiEngineApi>>,
 }

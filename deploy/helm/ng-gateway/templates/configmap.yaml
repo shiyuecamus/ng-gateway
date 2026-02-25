@@ -43,6 +43,45 @@ data:
   {{- end }}
   {{- end }}
   {{- end }}
+  {{- if $config.general.ai }}
+  {{- if hasKey $config.general.ai "enabled" }}
+  NG__GENERAL__AI__ENABLED: {{ $config.general.ai.enabled | quote }}
+  {{- end }}
+  {{- if $config.general.ai.modelsDir }}
+  NG__GENERAL__AI__MODELS_DIR: {{ $config.general.ai.modelsDir | quote }}
+  {{- end }}
+  {{- if $config.general.ai.algorithmsDir }}
+  NG__GENERAL__AI__ALGORITHMS_DIR: {{ $config.general.ai.algorithmsDir | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.ai "maxConcurrentInferences" }}
+  NG__GENERAL__AI__MAX_CONCURRENT_INFERENCES: {{ $config.general.ai.maxConcurrentInferences | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.ai "decoderWorkers" }}
+  NG__GENERAL__AI__DECODER_WORKERS: {{ $config.general.ai.decoderWorkers | quote }}
+  {{- end }}
+  {{- if $config.general.ai.inference }}
+  {{- if $config.general.ai.inference.executionProvider }}
+  NG__GENERAL__AI__INFERENCE__EXECUTION_PROVIDER: {{ $config.general.ai.inference.executionProvider | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.ai.inference "intraOpThreads" }}
+  NG__GENERAL__AI__INFERENCE__INTRA_OP_THREADS: {{ $config.general.ai.inference.intraOpThreads | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.ai.inference "interOpThreads" }}
+  NG__GENERAL__AI__INFERENCE__INTER_OP_THREADS: {{ $config.general.ai.inference.interOpThreads | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.ai.inference "enableMemPattern" }}
+  NG__GENERAL__AI__INFERENCE__ENABLE_MEM_PATTERN: {{ $config.general.ai.inference.enableMemPattern | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.general.ai.wasm }}
+  {{- if hasKey $config.general.ai.wasm "fuelLimit" }}
+  NG__GENERAL__AI__WASM__FUEL_LIMIT: {{ $config.general.ai.wasm.fuelLimit | quote }}
+  {{- end }}
+  {{- if hasKey $config.general.ai.wasm "memoryLimit" }}
+  NG__GENERAL__AI__WASM__MEMORY_LIMIT: {{ $config.general.ai.wasm.memoryLimit | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
   {{- if $config.general.northward }}
   {{- if $runtimeEnvEnabled }}
   {{- if $config.general.northward.queueCapacity }}

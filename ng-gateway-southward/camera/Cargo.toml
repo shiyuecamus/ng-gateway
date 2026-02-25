@@ -1,0 +1,49 @@
+[package]
+name = "ng-driver-camera"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "AI-enabled camera southward driver supporting RTSP/ONVIF/MJPEG protocols"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# SDK (drivers must not directly depend on ng-gateway-models or ng-gateway-error;
+# AI types are re-exported via ng-gateway-ai::api)
+ng-gateway-sdk = "0.1"
+ng-gateway-ai = { workspace = true }
+
+# Async runtime
+tokio = { version = "1.47", features = ["full", "tracing"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+async-trait = { version = "0.1" }
+futures-util = { version = "0.3" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+bytes = { version = "1.9", features = ["serde"] }
+
+# Video / RTSP
+retina = { version = "0.4" }
+
+# HTTP client for ONVIF SOAP + MJPEG streaming
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# XML parsing for ONVIF SOAP responses
+quick-xml = { version = "0.39", features = ["serialize"] }
+
+# WS-Security auth for ONVIF (SHA-1 digest per ONVIF Core Spec)
+sha1 = { version = "0.10" }
+base64 = { version = "0.22" }
+rand = { version = "0.10" }
+
+# Utilities
+tracing = { version = "0.1" }
+chrono = { version = "0.4" }
+thiserror = { version = "2.0" }
+url = { version = "2.5", features = ["serde"] }
+percent-encoding = { version = "2.3" }
+parking_lot = { version = "0.12" }
+arc-swap = { version = "1.7" }

@@ -21,7 +21,7 @@ use ng_gateway_models::{
     entities::prelude::{AppModel, AppSubModel},
     enums::common::Status,
 };
-use ng_gateway_sdk::NorthwardInitContext;
+use ng_gateway_sdk::{supervision::ObserverFactory, Extensions, NorthwardInitContext};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -171,20 +171,24 @@ impl NGNorthwardManager {
             app.queue_policy,
         ));
 
+        // Inject optional infrastructure services via Extensions
+        let mut extensions = Extensions::new();
+        extensions.insert::<Arc<dyn ObserverFactory>>(observer_factory);
+
         // Create initialization context with all dependencies
         let init_ctx = NorthwardInitContext {
-            extension_store,
             app_id: app.id,
             app_name: app.name.clone(),
             config: Arc::clone(&config),
+            retry_policy: app.retry_policy,
+            extension_store,
             events_tx,
             // Core runtime metadata API for high-throughput encoding paths.
             // Backed by southward runtime indexes (no DB access on hot path).
             runtime: Arc::new(CoreNorthwardRuntimeApi::new(Arc::clone(
                 &self.southward_manager,
             ))),
-            retry_policy: app.retry_policy,
-            observer_factory,
+            extensions,
         };
 
         // Create plugin instance with context (no I/O)

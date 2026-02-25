@@ -115,6 +115,7 @@ docker run -d \
   -v gateway-data:/app/data \
   -v gateway-drivers:/app/drivers/custom \
   -v gateway-plugins:/app/plugins/custom \
+  -v gateway-ai:/app/ai \
   ng-gateway:latest
 ```
 
@@ -159,6 +160,7 @@ docker run -d \
   -v gateway-data:/app/data \
   -v gateway-drivers:/app/drivers/custom \
   -v gateway-plugins:/app/plugins/custom \
+  -v gateway-ai:/app/ai \
   ng-gateway:latest
 ```
 

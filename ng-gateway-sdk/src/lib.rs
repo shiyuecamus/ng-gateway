@@ -52,8 +52,8 @@ pub use retry::{build_exponential_backoff, RetryController, RetryDecision, Retry
 pub use southward::{
     codec::ValueCodec,
     model::{
-        ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverMetrics, Parameter,
-        PointModel, SouthwardInitContext,
+        ActionModel, ChannelModel, ConnectionPolicy, DeviceModel, DriverMetrics, Extensions,
+        Parameter, PointModel, SouthwardInitContext,
     },
     probe::{probe_driver_library, DriverProbeInfo},
     supervised::{SouthwardHandle, SupervisedDriver},

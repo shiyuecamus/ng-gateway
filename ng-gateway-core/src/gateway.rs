@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
+use ng_gateway_ai::AiEngine;
 use ng_gateway_common::{
     log::control::{self as log_control, LogOverrideChangeSink, LogOverrideScope},
     metrics::{
@@ -30,6 +31,7 @@ use ng_gateway_common::{
 };
 use ng_gateway_error::{init::InitContextError, storage::StorageError, NGError, NGResult};
 use ng_gateway_models::{
+    ai::api::AiEngineApi,
     core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
         ChangeAppStatus, ChangeChannelStatus, ChangeDeviceStatus, LogLevel, NewAction, NewApp,
@@ -306,6 +308,10 @@ pub struct NGGateway {
 
     /// Cancellation token for tasks
     shutdown_token: CancellationToken,
+
+    /// AI Processing Engine handle (shared with southward drivers via init context).
+    /// `None` when the AI engine is disabled in configuration.
+    ai_engine: Option<Arc<dyn AiEngineApi>>,
 }
 
 #[async_trait]
@@ -377,6 +383,23 @@ impl Gateway for NGGateway {
             .collect();
         southward_loader.load_all(&id_paths).await;
 
+        // Initialize AI Processing Engine (if enabled in configuration).
+        let ai_engine: Option<Arc<dyn AiEngineApi>> = if settings.general.ai.enabled {
+            match AiEngine::new(settings.general.ai.clone(), Arc::clone(&metrics_hub)).await {
+                Ok(engine) => {
+                    info!("AI Processing Engine initialized successfully");
+                    Some(Arc::new(engine))
+                }
+                Err(e) => {
+                    warn!(error = %e, "AI engine initialization failed — continuing without AI");
+                    None
+                }
+            }
+        } else {
+            info!("AI Processing Engine disabled in configuration");
+            None
+        };
+
         // Initialize southward manager (owns snapshot GC config).
         // Use Arc to avoid repeated multi-Arc clones for hot-reloadable settings.
         let southward_cfg = Arc::new(settings.general.southward.clone());
@@ -384,6 +407,7 @@ impl Gateway for NGGateway {
             southward_registry,
             Arc::clone(&metrics_hub),
             Arc::clone(&southward_cfg),
+            ai_engine.clone(),
         ));
 
         // Start best-effort device snapshot GC (idempotent; disabled when ttl_ms == 0).
@@ -494,6 +518,7 @@ impl Gateway for NGGateway {
             northward_events_tasks: Arc::new(RwLock::new(Vec::new())),
             write_serializers: Arc::new(WriteSerializers::default()),
             shutdown_token: CancellationToken::new(),
+            ai_engine,
         });
 
         // Initialize the gateway
@@ -659,6 +684,11 @@ impl Gateway for NGGateway {
                 .await?;
         }
         Ok(())
+    }
+
+    #[inline]
+    fn ai_engine(&self) -> Option<Arc<dyn AiEngineApi>> {
+        self.ai_engine.clone()
     }
 }
 

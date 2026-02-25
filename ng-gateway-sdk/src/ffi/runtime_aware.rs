@@ -155,18 +155,18 @@ impl RuntimeAwareDriver {
         let mut guard = self.rx.lock().map_err(|_| {
             DriverError::ExecutionError("Driver runtime mutex poisoned".to_string())
         })?;
-        guard
-            .take()
-            .ok_or_else(|| DriverError::ExecutionError("Driver already started".to_string()))
+        guard.take().ok_or(DriverError::ExecutionError(
+            "Driver already started".to_string(),
+        ))
     }
 }
 
 #[async_trait::async_trait]
 impl Driver for RuntimeAwareDriver {
     async fn start(&self) -> DriverResult<()> {
-        let handle = self.rt_handle.clone().ok_or_else(|| {
-            DriverError::ExecutionError("Driver runtime not available".to_string())
-        })?;
+        let handle = self.rt_handle.clone().ok_or(DriverError::ExecutionError(
+            "Driver runtime not available".to_string(),
+        ))?;
 
         let inner = Arc::clone(&self.inner);
         let cancel_token = self.cancel_token.clone();
@@ -389,12 +389,9 @@ struct RuntimeAwarePlugin {
 #[async_trait::async_trait]
 impl Plugin for RuntimeAwarePlugin {
     async fn start(&self) -> NorthwardResult<()> {
-        let handle = self
-            .rt_handle
-            .clone()
-            .ok_or_else(|| NorthwardError::RuntimeError {
-                reason: "Plugin runtime not available".to_string(),
-            })?;
+        let handle = self.rt_handle.clone().ok_or(NorthwardError::RuntimeError {
+            reason: "Plugin runtime not available".to_string(),
+        })?;
 
         let inner = Arc::clone(&self.inner);
         let cancel_token = self.cancel_token.clone();

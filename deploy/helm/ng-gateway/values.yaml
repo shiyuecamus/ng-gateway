@@ -157,6 +157,35 @@ gateway:
         # Max devices to scan per snapshot GC tick.
         maxDevicesPerSnapshotTick: 256
       
+      # AI Processing Engine configuration
+      ai:
+        # Enable/disable the AI engine.
+        enabled: true
+        # Directory for model files (.onnx, .trt, .xml).
+        modelsDir: "./ai/models"
+        # Directory for custom WASM algorithm modules.
+        algorithmsDir: "./ai/algorithms"
+        # Maximum concurrent inferences across all pipelines.
+        maxConcurrentInferences: 4
+        # Number of frame decoder worker threads.
+        decoderWorkers: 2
+        # ONNX Runtime inference configuration.
+        inference:
+          # Execution provider: "cpu", "cuda", "tensorrt", "openvino".
+          executionProvider: "cpu"
+          # Number of intra-op threads per ONNX session (0 = auto).
+          intraOpThreads: 0
+          # Number of inter-op threads (0 = auto).
+          interOpThreads: 0
+          # Enable memory pattern optimization.
+          enableMemPattern: true
+        # WASM algorithm runtime configuration.
+        wasm:
+          # Fuel limit per WASM invocation (prevents infinite loops).
+          fuelLimit: 1000000
+          # Memory limit per WASM instance (bytes, default 16 MB).
+          memoryLimit: 16777216
+
       # Northward communication configuration
       northward:
         queueCapacity: 10000
@@ -357,6 +386,15 @@ persistence:
     storageClass: ""
     accessMode: ReadWriteOnce
     size: 2Gi
+    annotations: {}
+
+  # Gateway AI assets persistence (models + WASM algorithms)
+  gatewayAi:
+    enabled: true
+    # Requires storageClass/global.storageClass to create a PVC.
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 5Gi
     annotations: {}
 
 # Ingress configuration

@@ -2,6 +2,7 @@
 {{- $gatewayDataHasSC := or (default "" .Values.persistence.gatewayData.storageClass) $globalStorageClass }}
 {{- $gatewayDriversHasSC := or (default "" .Values.persistence.gatewayDrivers.storageClass) $globalStorageClass }}
 {{- $gatewayPluginsHasSC := or (default "" .Values.persistence.gatewayPlugins.storageClass) $globalStorageClass }}
+{{- $gatewayAiHasSC := or (default "" .Values.persistence.gatewayAi.storageClass) $globalStorageClass }}
 
 {{- if and .Values.gateway.enabled .Values.persistence.gatewayData.enabled $gatewayDataHasSC }}
 apiVersion: v1
@@ -87,5 +88,34 @@ spec:
   resources:
     requests:
       storage: {{ .Values.persistence.gatewayPlugins.size }}
+{{- end }}
+
+{{- if and .Values.gateway.enabled .Values.persistence.gatewayAi.enabled $gatewayAiHasSC }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ng-gateway.fullname" . }}-ai
+  labels:
+    {{- include "ng-gateway.gateway.labels" . | nindent 4 }}
+  {{- with .Values.persistence.gatewayAi.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.gatewayAi.accessMode }}
+  {{- if .Values.persistence.gatewayAi.storageClass }}
+  {{- if (eq "-" .Values.persistence.gatewayAi.storageClass) }}
+  storageClassName: ""
+  {{- else }}
+  storageClassName: {{ .Values.persistence.gatewayAi.storageClass }}
+  {{- end }}
+  {{- else if (include "ng-gateway.storageClass" .) }}
+  storageClassName: {{ include "ng-gateway.storageClass" . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.gatewayAi.size }}
 {{- end }}
 

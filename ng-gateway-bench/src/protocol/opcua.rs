@@ -5,10 +5,10 @@ use ng_driver_opcua::{
     OpcUaReadMode, SecurityMode, SecurityPolicy,
 };
 use ng_gateway_sdk::{
-    supervision::{Connector, NoopObserverFactory, SupervisorLoop, SupervisorParams},
+    supervision::{Connector, SupervisorLoop, SupervisorParams},
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, Driver, DriverResult,
-    NoopSouthwardTransportMeter, ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint,
-    SouthwardInitContext, Status, SupervisedDriver, Transform,
+    ReportType, RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext, Status,
+    SupervisedDriver, Transform,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -140,8 +140,7 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
         runtime_channel: runtime_channel as Arc<dyn RuntimeChannel>,
         publisher,
         channel_id,
-        transport_meter: Arc::new(NoopSouthwardTransportMeter),
-        observer_factory: Arc::new(NoopObserverFactory),
+        extensions: Default::default(),
     };
 
     let connector = <OpcUaConnector as Connector>::new(ctx)?;

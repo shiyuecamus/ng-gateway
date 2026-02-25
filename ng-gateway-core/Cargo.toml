@@ -19,6 +19,9 @@ workspace = true
 workspace = true
 [dependencies.ng-gateway-sdk]
 version = "0.1"
+[dependencies.ng-gateway-ai]
+workspace = true
+features = ["engine"]
 
 # External dependencies
 [dependencies.tokio]

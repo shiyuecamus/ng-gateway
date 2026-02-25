@@ -16,8 +16,8 @@ use super::{
 use ng_gateway_sdk::{
     connect_tcp_metered_with_timeout,
     supervision::{Connector, Session, SessionContext},
-    DriverError, DriverResult, FailureKind, FailurePhase, SouthwardInitContext,
-    SouthwardTransportMeter,
+    DriverError, DriverResult, FailureKind, FailurePhase, NoopSouthwardTransportMeter,
+    SouthwardInitContext, SouthwardTransportMeter,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -77,6 +77,9 @@ impl Connector for S7Connector {
     where
         Self: Sized,
     {
+        let transport_meter = ctx
+            .extensions
+            .get_or_default(|| Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>);
         let channel = ctx
             .runtime_channel
             .downcast_arc::<S7Channel>()
@@ -84,7 +87,7 @@ impl Connector for S7Connector {
         let handle = Arc::new(S7Handle::new(Arc::clone(&channel)));
         Ok(Self {
             channel,
-            transport_meter: ctx.transport_meter,
+            transport_meter,
             handle,
         })
     }
