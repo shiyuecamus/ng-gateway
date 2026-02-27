@@ -13,15 +13,14 @@ mod session;
 mod types;
 
 pub mod protocol;
-pub use connector::Dl645Connector;
+use crate::{converter::Dl645Converter, metadata::build_metadata};
 use ng_gateway_sdk::ng_driver_factory;
+
+pub use connector::Dl645Connector;
 pub use types::{
     Dl645Action, Dl645Channel, Dl645ChannelConfig, Dl645Connection, Dl645Device, Dl645FunctionCode,
     Dl645Parameter, Dl645Point, Dl645Version,
 };
-
-use crate::converter::Dl645Converter;
-use crate::metadata::build_metadata;
 
 // Define the DL/T 645 driver factory and export metadata for dynamic loading.
 //

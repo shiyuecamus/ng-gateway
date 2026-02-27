@@ -11,7 +11,7 @@
 
 use super::{
     super::lifecycle::{start_with_policy, StartPolicy},
-    NGSouthwardManager,
+    NGSouthwardManager, SouthwardDataBus,
 };
 use chrono::Utc;
 use futures::future::join_all;
@@ -103,7 +103,7 @@ impl NGSouthwardManager {
     pub async fn create_and_start_channel(
         &self,
         config: &ChannelModel,
-        southward_data_bus: &Arc<super::SouthwardDataBus>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
         policy: StartPolicy,
     ) -> NGResult<()> {
         // Prepare instance (driver created but not started) and commit.
@@ -238,7 +238,7 @@ impl NGSouthwardManager {
     pub async fn replace_channel_instance(
         &self,
         config: &ChannelModel,
-        southward_data_bus: &Arc<super::SouthwardDataBus>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
     ) -> NGResult<()> {
         let instance = self
             .create_channel_instance(config, southward_data_bus)
@@ -256,7 +256,7 @@ impl NGSouthwardManager {
     pub async fn restart_channel(
         &self,
         config: &ChannelModel,
-        southward_data_bus: &Arc<super::SouthwardDataBus>,
+        southward_data_bus: &Arc<SouthwardDataBus>,
         timeout_ms: u64,
     ) -> NGResult<()> {
         let channel_id = config.id;

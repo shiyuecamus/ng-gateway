@@ -1,8 +1,10 @@
-use crate::protocol::{
-    error::ProtocolError,
-    frame::defs::{Cjt188Address, ControlWord, FunctionCode, MeterType},
+use crate::{
+    protocol::{
+        error::ProtocolError,
+        frame::defs::{Cjt188Address, ControlWord, FunctionCode, MeterType},
+    },
+    types::Cjt188Version,
 };
-use crate::types::Cjt188Version;
 use bytes::{BufMut, Bytes, BytesMut};
 use ng_gateway_sdk::{WireDecode, WireEncode};
 

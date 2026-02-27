@@ -22,9 +22,10 @@ use ng_gateway_error::ai::AiEngineError;
 use ng_gateway_models::{
     ai::{
         api::AiEngineApi,
+        model::{ModelTask, ModelUpdateRequest, ModelUploadMetadata},
         pipeline::{
-            AlarmCondition, AlarmRule, AnnotationConfig, PipelineConfig, SamplingStrategy,
-            StageConfig,
+            AlarmCondition, AlarmRule, AnnotationConfig, PipelineConfig, PipelineUpsertRequest,
+            SamplingStrategy, StageConfig,
         },
         types::{AlarmSeverity, FrameAnalysisRequest, FrameFormat, PipelineId, VideoFrame},
     },
@@ -58,6 +59,7 @@ fn test_pipeline(model_id: &str) -> PipelineConfig {
         name: "Test Pipeline".into(),
         sampling: SamplingStrategy::EveryFrame,
         roi: None,
+        roi_regions: vec![],
         stages: vec![StageConfig::Inference {
             model_id: model_id.into(),
             confidence_threshold: 0.5,
@@ -157,8 +159,12 @@ async fn engine_status_reports_correct_config() {
 async fn pipeline_register_and_list() {
     let (engine, _tmp) = create_test_engine(4).await;
 
-    engine.register_pipeline(1, test_pipeline("yolov8n"));
-    engine.register_pipeline(2, test_pipeline("yolov8n"));
+    engine
+        .register_pipeline(1, test_pipeline("yolov8n"))
+        .expect("register pipeline #1");
+    engine
+        .register_pipeline(2, test_pipeline("yolov8n"))
+        .expect("register pipeline #2");
 
     let pipelines = engine.list_pipelines().await.expect("list");
     assert_eq!(pipelines.len(), 2);
@@ -172,7 +178,9 @@ async fn pipeline_register_and_list() {
 async fn pipeline_get_existing() {
     let (engine, _tmp) = create_test_engine(4).await;
 
-    engine.register_pipeline(42, test_pipeline("yolov8n"));
+    engine
+        .register_pipeline(42, test_pipeline("yolov8n"))
+        .expect("register pipeline");
 
     let config = engine.get_pipeline(42).await.expect("get");
     assert!(config.is_some());
@@ -191,7 +199,9 @@ async fn pipeline_get_nonexistent() {
 async fn pipeline_unregister() {
     let (engine, _tmp) = create_test_engine(4).await;
 
-    engine.register_pipeline(1, test_pipeline("yolov8n"));
+    engine
+        .register_pipeline(1, test_pipeline("yolov8n"))
+        .expect("register pipeline");
     assert_eq!(engine.list_pipelines().await.unwrap().len(), 1);
 
     engine.unregister_pipeline(1);
@@ -205,20 +215,48 @@ async fn pipeline_unregister() {
 async fn pipeline_replace() {
     let (engine, _tmp) = create_test_engine(4).await;
 
-    engine.register_pipeline(1, test_pipeline("model_a"));
-    engine.register_pipeline(1, test_pipeline("model_b"));
+    engine
+        .register_pipeline(1, test_pipeline("model_a"))
+        .expect("register first");
+    engine
+        .register_pipeline(1, test_pipeline("model_b"))
+        .expect("replace pipeline");
 
     let pipelines = engine.list_pipelines().await.unwrap();
     assert_eq!(pipelines.len(), 1, "replace should not duplicate");
 }
 
 #[tokio::test]
+async fn pipeline_upsert_and_delete_via_api() {
+    let (engine, _tmp) = create_test_engine(4).await;
+    let request = PipelineUpsertRequest {
+        channel_id: 7,
+        config: test_pipeline("model_a"),
+    };
+
+    engine
+        .upsert_pipeline(request)
+        .await
+        .expect("upsert pipeline");
+    assert!(engine.get_pipeline(7).await.unwrap().is_some());
+
+    engine.delete_pipeline(7).await.expect("delete pipeline");
+    assert!(engine.get_pipeline(7).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn pipeline_status_reflects_count() {
     let (engine, _tmp) = create_test_engine(4).await;
 
-    engine.register_pipeline(1, test_pipeline("m"));
-    engine.register_pipeline(2, test_pipeline("m"));
-    engine.register_pipeline(3, test_pipeline("m"));
+    engine
+        .register_pipeline(1, test_pipeline("m"))
+        .expect("register pipeline #1");
+    engine
+        .register_pipeline(2, test_pipeline("m"))
+        .expect("register pipeline #2");
+    engine
+        .register_pipeline(3, test_pipeline("m"))
+        .expect("register pipeline #3");
 
     let status = engine.get_engine_status().await.unwrap();
     assert_eq!(status.pipelines.registered, 3);
@@ -235,7 +273,9 @@ async fn backpressure_when_semaphore_exhausted() {
     let (engine, _tmp) = create_test_engine(1).await;
     let engine = Arc::new(engine);
 
-    engine.register_pipeline(1, test_pipeline("nonexistent_model"));
+    engine
+        .register_pipeline(1, test_pipeline("nonexistent_model"))
+        .expect("register pipeline");
 
     // First request will acquire the semaphore permit, then fail on model lookup.
     // The semaphore is acquired first, so the second concurrent request should get backpressure.
@@ -296,6 +336,50 @@ async fn get_model_nonexistent_returns_none() {
 
     let model = engine.get_model("does_not_exist").await.expect("get_model");
     assert!(model.is_none());
+}
+
+#[tokio::test]
+async fn model_upload_update_and_delete() {
+    let (engine, _tmp) = create_test_engine(4).await;
+
+    let metadata = ModelUploadMetadata {
+        id: "unit_model".to_string(),
+        name: "Unit Model".to_string(),
+        version: "1.0.0".to_string(),
+        task: ModelTask::ObjectDetection,
+        labels: vec!["person".to_string()],
+        default_preprocess: None,
+        default_postprocess: None,
+    };
+    let uploaded = engine
+        .upload_model(Bytes::from_static(b"not_a_real_onnx"), metadata)
+        .await
+        .expect("upload model");
+    assert_eq!(uploaded.id, "unit_model");
+
+    let updated = engine
+        .update_model(
+            "unit_model",
+            ModelUpdateRequest {
+                name: Some("Updated Model".to_string()),
+                version: Some("2.0.0".to_string()),
+                task: Some(ModelTask::Classification),
+                labels: Some(vec!["cat".to_string(), "dog".to_string()]),
+                default_preprocess: None,
+                default_postprocess: None,
+            },
+        )
+        .await
+        .expect("update model");
+    assert_eq!(updated.name, "Updated Model");
+    assert_eq!(updated.version, "2.0.0");
+    assert!(matches!(updated.task, ModelTask::Classification));
+
+    engine
+        .delete_model("unit_model")
+        .await
+        .expect("delete model");
+    assert!(engine.get_model("unit_model").await.unwrap().is_none());
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -360,7 +444,8 @@ async fn concurrent_pipeline_operations() {
     for i in 0..100 {
         let e = Arc::clone(&engine);
         handles.push(tokio::spawn(async move {
-            e.register_pipeline(i, test_pipeline("model"));
+            e.register_pipeline(i, test_pipeline("model"))
+                .expect("register pipeline");
         }));
     }
     for h in handles {
@@ -392,7 +477,9 @@ async fn pipeline_churn_does_not_leak() {
 
     // Register and unregister 10,000 pipelines — should not grow memory unboundedly.
     for i in 0..10_000 {
-        engine.register_pipeline(i % 100, test_pipeline("model"));
+        engine
+            .register_pipeline(i % 100, test_pipeline("model"))
+            .expect("register pipeline");
     }
     // After churn, only 100 distinct channels remain.
     assert_eq!(engine.list_pipelines().await.unwrap().len(), 100);
@@ -410,7 +497,9 @@ async fn pipeline_churn_does_not_leak() {
 #[tokio::test]
 async fn repeated_frame_submission_errors_do_not_leak() {
     let (engine, _tmp) = create_test_engine(4).await;
-    engine.register_pipeline(1, test_pipeline("nonexistent"));
+    engine
+        .register_pipeline(1, test_pipeline("nonexistent"))
+        .expect("register pipeline");
 
     // Submit 1000 frames that will all fail (model not found).
     // Verify semaphore permits are always returned.

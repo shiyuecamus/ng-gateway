@@ -135,17 +135,17 @@ pub struct AnalysisResult {
     /// Source frame timestamp.
     pub frame_timestamp: DateTime<Utc>,
     /// Object detections (bounding boxes with class and confidence).
-    pub detections: Vec<Detection>,
+    pub detections: Arc<[Detection]>,
     /// Classification results (whole-frame or per-ROI).
-    pub classifications: Vec<Classification>,
+    pub classifications: Arc<[Classification]>,
     /// Keypoint/pose detections (e.g., YOLOv8-Pose).
-    pub keypoint_detections: Vec<KeypointDetection>,
+    pub keypoint_detections: Arc<[KeypointDetection]>,
     /// Segmentation masks (semantic segmentation output).
-    pub segmentation_masks: Vec<SegmentationMask>,
+    pub segmentation_masks: Arc<[SegmentationMask]>,
     /// Anomaly detection results.
-    pub anomaly_maps: Vec<AnomalyMap>,
+    pub anomaly_maps: Arc<[AnomalyMap]>,
     /// Triggered alarm events.
-    pub alarms: Vec<AlarmEvent>,
+    pub alarms: Arc<[AlarmEvent]>,
     /// Inference latency (end-to-end pipeline) in milliseconds.
     #[serde(
         serialize_with = "serialize_duration_ms",
@@ -154,6 +154,35 @@ pub struct AnalysisResult {
     pub inference_latency: Duration,
     /// Optional annotated frame (JPEG with drawn bounding boxes).
     /// Excluded from JSON serialization (binary data).
+    #[serde(skip)]
+    pub annotated_frame: Option<Bytes>,
+}
+
+/// Core structured analysis result without render payload.
+///
+/// This type is optimized for shared caching and low-copy snapshot serving.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalysisCore {
+    /// Source frame sequence number.
+    pub frame_seq: u64,
+    /// Object detections.
+    pub detections: Arc<[Detection]>,
+    /// Classification results.
+    pub classifications: Arc<[Classification]>,
+    /// Keypoint/pose detections.
+    pub keypoint_detections: Arc<[KeypointDetection]>,
+    /// Segmentation masks.
+    pub segmentation_masks: Arc<[SegmentationMask]>,
+    /// Anomaly map outputs.
+    pub anomaly_maps: Arc<[AnomalyMap]>,
+    /// Triggered alarm events.
+    pub alarms: Arc<[AlarmEvent]>,
+}
+
+/// Render-specific artifacts generated from one analysis result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RenderArtifact {
+    /// Optional annotated JPEG.
     #[serde(skip)]
     pub annotated_frame: Option<Bytes>,
 }
@@ -324,6 +353,16 @@ pub enum AlarmSeverity {
     Info,
     Warning,
     Critical,
+}
+
+impl From<AlarmSeverity> for ng_gateway_sdk::AlarmSeverity {
+    fn from(value: AlarmSeverity) -> Self {
+        match value {
+            AlarmSeverity::Info => ng_gateway_sdk::AlarmSeverity::Info,
+            AlarmSeverity::Warning => ng_gateway_sdk::AlarmSeverity::Warning,
+            AlarmSeverity::Critical => ng_gateway_sdk::AlarmSeverity::Critical,
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────

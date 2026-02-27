@@ -16,8 +16,8 @@
 
 use ng_gateway_error::{NGError, NGResult};
 use prometheus::{
-    core::Collector, opts, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts,
-    Registry,
+    core::Collector, opts, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge, Opts, Registry,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
@@ -51,6 +51,9 @@ pub struct AiMetricsHub {
     model_load_latency: Histogram,
     frame_decode_latency: Histogram,
     wasm_execution_latency: HistogramVec,
+    copy_bytes_total: IntCounter,
+    alloc_estimate_total: IntCounter,
+    lock_wait_ns_total: IntCounter,
 
     /// Cumulative inference count (lock-free, for status API).
     total_inference_count: AtomicU64,
@@ -183,6 +186,39 @@ impl AiMetricsHub {
             "ai_wasm_execution_latency_seconds",
         );
 
+        let copy_bytes_total = IntCounter::with_opts(opts!(
+            "ai_copy_bytes_total",
+            "Estimated total bytes copied on AI hot path"
+        ))
+        .map_err(|e| NGError::from(format!("ai_copy_bytes_total: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(copy_bytes_total.clone()),
+            "ai_copy_bytes_total",
+        );
+
+        let alloc_estimate_total = IntCounter::with_opts(opts!(
+            "ai_alloc_estimate_total",
+            "Estimated total allocated bytes on AI hot path"
+        ))
+        .map_err(|e| NGError::from(format!("ai_alloc_estimate_total: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(alloc_estimate_total.clone()),
+            "ai_alloc_estimate_total",
+        );
+
+        let lock_wait_ns_total = IntCounter::with_opts(opts!(
+            "ai_lock_wait_ns_total",
+            "Total nanoseconds spent waiting for hot-path locks"
+        ))
+        .map_err(|e| NGError::from(format!("ai_lock_wait_ns_total: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(lock_wait_ns_total.clone()),
+            "ai_lock_wait_ns_total",
+        );
+
         Ok(Self {
             frames_submitted,
             frames_dropped,
@@ -194,6 +230,9 @@ impl AiMetricsHub {
             model_load_latency,
             frame_decode_latency,
             wasm_execution_latency,
+            copy_bytes_total,
+            alloc_estimate_total,
+            lock_wait_ns_total,
             total_inference_count: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
         })
@@ -305,5 +344,23 @@ impl AiMetricsHub {
         self.wasm_execution_latency
             .with_label_values(&[module_id])
             .observe(seconds);
+    }
+
+    /// Add estimated copied bytes for AI processing hot path.
+    #[inline]
+    pub fn add_copy_bytes(&self, bytes: u64) {
+        self.copy_bytes_total.inc_by(bytes);
+    }
+
+    /// Add estimated allocated bytes for AI processing hot path.
+    #[inline]
+    pub fn add_alloc_estimate(&self, bytes: u64) {
+        self.alloc_estimate_total.inc_by(bytes);
+    }
+
+    /// Add lock waiting duration in nanoseconds for AI hot path.
+    #[inline]
+    pub fn add_lock_wait_ns(&self, ns: u64) {
+        self.lock_wait_ns_total.inc_by(ns);
     }
 }

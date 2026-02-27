@@ -12,8 +12,8 @@ use super::{
 };
 use ng_gateway_sdk::{
     supervision::{Connector as NgConnector, Session, SessionContext},
-    DriverError, DriverResult, FailureKind, FailurePhase, MeteredStream, NoopSouthwardTransportMeter,
-    SouthwardInitContext, SouthwardTransportMeter,
+    DriverError, DriverResult, FailureKind, FailurePhase, MeteredStream,
+    NoopSouthwardTransportMeter, SouthwardInitContext, SouthwardTransportMeter,
 };
 use opcua::{
     client::{
@@ -377,9 +377,9 @@ impl NgConnector for OpcUaConnector {
     where
         Self: Sized,
     {
-        let transport_meter = ctx
-            .extensions
-            .get_or_default(|| Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>);
+        let transport_meter = ctx.extensions.get_or_default(|| {
+            Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>
+        });
         let channel = Arc::clone(&ctx.runtime_channel)
             .downcast_arc::<OpcUaChannel>()
             .map_err(|_| DriverError::ConfigurationError("Invalid OpcUaChannel".to_string()))?;

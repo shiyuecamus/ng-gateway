@@ -1,5 +1,4 @@
-use crate::get_db_connection;
-use crate::{ActionRepository, DeviceRepository, PointRepository};
+use crate::{get_db_connection, ActionRepository, DeviceRepository, PointRepository};
 use ng_gateway_error::{storage::StorageError, StorageResult};
 use ng_gateway_models::{
     domain::prelude::{ChannelInfo, ChannelPageParams, PageResult},

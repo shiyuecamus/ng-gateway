@@ -63,7 +63,7 @@ pub struct TypedMultiAddressReadSpec {
     /// Caller-supplied index to preserve input ordering in results.
     pub index: usize,
     /// Logical MC address to read from.
-    pub addr: crate::protocol::frame::addr::McLogicalAddress,
+    pub addr: McLogicalAddress,
     /// Logical data type expected for this address.
     pub data_type: DataType,
 }
@@ -73,7 +73,7 @@ pub struct TypedMultiAddressReadSpec {
 #[derive(Debug, Clone)]
 pub struct TypedMultiAddressWriteSpec {
     /// Logical MC address to write to.
-    pub addr: crate::protocol::frame::addr::McLogicalAddress,
+    pub addr: McLogicalAddress,
     /// Logical data type of the value.
     pub data_type: DataType,
     /// JSON-encoded value to be written.

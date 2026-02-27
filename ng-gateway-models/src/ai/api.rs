@@ -8,13 +8,14 @@ use super::{
     algorithm::{
         AlgorithmTestInput, AlgorithmTestResult, AlgorithmUploadMetadata, WasmAlgorithmInfo,
     },
-    model::ModelInfo,
-    pipeline::PipelineConfig,
+    model::{ModelInfo, ModelUpdateRequest, ModelUploadMetadata},
+    pipeline::{PipelineConfig, PipelineUpsertRequest},
     types::{AnalysisResult, EngineStatus, FrameAnalysisRequest, PipelineId, ProcessorInfo},
 };
 use bytes::Bytes;
 use downcast_rs::{impl_downcast, DowncastSync};
 use ng_gateway_error::ai::AiEngineError;
+use std::sync::Arc;
 
 impl_downcast!(sync AiEngineApi);
 
@@ -42,13 +43,22 @@ pub trait AiEngineApi: DowncastSync + Send + Sync + 'static {
     fn has_capacity(&self, pipeline_id: &PipelineId) -> bool;
 
     /// Query available models and their status.
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, AiEngineError>;
+    async fn list_models(&self) -> Result<Vec<Arc<ModelInfo>>, AiEngineError>;
 
     /// Get the pipeline configuration for a given channel.
-    async fn get_pipeline(&self, channel_id: i32) -> Result<Option<PipelineConfig>, AiEngineError>;
+    async fn get_pipeline(
+        &self,
+        channel_id: i32,
+    ) -> Result<Option<Arc<PipelineConfig>>, AiEngineError>;
 
     /// Register (or replace) a pipeline for a channel.
-    fn register_pipeline(&self, channel_id: i32, config: PipelineConfig);
+    ///
+    /// Implementations must validate stage ordering and reject invalid DAGs.
+    fn register_pipeline(
+        &self,
+        channel_id: i32,
+        config: PipelineConfig,
+    ) -> Result<(), AiEngineError>;
 
     /// Remove the pipeline for a channel.
     fn unregister_pipeline(&self, channel_id: i32);
@@ -60,10 +70,39 @@ pub trait AiEngineApi: DowncastSync + Send + Sync + 'static {
     ) -> Result<Option<AnalysisResult>, AiEngineError>;
 
     /// Get model info by identifier.
-    async fn get_model(&self, model_id: &str) -> Result<Option<ModelInfo>, AiEngineError>;
+    async fn get_model(&self, model_id: &str) -> Result<Option<Arc<ModelInfo>>, AiEngineError>;
+
+    /// Upload and register an ONNX model with metadata.
+    async fn upload_model(
+        &self,
+        onnx_bytes: Bytes,
+        metadata: ModelUploadMetadata,
+    ) -> Result<Arc<ModelInfo>, AiEngineError>;
+
+    /// Update mutable model configuration.
+    async fn update_model(
+        &self,
+        model_id: &str,
+        request: ModelUpdateRequest,
+    ) -> Result<Arc<ModelInfo>, AiEngineError>;
+
+    /// Delete a model and unload runtime session.
+    async fn delete_model(&self, model_id: &str) -> Result<(), AiEngineError>;
+
+    /// Explicitly load a model into inference pool.
+    async fn load_model(&self, model_id: &str) -> Result<(), AiEngineError>;
+
+    /// Explicitly unload a model from inference pool.
+    async fn unload_model(&self, model_id: &str) -> Result<(), AiEngineError>;
 
     /// List all registered pipeline configurations with their bound channel IDs.
-    async fn list_pipelines(&self) -> Result<Vec<(i32, PipelineConfig)>, AiEngineError>;
+    async fn list_pipelines(&self) -> Result<Vec<(i32, Arc<PipelineConfig>)>, AiEngineError>;
+
+    /// Create or replace a pipeline binding.
+    async fn upsert_pipeline(&self, request: PipelineUpsertRequest) -> Result<(), AiEngineError>;
+
+    /// Delete a pipeline binding by channel ID.
+    async fn delete_pipeline(&self, channel_id: i32) -> Result<(), AiEngineError>;
 
     /// Get an aggregated engine status snapshot for monitoring/API.
     async fn get_engine_status(&self) -> Result<EngineStatus, AiEngineError>;
@@ -77,20 +116,20 @@ pub trait AiEngineApi: DowncastSync + Send + Sync + 'static {
     // ── Algorithm management (Phase 2) ───────────────────────────
 
     /// List all registered WASM algorithms.
-    async fn list_algorithms(&self) -> Result<Vec<WasmAlgorithmInfo>, AiEngineError>;
+    async fn list_algorithms(&self) -> Result<Vec<Arc<WasmAlgorithmInfo>>, AiEngineError>;
 
     /// Get a single algorithm by identifier.
     async fn get_algorithm(
         &self,
         algorithm_id: &str,
-    ) -> Result<Option<WasmAlgorithmInfo>, AiEngineError>;
+    ) -> Result<Option<Arc<WasmAlgorithmInfo>>, AiEngineError>;
 
     /// Upload and register a new WASM algorithm module.
     async fn upload_algorithm(
         &self,
         wasm_bytes: Bytes,
         metadata: AlgorithmUploadMetadata,
-    ) -> Result<WasmAlgorithmInfo, AiEngineError>;
+    ) -> Result<Arc<WasmAlgorithmInfo>, AiEngineError>;
 
     /// Delete a registered algorithm and remove its files.
     async fn delete_algorithm(&self, algorithm_id: &str) -> Result<(), AiEngineError>;

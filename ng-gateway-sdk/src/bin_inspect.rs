@@ -8,6 +8,8 @@ use goblin::{
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{ffi::OsStr, path::Path};
 
+use crate::{DriverError, DriverResult};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i16)]
 pub enum BinaryOsType {
@@ -150,20 +152,20 @@ fn map_mach_arch(cpu_type: u32) -> BinaryArch {
 }
 
 #[inline]
-pub fn ensure_current_platform_from_bytes(bytes: &[u8]) -> crate::DriverResult<()> {
+pub fn ensure_current_platform_from_bytes(bytes: &[u8]) -> DriverResult<()> {
     let info = inspect_binary(bytes);
 
     let expect_os = BinaryOsType::current();
     let expect_arch = BinaryArch::current();
 
     if info.os_type != expect_os {
-        return Err(crate::DriverError::ValidationError(format!(
+        return Err(DriverError::ValidationError(format!(
             "Driver OS mismatch: binary={:?}, gateway={:?}",
             info.os_type, expect_os
         )));
     }
     if info.arch != expect_arch {
-        return Err(crate::DriverError::ValidationError(format!(
+        return Err(DriverError::ValidationError(format!(
             "Driver CPU arch mismatch: binary={:?}, gateway={:?}",
             info.arch, expect_arch
         )));
@@ -173,20 +175,20 @@ pub fn ensure_current_platform_from_bytes(bytes: &[u8]) -> crate::DriverResult<(
 }
 
 #[inline]
-pub fn ensure_current_platform_from_path(path: &Path) -> crate::DriverResult<()> {
+pub fn ensure_current_platform_from_path(path: &Path) -> DriverResult<()> {
     // Extension gate first to avoid loading clearly incompatible binaries.
     let current_os = BinaryOsType::current();
     let expected_ext = current_os.expected_driver_ext();
     match path.extension().and_then(OsStr::to_str) {
         Some(ext) if expected_ext.is_empty() || ext == expected_ext => {}
         Some(ext) => {
-            return Err(crate::DriverError::ValidationError(format!(
+            return Err(DriverError::ValidationError(format!(
                 "Driver file extension mismatch: file ext='{}', expect='{}'",
                 ext, expected_ext
             )))
         }
         None => {
-            return Err(crate::DriverError::ValidationError(
+            return Err(DriverError::ValidationError(
                 "Driver path has no file extension".to_string(),
             ))
         }
@@ -194,7 +196,7 @@ pub fn ensure_current_platform_from_path(path: &Path) -> crate::DriverResult<()>
 
     // Read bytes once and validate OS/Arch strictly.
     let bytes = std::fs::read(path).map_err(|e| {
-        crate::DriverError::LoadError(format!("Failed to read library {}: {}", path.display(), e))
+        DriverError::LoadError(format!("Failed to read library {}: {}", path.display(), e))
     })?;
     ensure_current_platform_from_bytes(&bytes)
 }

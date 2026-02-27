@@ -46,12 +46,11 @@ impl Connector for CameraConnector {
         Self: Sized,
     {
         // 1. Extract AI engine handle (must be done before downcast_arc consumes ctx fields)
-        let ai_engine = ctx
-            .extensions
-            .get_cloned::<Arc<dyn AiEngineApi>>()
-            .ok_or(DriverError::ConfigurationError(
+        let ai_engine = ctx.extensions.get_cloned::<Arc<dyn AiEngineApi>>().ok_or(
+            DriverError::ConfigurationError(
                 "AI engine not available — ensure [general.ai] is enabled".to_string(),
-            ))?;
+            ),
+        )?;
 
         // 2. Downcast runtime channel to CameraChannel
         let channel = ctx
@@ -64,18 +63,26 @@ impl Connector for CameraConnector {
         // 3. Register the pipeline for this channel
         // The AI engine needs to know about this channel's pipeline configuration.
         // Pipeline registration is idempotent; reconnects re-register safely.
-        ai_engine.register_pipeline(
-            channel.id,
-            PipelineConfig {
-                id: channel.config.pipeline_id.clone(),
-                name: format!("camera-{}", channel.id),
-                sampling: channel.config.sampling.clone(),
-                roi: None,
-                stages: vec![],
-                alarm_rules: vec![],
-                annotation: Default::default(),
-            },
-        );
+        ai_engine
+            .register_pipeline(
+                channel.id,
+                PipelineConfig {
+                    id: channel.config.pipeline_id.clone(),
+                    name: format!("camera-{}", channel.id),
+                    sampling: channel.config.sampling.clone(),
+                    roi: None,
+                    roi_regions: vec![],
+                    stages: vec![],
+                    alarm_rules: vec![],
+                    annotation: Default::default(),
+                },
+            )
+            .map_err(|e| {
+                DriverError::ConfigurationError(format!(
+                    "Invalid AI pipeline configuration for channel {}: {}",
+                    channel.id, e
+                ))
+            })?;
 
         // 4. Create shared handle
         let handle = Arc::new(CameraHandle::new(

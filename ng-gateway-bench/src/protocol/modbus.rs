@@ -1,5 +1,7 @@
-use crate::protocol::{ChannelRuntime, PointsByDevice};
-use crate::publisher::NullPublisher;
+use crate::{
+    protocol::{ChannelRuntime, PointsByDevice},
+    publisher::NullPublisher,
+};
 use ng_driver_modbus::{
     types::{
         Endianness, ModbusChannel, ModbusChannelConfig, ModbusConnection, ModbusDevice,

@@ -33,10 +33,24 @@
 
 #[cfg(feature = "engine")]
 mod inner {
-    use crate::decoded_frame::DecodedFrame;
+    use crate::decoded::DecodedFrame;
+    use bytes::Bytes;
+    use ffmpeg_next::{
+        codec::{self, Context},
+        decoder::Video as DecoderVideo,
+        format::Pixel,
+        frame::Video as AvFrame,
+        software::scaling::{self, Context as ScalerContext},
+        Packet,
+    };
     use ng_gateway_error::ai::AiEngineError;
     use ng_gateway_models::ai::types::{FrameFormat, VideoFrame};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        OnceLock,
+    };
+    use tokio::sync::{mpsc, oneshot};
+    use tracing::info_span;
 
     /// Frame decoder pool — decodes encoded video frames to RGB24.
     ///
@@ -44,43 +58,46 @@ mod inner {
     /// H.264/H.265 NAL units are dispatched to a pool of dedicated OS threads,
     /// each owning an independent FFmpeg decoder context.
     pub struct FrameDecoderPool {
-        /// Bounded channel for dispatching H.264/H.265 decode requests.
-        tx: tokio::sync::mpsc::Sender<DecodeRequest>,
+        /// Per-worker bounded request queues.
+        workers: Vec<mpsc::Sender<DecodeRequest>>,
+        /// Round-robin cursor used as fallback routing.
+        rr_cursor: AtomicUsize,
     }
 
     struct DecodeRequest {
         frame: VideoFrame,
-        result_tx: tokio::sync::oneshot::Sender<Result<DecodedFrame, AiEngineError>>,
+        result_tx: oneshot::Sender<Result<DecodedFrame, AiEngineError>>,
     }
 
     impl FrameDecoderPool {
         /// Create a new decoder pool with `n` FFmpeg worker threads.
         ///
         /// Workers are spawned as named OS threads (`ai-decode-0`, `ai-decode-1`, …).
-        /// The bounded channel capacity is `workers × 4`, providing moderate
-        /// buffering while maintaining backpressure.
+        /// Each worker owns an independent queue and persistent FFmpeg contexts.
         pub fn new(workers: usize) -> Result<Self, AiEngineError> {
             let workers = workers.max(1);
-            let (tx, rx) = tokio::sync::mpsc::channel::<DecodeRequest>(workers * 4);
-            let rx = Arc::new(tokio::sync::Mutex::new(rx));
+            ffmpeg_init_once()?;
 
-            // Initialize FFmpeg once (idempotent / thread-safe after first call).
-            ffmpeg_init_once();
-
-            for i in 0..workers {
-                let rx = Arc::clone(&rx);
+            let mut worker_senders = Vec::with_capacity(workers);
+            let queue_capacity = workers * 4;
+            for worker_id in 0..workers {
+                let (tx, rx) = tokio::sync::mpsc::channel::<DecodeRequest>(queue_capacity);
                 std::thread::Builder::new()
-                    .name(format!("ai-decode-{i}"))
+                    .name(format!("ai-decode-{worker_id}"))
                     .spawn(move || {
-                        decode_worker_loop(rx);
+                        decode_worker_loop(worker_id, rx);
                     })
                     .map_err(|e| {
                         AiEngineError::IoError(format!("failed to spawn decode worker: {e}"))
                     })?;
+                worker_senders.push(tx);
             }
 
             tracing::info!(workers, "frame decoder pool initialized");
-            Ok(Self { tx })
+            Ok(Self {
+                workers: worker_senders,
+                rr_cursor: AtomicUsize::new(0),
+            })
         }
 
         /// Decode a video frame to RGB24.
@@ -93,7 +110,7 @@ mod inner {
             match frame.format {
                 FrameFormat::Jpeg => decode_jpeg(&frame.data),
                 FrameFormat::Rgb24 => Ok(DecodedFrame {
-                    data: frame.data.to_vec(),
+                    data: frame.data.clone(),
                     width: frame.width,
                     height: frame.height,
                 }),
@@ -105,7 +122,8 @@ mod inner {
         /// Dispatch a frame to the FFmpeg worker pool and await the result.
         async fn dispatch_ffmpeg(&self, frame: &VideoFrame) -> Result<DecodedFrame, AiEngineError> {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-            self.tx
+            let worker_index = self.select_worker(frame);
+            self.workers[worker_index]
                 .send(DecodeRequest {
                     frame: frame.clone(),
                     result_tx,
@@ -113,20 +131,44 @@ mod inner {
                 .await
                 .map_err(|_| AiEngineError::InternalError("decoder pool channel closed".into()))?;
 
+            let decode_wait_span = info_span!("decode_wait", format = ?frame.format);
+            let _decode_wait_guard = decode_wait_span.enter();
             result_rx
                 .await
                 .map_err(|_| AiEngineError::InternalError("decoder response lost".into()))?
+        }
+
+        /// Select one decode worker.
+        ///
+        /// The default path uses frame sequence sharding to preserve stream
+        /// locality. If sequence is unavailable, round-robin fallback is used.
+        fn select_worker(&self, frame: &VideoFrame) -> usize {
+            let worker_count = self.workers.len();
+            if worker_count <= 1 {
+                return 0;
+            }
+
+            let shard_by_seq = (frame.seq as usize) % worker_count;
+            let rr = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % worker_count;
+            if frame.seq == 0 {
+                rr
+            } else {
+                shard_by_seq
+            }
         }
     }
 
     // ── FFmpeg initialization ─────────────────────────────────────────
 
-    fn ffmpeg_init_once() {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            ffmpeg_next::init().expect("ffmpeg_next::init() failed");
-        });
+    fn ffmpeg_init_once() -> Result<(), AiEngineError> {
+        static INIT: OnceLock<Result<(), String>> = OnceLock::new();
+        let result = INIT.get_or_init(|| ffmpeg_next::init().map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => Err(AiEngineError::DecodeError(format!(
+                "ffmpeg init failed: {err}"
+            ))),
+        }
     }
 
     // ── Worker loop ───────────────────────────────────────────────────
@@ -135,21 +177,33 @@ mod inner {
     ///
     /// Each worker creates a mini current-thread Tokio runtime purely for
     /// async channel I/O. The actual decode is synchronous (CPU-bound).
-    fn decode_worker_loop(rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<DecodeRequest>>>) {
-        let rt = tokio::runtime::Builder::new_current_thread()
+    fn decode_worker_loop(worker_id: usize, mut rx: mpsc::Receiver<DecodeRequest>) {
+        let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("decoder worker runtime");
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::error!(
+                    worker_id,
+                    error = %error,
+                    "failed to build decode worker runtime"
+                );
+                return;
+            }
+        };
 
         rt.block_on(async {
+            let mut decoder_context = DecoderContext::default();
             loop {
-                let req = {
-                    let mut guard = rx.lock().await;
-                    guard.recv().await
-                };
+                let req = rx.recv().await;
                 match req {
                     Some(req) => {
-                        let result = decode_frame_ffmpeg(&req.frame);
+                        let decode_exec_span =
+                            info_span!("decode_exec", format = ?req.frame.format, worker_id = worker_id);
+                        let _decode_exec_guard = decode_exec_span.enter();
+                        let result = decode_frame_ffmpeg(&req.frame, &mut decoder_context);
+                        drop(_decode_exec_guard);
                         let _ = req.result_tx.send(result);
                     }
                     None => break,
@@ -160,68 +214,127 @@ mod inner {
 
     // ── FFmpeg decode ─────────────────────────────────────────────────
 
-    /// Decode a single H.264 or H.265 NAL unit to RGB24 using FFmpeg.
-    ///
-    /// Creates a per-call decoder context (stateless for NAL-unit-at-a-time
-    /// feeding). For long-lived streams where the decoder accumulates state
-    /// across packets (e.g., P/B-frame references), the Camera driver should
-    /// feed key-frames to ensure decodability.
-    fn decode_frame_ffmpeg(frame: &VideoFrame) -> Result<DecodedFrame, AiEngineError> {
-        use ffmpeg_next::{codec, format::Pixel, frame::Video as AvFrame, software::scaling};
+    /// Reusable FFmpeg decode/scaling context local to one worker.
+    #[derive(Default)]
+    struct DecoderContext {
+        h264: Option<DecoderVideo>,
+        h265: Option<DecoderVideo>,
+        scaler: Option<ScalerContext>,
+        scaler_spec: Option<ScalerSpec>,
+    }
 
-        let codec_id = match frame.format {
-            FrameFormat::H264Nal => codec::Id::H264,
-            FrameFormat::H265Nal => codec::Id::HEVC,
-            _ => {
-                return Err(AiEngineError::DecodeError(format!(
-                    "unsupported format for FFmpeg decode: {:?}",
-                    frame.format
-                )));
+    /// Input/output shape and format for scaler cache key.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct ScalerSpec {
+        src_format: Pixel,
+        src_width: u32,
+        src_height: u32,
+        dst_format: Pixel,
+        dst_width: u32,
+        dst_height: u32,
+    }
+
+    impl DecoderContext {
+        /// Get or create decoder for one encoded format.
+        fn decoder_for(&mut self, format: FrameFormat) -> Result<&mut DecoderVideo, AiEngineError> {
+            let slot = match format {
+                FrameFormat::H264Nal => &mut self.h264,
+                FrameFormat::H265Nal => &mut self.h265,
+                _ => {
+                    return Err(AiEngineError::DecodeError(format!(
+                        "unsupported format for FFmpeg decode: {format:?}"
+                    )));
+                }
+            };
+            if slot.is_none() {
+                let codec_id = match format {
+                    FrameFormat::H264Nal => codec::Id::H264,
+                    FrameFormat::H265Nal => codec::Id::HEVC,
+                    _ => unreachable!(),
+                };
+                *slot = Some(open_decoder(codec_id)?);
             }
-        };
+            slot.as_mut().ok_or_else(|| {
+                AiEngineError::DecodeError("decoder context initialization failed".to_string())
+            })
+        }
 
-        // Find decoder and create context
+        /// Get or create scaler for one source/destination pair.
+        fn scaler_for(&mut self, spec: ScalerSpec) -> Result<&mut ScalerContext, AiEngineError> {
+            let needs_rebuild = self
+                .scaler_spec
+                .map(|current| current != spec)
+                .unwrap_or(true);
+            if needs_rebuild {
+                let scaler = scaling::Context::get(
+                    spec.src_format,
+                    spec.src_width,
+                    spec.src_height,
+                    spec.dst_format,
+                    spec.dst_width,
+                    spec.dst_height,
+                    scaling::Flags::BILINEAR,
+                )
+                .map_err(|e| AiEngineError::DecodeError(format!("scaler init: {e}")))?;
+                self.scaler = Some(scaler);
+                self.scaler_spec = Some(spec);
+            }
+            self.scaler.as_mut().ok_or_else(|| {
+                AiEngineError::DecodeError("scaler context initialization failed".to_string())
+            })
+        }
+    }
+
+    /// Open one FFmpeg decoder context for the given codec.
+    fn open_decoder(codec_id: codec::Id) -> Result<DecoderVideo, AiEngineError> {
         let decoder_codec = codec::decoder::find(codec_id).ok_or_else(|| {
             AiEngineError::DecodeError(format!("FFmpeg codec not found: {codec_id:?}"))
         })?;
-
-        let mut decoder_ctx = codec::Context::new_with_codec(decoder_codec)
+        Context::new_with_codec(decoder_codec)
             .decoder()
             .video()
-            .map_err(|e| AiEngineError::DecodeError(format!("decoder open: {e}")))?;
+            .map_err(|e| AiEngineError::DecodeError(format!("decoder open: {e}")))
+    }
 
-        // Feed NAL data as a packet
-        let packet = codec::packet::Packet::copy(&frame.data);
-        decoder_ctx
-            .send_packet(&packet)
-            .map_err(|e| AiEngineError::DecodeError(format!("send_packet: {e}")))?;
-
-        // Also flush to signal end-of-stream for single-packet decode
-        // (some codecs need this to output the frame).
-        let _ = decoder_ctx.send_eof();
-
-        // Receive decoded frame
+    /// Decode a single H.264 or H.265 NAL unit to RGB24 using FFmpeg.
+    ///
+    /// Uses worker-local decoder/scaler context to avoid per-frame reinitialization.
+    fn decode_frame_ffmpeg(
+        frame: &VideoFrame,
+        decoder_context: &mut DecoderContext,
+    ) -> Result<DecodedFrame, AiEngineError> {
         let mut av_frame = AvFrame::empty();
-        decoder_ctx
-            .receive_frame(&mut av_frame)
-            .map_err(|e| AiEngineError::DecodeError(format!("receive_frame: {e}")))?;
+        {
+            let decoder = decoder_context.decoder_for(frame.format)?;
+
+            // Feed NAL data as one packet.
+            let packet = Packet::copy(&frame.data);
+            decoder
+                .send_packet(&packet)
+                .map_err(|e| AiEngineError::DecodeError(format!("send_packet: {e}")))?;
+
+            // Flush for packet-at-a-time decode to force output frame availability.
+            let _ = decoder.send_eof();
+
+            // Receive one decoded frame.
+            decoder
+                .receive_frame(&mut av_frame)
+                .map_err(|e| AiEngineError::DecodeError(format!("receive_frame: {e}")))?;
+        }
 
         let src_w = av_frame.width();
         let src_h = av_frame.height();
-        let src_fmt = av_frame.format();
+        let scaler_spec = ScalerSpec {
+            src_format: av_frame.format(),
+            src_width: src_w,
+            src_height: src_h,
+            dst_format: Pixel::RGB24,
+            dst_width: src_w,
+            dst_height: src_h,
+        };
 
-        // Convert to RGB24 using swscale
-        let mut scaler = scaling::Context::get(
-            src_fmt,
-            src_w,
-            src_h,
-            Pixel::RGB24,
-            src_w,
-            src_h,
-            scaling::Flags::BILINEAR,
-        )
-        .map_err(|e| AiEngineError::DecodeError(format!("scaler init: {e}")))?;
-
+        // Convert to RGB24 using reusable swscale context.
+        let scaler = decoder_context.scaler_for(scaler_spec)?;
         let mut rgb_frame = AvFrame::empty();
         scaler
             .run(&av_frame, &mut rgb_frame)
@@ -242,7 +355,7 @@ mod inner {
         }
 
         Ok(DecodedFrame {
-            data: rgb_data,
+            data: Bytes::from(rgb_data),
             width: src_w,
             height: src_h,
         })
@@ -264,7 +377,7 @@ mod inner {
         let (width, height) = (rgb.width(), rgb.height());
 
         Ok(DecodedFrame {
-            data: rgb.into_raw(),
+            data: Bytes::from(rgb.into_raw()),
             width,
             height,
         })
@@ -315,7 +428,7 @@ mod inner {
         }
 
         Ok(DecodedFrame {
-            data: rgb,
+            data: Bytes::from(rgb),
             width,
             height,
         })

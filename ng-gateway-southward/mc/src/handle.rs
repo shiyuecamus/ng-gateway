@@ -16,7 +16,7 @@ use super::{
         session::Session as ProtoSession,
     },
     typed_api::{McTypedApi, TypedPointReadSpec},
-    types::{McAction, McChannel, McDevice, McPoint},
+    types::{McAction, McChannel, McDevice, McParameter, McPoint},
 };
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
@@ -517,7 +517,7 @@ impl SouthwardHandle for McHandle {
                 "RuntimeDevice is not McDevice".to_string(),
             ))?;
 
-        let resolved = downcast_parameters::<crate::types::McParameter>(parameters)?;
+        let resolved = downcast_parameters::<McParameter>(parameters)?;
 
         let session = self.pick_session()?;
 

@@ -6,10 +6,14 @@
 
 #[cfg(feature = "engine")]
 mod inner {
-    use crate::decoded_frame::DecodedFrame;
+    use crate::decoded::DecodedFrame;
+    use crate::pipeline::defaults::DEFAULT_LETTERBOX_PAD_VALUE;
+    use fast_image_resize::{images::Image, PixelType, Resizer};
     use ndarray::Array4;
-    use ng_gateway_models::ai::{model::TensorDType, types::BoundingBox};
     use ng_gateway_error::ai::AiEngineError;
+    use ng_gateway_models::ai::{model::TensorDType, types::BoundingBox};
+    use rayon::prelude::*;
+    use std::borrow::Cow;
 
     // ── Coordinate transform ───────────────────────────────────────
 
@@ -151,7 +155,7 @@ mod inner {
     impl Default for LetterboxPreProcessor {
         fn default() -> Self {
             Self {
-                pad_value: 114,
+                pad_value: DEFAULT_LETTERBOX_PAD_VALUE,
                 normalize: NormalizationParams::YOLO,
                 rgb_order: true,
             }
@@ -187,18 +191,25 @@ mod inner {
             let h = target_h as usize;
             let w = target_w as usize;
             let mut tensor = Array4::<f32>::zeros((1, channels, h, w));
-
-            // Fill padding
-            let pad_norm = self.pad_value as f32 / 255.0;
-            for c in 0..channels {
-                let fill = (pad_norm - self.normalize.mean[c]) / self.normalize.std[c];
-                tensor.slice_mut(ndarray::s![0, c, .., ..]).fill(fill);
-            }
+            let tensor_data = tensor.as_slice_mut().ok_or_else(|| {
+                AiEngineError::PreprocessError("tensor storage must be contiguous".into())
+            })?;
+            let plane_size = h * w;
+            fill_tensor_with_normalized_pad(
+                tensor_data,
+                plane_size,
+                channels,
+                self.pad_value,
+                &self.normalize,
+            );
 
             let pixel_params = NormalizedPixelWrite {
                 pixels: &resized,
-                w: new_w,
-                h: new_h,
+                source_width: new_w,
+                source_offset_x: 0,
+                source_offset_y: 0,
+                copy_w: new_w,
+                copy_h: new_h,
                 offset_x: pad_x,
                 offset_y: pad_y,
                 norm: &self.normalize,
@@ -206,9 +217,9 @@ mod inner {
             };
 
             if channels == 1 {
-                write_grayscale_pixels(&mut tensor, &pixel_params);
+                write_grayscale_pixels(tensor_data, w, h, &pixel_params);
             } else {
-                write_normalized_pixels(&mut tensor, &pixel_params);
+                write_normalized_pixels(tensor_data, w, h, &pixel_params);
             }
 
             Ok(PreprocessOutput {
@@ -279,32 +290,27 @@ mod inner {
             let h = target_h as usize;
             let w = target_w as usize;
             let mut tensor = Array4::<f32>::zeros((1, channels, h, w));
+            let tensor_data = tensor.as_slice_mut().ok_or(AiEngineError::PreprocessError(
+                "tensor storage must be contiguous".into(),
+            ))?;
+
+            let pixel_params = NormalizedPixelWrite {
+                pixels: &resized,
+                source_width: new_w,
+                source_offset_x: crop_x as u32,
+                source_offset_y: crop_y as u32,
+                copy_w: target_w,
+                copy_h: target_h,
+                offset_x: 0,
+                offset_y: 0,
+                norm: &self.normalize,
+                rgb_order: self.rgb_order,
+            };
 
             if channels == 1 {
-                let mean = self.normalize.mean[0];
-                let std = self.normalize.std[0];
-                for y in 0..h {
-                    for x in 0..w {
-                        let src_idx = ((crop_y + y) * new_w as usize + (crop_x + x)) * 3;
-                        let r = resized[src_idx] as f32;
-                        let g = resized[src_idx + 1] as f32;
-                        let b = resized[src_idx + 2] as f32;
-                        let gray = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
-                        tensor[[0, 0, y, x]] = (gray - mean) / std;
-                    }
-                }
+                write_grayscale_pixels(tensor_data, w, h, &pixel_params);
             } else {
-                for y in 0..h {
-                    for x in 0..w {
-                        let src_idx = ((crop_y + y) * new_w as usize + (crop_x + x)) * 3;
-                        for c in 0..3usize {
-                            let ch = if self.rgb_order { c } else { 2 - c };
-                            let pixel = resized[src_idx + ch] as f32 / 255.0;
-                            tensor[[0, c, y, x]] =
-                                (pixel - self.normalize.mean[c]) / self.normalize.std[c];
-                        }
-                    }
-                }
+                write_normalized_pixels(tensor_data, w, h, &pixel_params);
             }
 
             Ok(PreprocessOutput {
@@ -362,11 +368,17 @@ mod inner {
             let h = target_h as usize;
             let w = target_w as usize;
             let mut tensor = Array4::<f32>::zeros((1, channels, h, w));
+            let tensor_data = tensor.as_slice_mut().ok_or(AiEngineError::PreprocessError(
+                "tensor storage must be contiguous".into(),
+            ))?;
 
             let pixel_params = NormalizedPixelWrite {
                 pixels: &resized,
-                w: target_w,
-                h: target_h,
+                source_width: target_w,
+                source_offset_x: 0,
+                source_offset_y: 0,
+                copy_w: target_w,
+                copy_h: target_h,
                 offset_x: 0,
                 offset_y: 0,
                 norm: &self.normalize,
@@ -374,9 +386,9 @@ mod inner {
             };
 
             if channels == 1 {
-                write_grayscale_pixels(&mut tensor, &pixel_params);
+                write_grayscale_pixels(tensor_data, w, h, &pixel_params);
             } else {
-                write_normalized_pixels(&mut tensor, &pixel_params);
+                write_normalized_pixels(tensor_data, w, h, &pixel_params);
             }
 
             let scale_x = target_w as f32 / frame.width as f32;
@@ -401,18 +413,19 @@ mod inner {
     // ── Helpers ─────────────────────────────────────────────────────
 
     /// SIMD-accelerated image resize using `fast_image_resize`.
-    fn resize_rgb(frame: &DecodedFrame, new_w: u32, new_h: u32) -> Result<Vec<u8>, AiEngineError> {
-        use fast_image_resize::images::Image;
-        use fast_image_resize::{PixelType, Resizer};
-
+    fn resize_rgb<'a>(
+        frame: &'a DecodedFrame,
+        new_w: u32,
+        new_h: u32,
+    ) -> Result<Cow<'a, [u8]>, AiEngineError> {
         if new_w == frame.width && new_h == frame.height {
-            return Ok(frame.data.clone());
+            return Ok(Cow::Borrowed(frame.data.as_ref()));
         }
 
         let src = Image::from_vec_u8(
             frame.width,
             frame.height,
-            frame.data.clone(),
+            frame.data.as_ref().to_vec(),
             PixelType::U8x3,
         )
         .map_err(|e| AiEngineError::PreprocessError(format!("source image error: {e}")))?;
@@ -423,35 +436,165 @@ mod inner {
             .resize(&src, &mut dst, None)
             .map_err(|e| AiEngineError::PreprocessError(format!("resize error: {e}")))?;
 
-        Ok(dst.into_vec())
+        Ok(Cow::Owned(dst.into_vec()))
     }
 
     /// Parameters for writing resized pixels into an NCHW tensor.
     struct NormalizedPixelWrite<'a> {
         pixels: &'a [u8],
-        w: u32,
-        h: u32,
+        source_width: u32,
+        source_offset_x: u32,
+        source_offset_y: u32,
+        copy_w: u32,
+        copy_h: u32,
         offset_x: u32,
         offset_y: u32,
         norm: &'a NormalizationParams,
         rgb_order: bool,
     }
 
+    /// Fill output tensor with normalized pad value before writing the resized ROI.
+    fn fill_tensor_with_normalized_pad(
+        tensor_data: &mut [f32],
+        plane_size: usize,
+        channels: usize,
+        pad_value: u8,
+        norm: &NormalizationParams,
+    ) {
+        let pad_norm = pad_value as f32 / 255.0;
+        if channels == 1 {
+            let fill = (pad_norm - norm.mean[0]) / norm.std[0];
+            tensor_data.fill(fill);
+            return;
+        }
+        for c in 0..channels {
+            let fill = (pad_norm - norm.mean[c]) / norm.std[c];
+            let start = c * plane_size;
+            let end = start + plane_size;
+            tensor_data[start..end].fill(fill);
+        }
+    }
+
+    /// Build per-channel lookup tables to map `u8` to normalized `f32`.
+    fn build_rgb_normalize_lut(norm: &NormalizationParams) -> [[f32; 256]; 3] {
+        let mut lut = [[0.0f32; 256]; 3];
+        for (channel, table) in lut.iter_mut().enumerate() {
+            let inv_std = 1.0 / norm.std[channel];
+            for (value, mapped) in table.iter_mut().enumerate() {
+                let pixel = value as f32 * (1.0 / 255.0);
+                *mapped = (pixel - norm.mean[channel]) * inv_std;
+            }
+        }
+        lut
+    }
+
+    /// Build BT.601 grayscale LUT split by source channel contribution.
+    fn build_gray_lut(norm: &NormalizationParams) -> ([f32; 256], [f32; 256], [f32; 256]) {
+        let mut r_lut = [0.0f32; 256];
+        let mut g_lut = [0.0f32; 256];
+        let mut b_lut = [0.0f32; 256];
+        let inv_std = 1.0 / norm.std[0];
+        let mean = norm.mean[0];
+        for value in 0..256usize {
+            let vf = value as f32 * (1.0 / 255.0);
+            r_lut[value] = (0.299 * vf - mean) * inv_std;
+            g_lut[value] = 0.587 * vf * inv_std;
+            b_lut[value] = 0.114 * vf * inv_std;
+        }
+        (r_lut, g_lut, b_lut)
+    }
+
+    #[inline]
+    fn should_parallelize(copy_w: usize, copy_h: usize) -> bool {
+        copy_w.saturating_mul(copy_h) >= 128 * 128
+    }
+
     /// Write resized pixels into an NCHW tensor at the given offset with normalization.
-    fn write_normalized_pixels(tensor: &mut Array4<f32>, params: &NormalizedPixelWrite<'_>) {
-        let w = params.w as usize;
-        let h = params.h as usize;
-        for y in 0..h {
-            for x in 0..w {
-                let src_idx = (y * w + x) * 3;
-                let dst_y = y + params.offset_y as usize;
-                let dst_x = x + params.offset_x as usize;
-                for c in 0..3usize {
-                    let ch = if params.rgb_order { c } else { 2 - c };
-                    let pixel = params.pixels[src_idx + ch] as f32 / 255.0;
-                    tensor[[0, c, dst_y, dst_x]] =
-                        (pixel - params.norm.mean[c]) / params.norm.std[c];
-                }
+    fn write_normalized_pixels(
+        tensor_data: &mut [f32],
+        tensor_w: usize,
+        tensor_h: usize,
+        params: &NormalizedPixelWrite<'_>,
+    ) {
+        let copy_w = params.copy_w as usize;
+        let copy_h = params.copy_h as usize;
+        let src_w = params.source_width as usize;
+        let src_x = params.source_offset_x as usize;
+        let src_y = params.source_offset_y as usize;
+        let dst_x = params.offset_x as usize;
+        let dst_y = params.offset_y as usize;
+        let plane_size = tensor_w * tensor_h;
+        let lut = build_rgb_normalize_lut(params.norm);
+        let (plane0, rest) = tensor_data.split_at_mut(plane_size);
+        let (plane1, plane2) = rest.split_at_mut(plane_size);
+        let row_start = dst_y * tensor_w;
+        let row_end = row_start + copy_h * tensor_w;
+        let rows0 = &mut plane0[row_start..row_end];
+        let rows1 = &mut plane1[row_start..row_end];
+        let rows2 = &mut plane2[row_start..row_end];
+
+        if should_parallelize(copy_w, copy_h) {
+            rows0
+                .par_chunks_mut(tensor_w)
+                .zip(rows1.par_chunks_mut(tensor_w))
+                .zip(rows2.par_chunks_mut(tensor_w))
+                .enumerate()
+                .for_each(|(y, ((row0, row1), row2))| {
+                    let src_row_base = (src_y + y) * src_w;
+                    let out0 = &mut row0[dst_x..dst_x + copy_w];
+                    let out1 = &mut row1[dst_x..dst_x + copy_w];
+                    let out2 = &mut row2[dst_x..dst_x + copy_w];
+                    for x in 0..copy_w {
+                        let src_idx = (src_row_base + src_x + x) * 3;
+                        let (c0, c1, c2) = if params.rgb_order {
+                            (
+                                params.pixels[src_idx] as usize,
+                                params.pixels[src_idx + 1] as usize,
+                                params.pixels[src_idx + 2] as usize,
+                            )
+                        } else {
+                            (
+                                params.pixels[src_idx + 2] as usize,
+                                params.pixels[src_idx + 1] as usize,
+                                params.pixels[src_idx] as usize,
+                            )
+                        };
+                        out0[x] = lut[0][c0];
+                        out1[x] = lut[1][c1];
+                        out2[x] = lut[2][c2];
+                    }
+                });
+            return;
+        }
+
+        for (y, ((row0, row1), row2)) in rows0
+            .chunks_mut(tensor_w)
+            .zip(rows1.chunks_mut(tensor_w))
+            .zip(rows2.chunks_mut(tensor_w))
+            .enumerate()
+        {
+            let src_row_base = (src_y + y) * src_w;
+            let out0 = &mut row0[dst_x..dst_x + copy_w];
+            let out1 = &mut row1[dst_x..dst_x + copy_w];
+            let out2 = &mut row2[dst_x..dst_x + copy_w];
+            for x in 0..copy_w {
+                let src_idx = (src_row_base + src_x + x) * 3;
+                let (c0, c1, c2) = if params.rgb_order {
+                    (
+                        params.pixels[src_idx] as usize,
+                        params.pixels[src_idx + 1] as usize,
+                        params.pixels[src_idx + 2] as usize,
+                    )
+                } else {
+                    (
+                        params.pixels[src_idx + 2] as usize,
+                        params.pixels[src_idx + 1] as usize,
+                        params.pixels[src_idx] as usize,
+                    )
+                };
+                out0[x] = lut[0][c0];
+                out1[x] = lut[1][c1];
+                out2[x] = lut[2][c2];
             }
         }
     }
@@ -461,23 +604,49 @@ mod inner {
     /// Converts RGB to luminance using BT.601 coefficients:
     /// `L = 0.299R + 0.587G + 0.114B`
     fn write_grayscale_pixels(
-        tensor: &mut ndarray::Array4<f32>,
+        tensor_data: &mut [f32],
+        tensor_w: usize,
+        _tensor_h: usize,
         params: &NormalizedPixelWrite<'_>,
     ) {
-        let w = params.w as usize;
-        let h = params.h as usize;
-        let mean = params.norm.mean[0];
-        let std = params.norm.std[0];
-        for y in 0..h {
-            for x in 0..w {
-                let src_idx = (y * w + x) * 3;
-                let r = params.pixels[src_idx] as f32;
-                let g = params.pixels[src_idx + 1] as f32;
-                let b = params.pixels[src_idx + 2] as f32;
-                let gray = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
-                let dst_y = y + params.offset_y as usize;
-                let dst_x = x + params.offset_x as usize;
-                tensor[[0, 0, dst_y, dst_x]] = (gray - mean) / std;
+        let copy_w = params.copy_w as usize;
+        let copy_h = params.copy_h as usize;
+        let src_w = params.source_width as usize;
+        let src_x = params.source_offset_x as usize;
+        let src_y = params.source_offset_y as usize;
+        let dst_x = params.offset_x as usize;
+        let dst_y = params.offset_y as usize;
+        let (r_lut, g_lut, b_lut) = build_gray_lut(params.norm);
+        let row_start = dst_y * tensor_w;
+        let row_end = row_start + copy_h * tensor_w;
+        let rows = &mut tensor_data[row_start..row_end];
+
+        if should_parallelize(copy_w, copy_h) {
+            rows.par_chunks_mut(tensor_w)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    let src_row_base = (src_y + y) * src_w;
+                    let out = &mut row[dst_x..dst_x + copy_w];
+                    for (x, out_pixel) in out.iter_mut().enumerate() {
+                        let src_idx = (src_row_base + src_x + x) * 3;
+                        let r = params.pixels[src_idx] as usize;
+                        let g = params.pixels[src_idx + 1] as usize;
+                        let b = params.pixels[src_idx + 2] as usize;
+                        *out_pixel = r_lut[r] + g_lut[g] + b_lut[b];
+                    }
+                });
+            return;
+        }
+
+        for (y, row) in rows.chunks_mut(tensor_w).enumerate() {
+            let src_row_base = (src_y + y) * src_w;
+            let out = &mut row[dst_x..dst_x + copy_w];
+            for (x, out_pixel) in out.iter_mut().enumerate() {
+                let src_idx = (src_row_base + src_x + x) * 3;
+                let r = params.pixels[src_idx] as usize;
+                let g = params.pixels[src_idx + 1] as usize;
+                let b = params.pixels[src_idx + 2] as usize;
+                *out_pixel = r_lut[r] + g_lut[g] + b_lut[b];
             }
         }
     }

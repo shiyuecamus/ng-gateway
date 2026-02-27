@@ -1,7 +1,5 @@
-use super::defs::*;
-use super::Cjt188CodecContext;
-use crate::protocol::error::ProtocolError;
-use crate::types::Cjt188Version;
+use super::{defs::*, Cjt188CodecContext};
+use crate::{protocol::error::ProtocolError, types::Cjt188Version};
 use bytes::{BufMut, Bytes};
 use ng_gateway_sdk::{WireDecode, WireEncode};
 use std::borrow::Cow;

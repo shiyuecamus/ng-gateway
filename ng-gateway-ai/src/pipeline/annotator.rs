@@ -7,14 +7,14 @@
 
 #[cfg(feature = "engine")]
 mod inner {
-    use crate::decoded_frame::DecodedFrame;
-    use crate::pipeline::postprocess::PostprocessOutput;
+    use crate::decoded::DecodedFrame;
     use bytes::Bytes;
     use ng_gateway_error::ai::AiEngineError;
     use ng_gateway_models::ai::{
         pipeline::AnnotationConfig,
-        types::{Detection, KeypointDetection, SegmentationMask},
+        types::{AnalysisCore, Detection, KeypointDetection, SegmentationMask},
     };
+    use rayon::prelude::*;
 
     /// Frame annotator trait — draws analysis results onto frames.
     pub trait FrameAnnotator: Send + Sync + 'static {
@@ -22,7 +22,7 @@ mod inner {
         fn annotate(
             &self,
             frame: &DecodedFrame,
-            result: &PostprocessOutput,
+            result: &AnalysisCore,
             config: &AnnotationConfig,
         ) -> Result<Bytes, AiEngineError>;
     }
@@ -39,24 +39,31 @@ mod inner {
         fn annotate(
             &self,
             frame: &DecodedFrame,
-            result: &PostprocessOutput,
+            result: &AnalysisCore,
             config: &AnnotationConfig,
         ) -> Result<Bytes, AiEngineError> {
-            let mut img = image::RgbImage::from_raw(frame.width, frame.height, frame.data.clone())
-                .ok_or(AiEngineError::InternalError("invalid frame data".into()))?;
+            let mut img =
+                image::RgbImage::from_raw(frame.width, frame.height, frame.data.as_ref().to_vec())
+                    .ok_or(AiEngineError::InternalError("invalid frame data".into()))?;
+            let compiled_palette = compile_palette(&config.color_palette);
 
             // Draw segmentation mask overlay (semi-transparent)
-            for mask in &result.segmentation_masks {
-                draw_segmentation_overlay(&mut img, mask, &config.color_palette);
+            if config.draw_segmentation {
+                for mask in result.segmentation_masks.iter() {
+                    draw_segmentation_overlay(
+                        &mut img,
+                        mask,
+                        &compiled_palette,
+                        config.segmentation_alpha,
+                        config.segmentation_background_class,
+                    );
+                }
             }
 
             if config.draw_bboxes {
                 // Draw object detections
                 for (i, det) in result.detections.iter().enumerate() {
-                    let color = parse_palette_color(
-                        &config.color_palette,
-                        i % config.color_palette.len().max(1),
-                    );
+                    let color = palette_color(&compiled_palette, i);
 
                     let x1 = (det.bbox.x_min * frame.width as f32) as i32;
                     let y1 = (det.bbox.y_min * frame.height as f32) as i32;
@@ -74,10 +81,7 @@ mod inner {
 
                 // Draw keypoint/pose detections
                 for (i, kpd) in result.keypoint_detections.iter().enumerate() {
-                    let color = parse_palette_color(
-                        &config.color_palette,
-                        i % config.color_palette.len().max(1),
-                    );
+                    let color = palette_color(&compiled_palette, i);
 
                     let x1 = (kpd.bbox.x_min * frame.width as f32) as i32;
                     let y1 = (kpd.bbox.y_min * frame.height as f32) as i32;
@@ -177,6 +181,28 @@ mod inner {
                 let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
                 Some([r, g, b])
             })
+            .unwrap_or([255, 56, 56])
+    }
+
+    /// Compile the runtime palette once per annotation call.
+    ///
+    /// Parsing hex strings up-front removes string processing from the hot per-pixel path.
+    fn compile_palette(palette: &[String]) -> Vec<[u8; 3]> {
+        if palette.is_empty() {
+            return vec![[255, 56, 56]];
+        }
+        (0..palette.len())
+            .map(|idx| parse_palette_color(palette, idx))
+            .collect()
+    }
+
+    /// Return a palette color with safe fallback and cyclic indexing.
+    #[inline]
+    fn palette_color(compiled_palette: &[[u8; 3]], idx: usize) -> [u8; 3] {
+        let len = compiled_palette.len().max(1);
+        compiled_palette
+            .get(idx % len)
+            .copied()
             .unwrap_or([255, 56, 56])
     }
 
@@ -455,41 +481,59 @@ mod inner {
     fn draw_segmentation_overlay(
         img: &mut image::RgbImage,
         mask: &SegmentationMask,
-        palette: &[String],
+        compiled_palette: &[[u8; 3]],
+        alpha: f32,
+        background_class: Option<u8>,
     ) {
-        let img_w = img.width();
-        let img_h = img.height();
+        let img_w = img.width() as usize;
+        let img_h = img.height() as usize;
         let mask_w = mask.width as usize;
         let mask_h = mask.height as usize;
+
+        if img_w == 0 || img_h == 0 || mask_w == 0 || mask_h == 0 {
+            return;
+        }
 
         if mask.mask.len() != mask_w * mask_h {
             return;
         }
 
-        let alpha = 0.4f32;
-
-        for y in 0..img_h {
-            for x in 0..img_w {
-                // Map image coordinates to mask coordinates
-                let mx = (x as usize * mask_w) / img_w as usize;
-                let my = (y as usize * mask_h) / img_h as usize;
-                let class_idx = mask.mask[my * mask_w + mx] as usize;
-
-                // Skip background (class 0)
-                if class_idx == 0 {
-                    continue;
-                }
-
-                let overlay_color = parse_palette_color(palette, class_idx % palette.len().max(1));
-                let orig = img.get_pixel(x, y).0;
-                let blended = [
-                    (orig[0] as f32 * (1.0 - alpha) + overlay_color[0] as f32 * alpha) as u8,
-                    (orig[1] as f32 * (1.0 - alpha) + overlay_color[1] as f32 * alpha) as u8,
-                    (orig[2] as f32 * (1.0 - alpha) + overlay_color[2] as f32 * alpha) as u8,
-                ];
-                img.put_pixel(x, y, image::Rgb(blended));
-            }
+        let alpha_fp = (alpha.clamp(0.0, 1.0) * 256.0).round() as u16;
+        if alpha_fp == 0 {
+            return;
         }
+        let inv_alpha_fp = 256u16.saturating_sub(alpha_fp);
+        let palette_len = compiled_palette.len().max(1);
+        let row_stride = img_w * 3;
+
+        img.as_mut()
+            .par_chunks_mut(row_stride)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for x in 0..img_w {
+                    let mx = (x * mask_w) / img_w;
+                    let my = (y * mask_h) / img_h;
+                    let class_idx = mask.mask[my * mask_w + mx] as usize;
+
+                    if let Some(bg) = background_class {
+                        if class_idx == bg as usize {
+                            continue;
+                        }
+                    }
+
+                    let overlay = compiled_palette[class_idx % palette_len];
+                    let px = x * 3;
+                    let r =
+                        ((row[px] as u16 * inv_alpha_fp + overlay[0] as u16 * alpha_fp) >> 8) as u8;
+                    let g = ((row[px + 1] as u16 * inv_alpha_fp + overlay[1] as u16 * alpha_fp)
+                        >> 8) as u8;
+                    let b = ((row[px + 2] as u16 * inv_alpha_fp + overlay[2] as u16 * alpha_fp)
+                        >> 8) as u8;
+                    row[px] = r;
+                    row[px + 1] = g;
+                    row[px + 2] = b;
+                }
+            });
     }
 
     // ── Embedded bitmap font ──────────────────────────────────────────
@@ -712,11 +756,13 @@ mod inner {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use ng_gateway_models::ai::types::{BoundingBox, Detection};
+        use ng_gateway_models::ai::types::{
+            AnalysisCore, BoundingBox, Detection, SegmentationMask,
+        };
 
         fn make_test_frame(w: u32, h: u32) -> DecodedFrame {
             DecodedFrame {
-                data: vec![128u8; (w * h * 3) as usize],
+                data: Bytes::from(vec![128u8; (w * h * 3) as usize]),
                 width: w,
                 height: h,
             }
@@ -726,7 +772,7 @@ mod inner {
         fn annotate_empty_detections() {
             let annotator = DefaultFrameAnnotator;
             let frame = make_test_frame(320, 240);
-            let result = PostprocessOutput::default();
+            let result = AnalysisCore::default();
             let config = AnnotationConfig::default();
             let out = annotator.annotate(&frame, &result, &config).unwrap();
             assert!(!out.is_empty());
@@ -736,7 +782,7 @@ mod inner {
         fn annotate_with_detections() {
             let annotator = DefaultFrameAnnotator;
             let frame = make_test_frame(640, 480);
-            let result = PostprocessOutput {
+            let result = AnalysisCore {
                 detections: vec![
                     Detection {
                         bbox: BoundingBox {
@@ -762,7 +808,8 @@ mod inner {
                         confidence: 0.65,
                         track_id: None,
                     },
-                ],
+                ]
+                .into(),
                 ..Default::default()
             };
             let config = AnnotationConfig::default();
@@ -774,7 +821,7 @@ mod inner {
         fn annotate_respects_config_flags() {
             let annotator = DefaultFrameAnnotator;
             let frame = make_test_frame(320, 240);
-            let result = PostprocessOutput {
+            let result = AnalysisCore {
                 detections: vec![Detection {
                     bbox: BoundingBox {
                         x_min: 0.1,
@@ -786,7 +833,8 @@ mod inner {
                     class_id: 16,
                     confidence: 0.99,
                     track_id: Some(1),
-                }],
+                }]
+                .into(),
                 ..Default::default()
             };
             let config = AnnotationConfig {
@@ -832,6 +880,43 @@ mod inner {
         fn parse_palette_color_fallback() {
             let palette: Vec<String> = vec!["invalid".into()];
             assert_eq!(parse_palette_color(&palette, 0), [255, 56, 56]);
+        }
+
+        #[test]
+        fn segmentation_alpha_zero_keeps_image_unchanged() {
+            let annotator = DefaultFrameAnnotator;
+            let frame = make_test_frame(64, 64);
+
+            let baseline = annotator
+                .annotate(
+                    &frame,
+                    &AnalysisCore::default(),
+                    &AnnotationConfig::default(),
+                )
+                .unwrap();
+
+            let with_mask = AnalysisCore {
+                segmentation_masks: vec![SegmentationMask {
+                    mask: vec![1u8; 16 * 16],
+                    width: 16,
+                    height: 16,
+                    labels: vec!["bg".into(), "obj".into()],
+                }]
+                .into(),
+                ..Default::default()
+            };
+            let cfg = AnnotationConfig {
+                draw_segmentation: true,
+                segmentation_alpha: 0.0,
+                segmentation_background_class: None,
+                ..Default::default()
+            };
+            let output = annotator.annotate(&frame, &with_mask, &cfg).unwrap();
+
+            assert_eq!(
+                baseline, output,
+                "alpha=0 should not alter the rendered frame"
+            );
         }
     }
 }

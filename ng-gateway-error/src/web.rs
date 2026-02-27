@@ -1,8 +1,7 @@
+use crate::{ai::AiEngineError, storage::StorageError, NGError};
 use actix_web::{HttpResponse, ResponseError};
 use serde_json::json;
 use thiserror::Error;
-
-use crate::{storage::StorageError, NGError};
 
 #[derive(Error, Debug)]
 pub enum WebError {
@@ -43,6 +42,26 @@ impl From<NGError> for WebError {
 impl From<actix_multipart::MultipartError> for WebError {
     fn from(e: actix_multipart::MultipartError) -> Self {
         WebError::MultipartError(e.to_string())
+    }
+}
+
+impl From<AiEngineError> for WebError {
+    fn from(e: AiEngineError) -> Self {
+        match e {
+            AiEngineError::ModelNotFound(id) => WebError::NotFound(format!("Model '{id}'")),
+            AiEngineError::PipelineNotFound(channel_id) => {
+                WebError::NotFound(format!("Pipeline for channel {channel_id}"))
+            }
+            AiEngineError::PipelineConfigError(msg)
+            | AiEngineError::PreprocessError(msg)
+            | AiEngineError::PostprocessError(msg)
+            | AiEngineError::AlgorithmError(msg)
+            | AiEngineError::DecodeError(msg) => WebError::BadRequest(msg),
+            AiEngineError::Backpressure => {
+                WebError::BadRequest("inference queue at capacity (backpressure)".to_string())
+            }
+            other => WebError::InternalError(other.to_string()),
+        }
     }
 }
 

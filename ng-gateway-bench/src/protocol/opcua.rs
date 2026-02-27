@@ -1,5 +1,7 @@
-use crate::protocol::{ChannelRuntime, PointsByDevice};
-use crate::publisher::NullPublisher;
+use crate::{
+    protocol::{ChannelRuntime, PointsByDevice},
+    publisher::NullPublisher,
+};
 use ng_driver_opcua::{
     OpcUaAuth, OpcUaChannel, OpcUaChannelConfig, OpcUaConnector, OpcUaDevice, OpcUaPoint,
     OpcUaReadMode, SecurityMode, SecurityPolicy,

@@ -25,7 +25,8 @@ use ng_gateway_models::{
             AlgorithmTestInput, AlgorithmTestResult, AlgorithmUploadMetadata, WasmAlgorithmInfo,
         },
         api::AiEngineApi,
-        model::ModelInfo,
+        model::{ModelInfo, ModelUpdateRequest, ModelUploadMetadata},
+        pipeline::{PipelineUpsertRequest, PipelineValidationReport},
         types::{EngineStatus, ProcessorInfo},
     },
     constants::SYSTEM_ADMIN_ROLE_CODE,
@@ -46,8 +47,17 @@ pub(super) const ROUTER_PREFIX: &str = "/ai";
 /// # Phase 1 Routes
 /// - GET `/models` — list all models
 /// - GET `/models/{model_id}` — model details
+/// - POST `/models` — upload model
+/// - PUT `/models/{model_id}` — update model config
+/// - DELETE `/models/{model_id}` — delete model
+/// - POST `/models/{model_id}/load` — hot load model
+/// - POST `/models/{model_id}/unload` — hot unload model
 /// - GET `/pipelines` — list all pipelines
 /// - GET `/pipelines/{id}` — pipeline details
+/// - POST `/pipelines/{id}/validate` — validate pipeline DAG constraints
+/// - POST `/pipelines` — create pipeline binding
+/// - PUT `/pipelines` — update pipeline binding
+/// - DELETE `/pipelines/{id}` — delete pipeline binding
 /// - GET `/engine/status` — engine global status
 /// - GET `/channels/{id}/snapshot` — latest annotated JPEG snapshot
 /// - GET `/processors/pre` — available preprocessors
@@ -64,8 +74,20 @@ pub(crate) fn configure_routes(cfg: &mut ServiceConfig) {
         // Phase 1
         .route("/models", web::get().to(list_models))
         .route("/models/{model_id}", web::get().to(get_model))
+        .route("/models", web::post().to(upload_model))
+        .route("/models/{model_id}", web::put().to(update_model))
+        .route("/models/{model_id}", web::delete().to(delete_model))
+        .route("/models/{model_id}/load", web::post().to(load_model))
+        .route("/models/{model_id}/unload", web::post().to(unload_model))
         .route("/pipelines", web::get().to(list_pipelines))
         .route("/pipelines/{id}", web::get().to(get_pipeline))
+        .route(
+            "/pipelines/{id}/validate",
+            web::post().to(validate_pipeline),
+        )
+        .route("/pipelines", web::post().to(create_pipeline))
+        .route("/pipelines", web::put().to(update_pipeline))
+        .route("/pipelines/{id}", web::delete().to(delete_pipeline))
         .route("/engine/status", web::get().to(get_engine_status))
         .route("/channels/{id}/snapshot", web::get().to(get_snapshot))
         .route("/processors/pre", web::get().to(list_preprocessors))
@@ -103,6 +125,31 @@ pub(crate) async fn init_rbac_rules(
             ai_read()?,
         ),
         (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/models"),
+            ai_write()?,
+        ),
+        (
+            Method::PUT,
+            format!("{router_prefix}{ROUTER_PREFIX}/models/{{model_id}}"),
+            ai_write()?,
+        ),
+        (
+            Method::DELETE,
+            format!("{router_prefix}{ROUTER_PREFIX}/models/{{model_id}}"),
+            ai_write()?,
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/models/{{model_id}}/load"),
+            ai_write()?,
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/models/{{model_id}}/unload"),
+            ai_write()?,
+        ),
+        (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/pipelines"),
             ai_read()?,
@@ -111,6 +158,26 @@ pub(crate) async fn init_rbac_rules(
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/pipelines/{{id}}"),
             ai_read()?,
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/pipelines/{{id}}/validate"),
+            ai_write()?,
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/pipelines"),
+            ai_write()?,
+        ),
+        (
+            Method::PUT,
+            format!("{router_prefix}{ROUTER_PREFIX}/pipelines"),
+            ai_write()?,
+        ),
+        (
+            Method::DELETE,
+            format!("{router_prefix}{ROUTER_PREFIX}/pipelines/{{id}}"),
+            ai_write()?,
         ),
         (
             Method::GET,
@@ -185,12 +252,9 @@ fn require_ai_engine(state: &AppState) -> Result<Arc<dyn AiEngineApi>, WebError>
 #[instrument(name = "ai-list-models", skip_all)]
 pub async fn list_models(
     state: web::Data<Arc<AppState>>,
-) -> WebResult<WebResponse<Vec<ModelInfo>>> {
+) -> WebResult<WebResponse<Vec<Arc<ModelInfo>>>> {
     let engine = require_ai_engine(&state)?;
-    let models = engine
-        .list_models()
-        .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+    let models = engine.list_models().await.map_err(WebError::from)?;
     Ok(WebResponse::ok(models))
 }
 
@@ -199,15 +263,130 @@ pub async fn list_models(
 pub async fn get_model(
     path: web::Path<String>,
     state: web::Data<Arc<AppState>>,
-) -> WebResult<WebResponse<ModelInfo>> {
+) -> WebResult<WebResponse<Arc<ModelInfo>>> {
     let model_id = path.into_inner();
     let engine = require_ai_engine(&state)?;
     let model = engine
         .get_model(&model_id)
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?
+        .map_err(WebError::from)?
         .ok_or(WebError::NotFound(format!("Model '{model_id}'")))?;
     Ok(WebResponse::ok(model))
+}
+
+/// `POST /api/ai/models` — upload new ONNX model.
+///
+/// Expects `multipart/form-data`:
+/// - `file`: ONNX bytes
+/// - `metadata`: JSON [`ModelUploadMetadata`]
+#[instrument(name = "ai-upload-model", skip_all)]
+pub async fn upload_model(
+    mut multipart: Multipart,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<Arc<ModelInfo>>> {
+    let engine = require_ai_engine(&state)?;
+
+    let mut model_bytes: Option<bytes::Bytes> = None;
+    let mut metadata: Option<ModelUploadMetadata> = None;
+
+    while let Some(field_result) = multipart.next().await {
+        let mut field =
+            field_result.map_err(|e| WebError::BadRequest(format!("multipart read error: {e}")))?;
+        let field_name = field
+            .content_disposition()
+            .and_then(|cd| cd.get_name().map(String::from))
+            .unwrap_or_default();
+
+        let mut buf = BytesMut::new();
+        while let Some(chunk) = field.next().await {
+            let data =
+                chunk.map_err(|e| WebError::BadRequest(format!("multipart chunk error: {e}")))?;
+            buf.extend_from_slice(&data);
+        }
+
+        match field_name.as_str() {
+            "file" => {
+                if buf.is_empty() {
+                    return Err(WebError::BadRequest("ONNX file is empty".to_string()));
+                }
+                model_bytes = Some(buf.freeze());
+            }
+            "metadata" => {
+                metadata =
+                    Some(serde_json::from_slice(&buf).map_err(|e| {
+                        WebError::BadRequest(format!("invalid metadata JSON: {e}"))
+                    })?);
+            }
+            _ => {}
+        }
+    }
+
+    let model_bytes = model_bytes.ok_or(WebError::BadRequest("missing 'file' part".to_string()))?;
+    let metadata = metadata.ok_or(WebError::BadRequest("missing 'metadata' part".to_string()))?;
+
+    let info = engine
+        .upload_model(model_bytes, metadata)
+        .await
+        .map_err(WebError::from)?;
+    Ok(WebResponse::ok(info))
+}
+
+/// `PUT /api/ai/models/{model_id}` — update model config.
+#[instrument(name = "ai-update-model", skip_all, fields(model_id))]
+pub async fn update_model(
+    path: web::Path<String>,
+    body: web::Json<ModelUpdateRequest>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<Arc<ModelInfo>>> {
+    let model_id = path.into_inner();
+    let engine = require_ai_engine(&state)?;
+    let info = engine
+        .update_model(&model_id, body.into_inner())
+        .await
+        .map_err(WebError::from)?;
+    Ok(WebResponse::ok(info))
+}
+
+/// `DELETE /api/ai/models/{model_id}` — delete model.
+#[instrument(name = "ai-delete-model", skip_all, fields(model_id))]
+pub async fn delete_model(
+    path: web::Path<String>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<bool>> {
+    let model_id = path.into_inner();
+    let engine = require_ai_engine(&state)?;
+    engine
+        .delete_model(&model_id)
+        .await
+        .map_err(WebError::from)?;
+    Ok(WebResponse::ok(true))
+}
+
+/// `POST /api/ai/models/{model_id}/load` — hot load model.
+#[instrument(name = "ai-load-model", skip_all, fields(model_id))]
+pub async fn load_model(
+    path: web::Path<String>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<bool>> {
+    let model_id = path.into_inner();
+    let engine = require_ai_engine(&state)?;
+    engine.load_model(&model_id).await.map_err(WebError::from)?;
+    Ok(WebResponse::ok(true))
+}
+
+/// `POST /api/ai/models/{model_id}/unload` — hot unload model.
+#[instrument(name = "ai-unload-model", skip_all, fields(model_id))]
+pub async fn unload_model(
+    path: web::Path<String>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<bool>> {
+    let model_id = path.into_inner();
+    let engine = require_ai_engine(&state)?;
+    engine
+        .unload_model(&model_id)
+        .await
+        .map_err(WebError::from)?;
+    Ok(WebResponse::ok(true))
 }
 
 /// `GET /api/ai/pipelines` — list all registered pipelines.
@@ -216,10 +395,7 @@ pub async fn list_pipelines(
     state: web::Data<Arc<AppState>>,
 ) -> WebResult<WebResponse<Vec<AiPipelineSummary>>> {
     let engine = require_ai_engine(&state)?;
-    let pipelines = engine
-        .list_pipelines()
-        .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+    let pipelines = engine.list_pipelines().await.map_err(WebError::from)?;
 
     let summaries: Vec<AiPipelineSummary> = pipelines
         .into_iter()
@@ -239,13 +415,83 @@ pub async fn get_pipeline(
     let config = engine
         .get_pipeline(path.id)
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?
-        .ok_or(WebError::NotFound(format!("Pipeline for channel {}", path.id)))?;
+        .map_err(WebError::from)?
+        .ok_or(WebError::NotFound(format!(
+            "Pipeline for channel {}",
+            path.id
+        )))?;
 
     Ok(WebResponse::ok(AiPipelineSummary {
         channel_id: path.id,
         config,
     }))
+}
+
+/// `POST /api/ai/pipelines/{id}/validate` — validate pipeline DAG constraints.
+///
+/// This endpoint validates the currently registered pipeline on the given channel.
+/// It does not mutate pipeline state.
+#[instrument(name = "ai-validate-pipeline", skip_all, fields(pipeline_id))]
+pub async fn validate_pipeline(
+    path: web::Path<PathId>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<PipelineValidationReport>> {
+    let engine = require_ai_engine(&state)?;
+    let channel_id = path.id;
+
+    let config = engine
+        .get_pipeline(channel_id)
+        .await
+        .map_err(WebError::from)?
+        .ok_or(WebError::NotFound(format!(
+            "Pipeline for channel {channel_id}"
+        )))?;
+
+    let report = config.validate_dag();
+    Ok(WebResponse::ok(report))
+}
+
+/// `POST /api/ai/pipelines` — create pipeline binding.
+#[instrument(name = "ai-create-pipeline", skip_all)]
+pub async fn create_pipeline(
+    body: web::Json<PipelineUpsertRequest>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<bool>> {
+    let engine = require_ai_engine(&state)?;
+    engine
+        .upsert_pipeline(body.into_inner())
+        .await
+        .map_err(WebError::from)?;
+    Ok(WebResponse::ok(true))
+}
+
+/// `PUT /api/ai/pipelines` — update pipeline binding.
+#[instrument(name = "ai-update-pipeline", skip_all)]
+pub async fn update_pipeline(
+    body: web::Json<PipelineUpsertRequest>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<bool>> {
+    let engine = require_ai_engine(&state)?;
+    engine
+        .upsert_pipeline(body.into_inner())
+        .await
+        .map_err(WebError::from)?;
+    Ok(WebResponse::ok(true))
+}
+
+/// `DELETE /api/ai/pipelines/{id}` — delete pipeline by channel ID.
+#[instrument(name = "ai-delete-pipeline", skip_all, fields(channel_id))]
+pub async fn delete_pipeline(
+    path: web::Path<PathId>,
+    state: web::Data<Arc<AppState>>,
+) -> WebResult<WebResponse<bool>> {
+    let channel_id = path.id;
+    let engine = require_ai_engine(&state)?;
+    engine
+        .delete_pipeline(channel_id)
+        .await
+        .map_err(WebError::from)?;
+    Ok(WebResponse::ok(true))
 }
 
 /// `GET /api/ai/engine/status` — AI engine global status.
@@ -254,10 +500,7 @@ pub async fn get_engine_status(
     state: web::Data<Arc<AppState>>,
 ) -> WebResult<WebResponse<EngineStatus>> {
     let engine = require_ai_engine(&state)?;
-    let status = engine
-        .get_engine_status()
-        .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+    let status = engine.get_engine_status().await.map_err(WebError::from)?;
     Ok(WebResponse::ok(status))
 }
 
@@ -277,7 +520,7 @@ pub async fn get_snapshot(
     let has_pipeline = engine
         .get_pipeline(channel_id)
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?
+        .map_err(WebError::from)?
         .is_some();
     if !has_pipeline {
         return Err(WebError::NotFound(format!(
@@ -288,7 +531,7 @@ pub async fn get_snapshot(
     let result = engine
         .get_latest_result(channel_id)
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+        .map_err(WebError::from)?;
 
     match result.and_then(|r| r.annotated_frame) {
         Some(jpeg_bytes) => Ok(HttpResponse::Ok()
@@ -328,12 +571,9 @@ pub async fn list_postprocessors(
 #[instrument(name = "ai-list-algorithms", skip_all)]
 pub async fn list_algorithms(
     state: web::Data<Arc<AppState>>,
-) -> WebResult<WebResponse<Vec<WasmAlgorithmInfo>>> {
+) -> WebResult<WebResponse<Vec<Arc<WasmAlgorithmInfo>>>> {
     let engine = require_ai_engine(&state)?;
-    let algorithms = engine
-        .list_algorithms()
-        .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+    let algorithms = engine.list_algorithms().await.map_err(WebError::from)?;
     Ok(WebResponse::ok(algorithms))
 }
 
@@ -342,13 +582,13 @@ pub async fn list_algorithms(
 pub async fn get_algorithm(
     path: web::Path<String>,
     state: web::Data<Arc<AppState>>,
-) -> WebResult<WebResponse<WasmAlgorithmInfo>> {
+) -> WebResult<WebResponse<Arc<WasmAlgorithmInfo>>> {
     let algorithm_id = path.into_inner();
     let engine = require_ai_engine(&state)?;
     let algorithm = engine
         .get_algorithm(&algorithm_id)
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?
+        .map_err(WebError::from)?
         .ok_or(WebError::NotFound(format!("Algorithm '{algorithm_id}'")))?;
     Ok(WebResponse::ok(algorithm))
 }
@@ -372,7 +612,7 @@ pub async fn get_algorithm(
 pub async fn upload_algorithm(
     mut multipart: Multipart,
     state: web::Data<Arc<AppState>>,
-) -> WebResult<WebResponse<WasmAlgorithmInfo>> {
+) -> WebResult<WebResponse<Arc<WasmAlgorithmInfo>>> {
     let engine = require_ai_engine(&state)?;
 
     let mut wasm_bytes: Option<bytes::Bytes> = None;
@@ -413,15 +653,13 @@ pub async fn upload_algorithm(
         }
     }
 
-    let wasm_bytes =
-        wasm_bytes.ok_or(WebError::BadRequest("missing 'file' part".to_string()))?;
-    let metadata =
-        metadata.ok_or(WebError::BadRequest("missing 'metadata' part".to_string()))?;
+    let wasm_bytes = wasm_bytes.ok_or(WebError::BadRequest("missing 'file' part".to_string()))?;
+    let metadata = metadata.ok_or(WebError::BadRequest("missing 'metadata' part".to_string()))?;
 
     let info = engine
         .upload_algorithm(wasm_bytes, metadata)
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+        .map_err(WebError::from)?;
 
     Ok(WebResponse::ok(info))
 }
@@ -437,7 +675,7 @@ pub async fn delete_algorithm(
     engine
         .delete_algorithm(&algorithm_id)
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+        .map_err(WebError::from)?;
     Ok(WebResponse::ok(true))
 }
 
@@ -464,6 +702,6 @@ pub async fn test_algorithm(
     let result = engine
         .test_algorithm(&algorithm_id, body.into_inner())
         .await
-        .map_err(|e| WebError::InternalError(e.to_string()))?;
+        .map_err(WebError::from)?;
     Ok(WebResponse::ok(result))
 }

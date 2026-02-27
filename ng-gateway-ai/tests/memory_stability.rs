@@ -75,6 +75,7 @@ fn make_pipeline() -> PipelineConfig {
         name: "Stress Pipeline".into(),
         sampling: SamplingStrategy::EveryFrame,
         roi: None,
+        roi_regions: vec![],
         stages: vec![StageConfig::Inference {
             model_id: "nonexistent".into(),
             confidence_threshold: 0.5,
@@ -118,7 +119,9 @@ async fn sustained_workload_memory_stable() {
 
     // Warm up: force initial allocations to settle.
     for i in 0..CHANNEL_SLOTS {
-        engine.register_pipeline(i, make_pipeline());
+        engine
+            .register_pipeline(i, make_pipeline())
+            .expect("register warmup pipeline");
     }
     for i in 0..CHANNEL_SLOTS {
         engine.unregister_pipeline(i);
@@ -131,7 +134,9 @@ async fn sustained_workload_memory_stable() {
     for i in 0..ITERATIONS {
         let ch = (i % CHANNEL_SLOTS as u64) as i32;
 
-        engine.register_pipeline(ch, make_pipeline());
+        engine
+            .register_pipeline(ch, make_pipeline())
+            .expect("register stress pipeline");
 
         let req = FrameAnalysisRequest {
             channel_id: ch,

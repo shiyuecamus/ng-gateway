@@ -4,6 +4,7 @@
 //! descriptions, and class labels. These types are always available
 //! (no feature gating) so camera drivers and API handlers can inspect them.
 
+use super::pipeline::{PostProcessorConfig, PreProcessorConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -28,11 +29,57 @@ pub struct ModelInfo {
     pub task: ModelTask,
     /// Class labels (if applicable).
     pub labels: Vec<String>,
+    /// Optional default preprocess override for this model.
+    pub default_preprocess: Option<PreProcessorConfig>,
+    /// Optional default postprocess override for this model.
+    pub default_postprocess: Option<PostProcessorConfig>,
     /// Whether the model is currently loaded in memory.
     #[serde(default)]
     pub loaded: bool,
     /// File size in bytes.
     pub file_size: u64,
+}
+
+/// Metadata provided when uploading a new ONNX model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelUploadMetadata {
+    /// Model identifier (filename stem). Must be unique.
+    pub id: String,
+    /// Human-readable model name.
+    pub name: String,
+    /// Model version string.
+    #[serde(default = "default_model_version")]
+    pub version: String,
+    /// Model task type.
+    pub task: ModelTask,
+    /// Optional class labels.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Optional default preprocess override.
+    pub default_preprocess: Option<PreProcessorConfig>,
+    /// Optional default postprocess override.
+    pub default_postprocess: Option<PostProcessorConfig>,
+}
+
+/// Mutable model update request for PUT `/models/{id}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelUpdateRequest {
+    /// Human-readable model name.
+    pub name: Option<String>,
+    /// Model version string.
+    pub version: Option<String>,
+    /// Model task type.
+    pub task: Option<ModelTask>,
+    /// Replace labels.
+    pub labels: Option<Vec<String>>,
+    /// Default preprocess override.
+    pub default_preprocess: Option<PreProcessorConfig>,
+    /// Default postprocess override.
+    pub default_postprocess: Option<PostProcessorConfig>,
+}
+
+fn default_model_version() -> String {
+    "1.0.0".to_string()
 }
 
 /// Supported model formats.

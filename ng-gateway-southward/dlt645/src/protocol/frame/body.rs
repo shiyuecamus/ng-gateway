@@ -1,7 +1,6 @@
 use super::defs::Dl645Address;
 use super::Dl645Function;
-use crate::protocol::error::ProtocolError;
-use crate::types::Dl645Version;
+use crate::{protocol::error::ProtocolError, types::Dl645Version};
 use bytes::{BufMut, Bytes};
 use ng_gateway_sdk::{WireDecode, WireEncode};
 

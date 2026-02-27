@@ -97,9 +97,9 @@ impl Connector for EthernetIpConnector {
     where
         Self: Sized,
     {
-        let transport_meter = ctx
-            .extensions
-            .get_or_default(|| Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>);
+        let transport_meter = ctx.extensions.get_or_default(|| {
+            Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>
+        });
         let channel = ctx
             .runtime_channel
             .downcast_arc::<EthernetIpChannel>()

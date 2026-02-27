@@ -1,8 +1,12 @@
-use crate::envelope::EnvelopeKind;
-use crate::mapping::{CompiledMappedJson, MappedJsonSpec, MappedRule};
-use crate::northward::codec::{decode_downlink_envelope, DecodeError};
-use crate::northward::payload::MappedJsonConfig;
-use crate::{NorthwardEvent, ServerRpcResponse, WritePoint};
+use crate::{
+    envelope::EnvelopeKind,
+    mapping::{CompiledMappedJson, MappedJsonSpec, MappedRule},
+    northward::{
+        codec::{decode_downlink_envelope, DecodeError},
+        payload::MappedJsonConfig,
+    },
+    Command, NorthwardEvent, ServerRpcResponse, WritePoint,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -395,7 +399,7 @@ fn decode_mapped(
             Ok(Some(NorthwardEvent::WritePoint(wp)))
         }
         DownlinkKind::CommandReceived => {
-            let cmd: crate::Command =
+            let cmd: Command =
                 serde_json::from_value(out).map_err(|e| DecodeError::Payload(e.to_string()))?;
             Ok(Some(NorthwardEvent::CommandReceived(cmd)))
         }

@@ -14,6 +14,12 @@ pub struct PipelineConfig {
     pub sampling: SamplingStrategy,
     /// Optional ROI (applied before inference).
     pub roi: Option<RegionOfInterest>,
+    /// Optional multiple ROI regions (applied before inference).
+    ///
+    /// When non-empty, each region is processed independently and results
+    /// are merged back to full-frame coordinates.
+    #[serde(default)]
+    pub roi_regions: Vec<RegionOfInterest>,
     /// Ordered list of processing stages.
     pub stages: Vec<StageConfig>,
     /// Alarm rules (post-processing triggers).
@@ -21,6 +27,15 @@ pub struct PipelineConfig {
     /// Annotation rendering configuration.
     #[serde(default)]
     pub annotation: AnnotationConfig,
+}
+
+/// Create/replace pipeline binding request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineUpsertRequest {
+    /// Target channel ID where pipeline is bound.
+    pub channel_id: i32,
+    /// Full pipeline configuration payload.
+    pub config: PipelineConfig,
 }
 
 /// Frame sampling strategy.
@@ -104,7 +119,7 @@ pub enum StageConfig {
 }
 
 /// Tracker algorithm selection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackerAlgorithm {
     /// Simple IoU-based tracker (SORT variant).
@@ -119,12 +134,12 @@ pub enum TrackerAlgorithm {
 /// The engine maps these to the appropriate internal [`PreProcessor`] implementation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreProcessorConfig {
-    /// Resize strategy: "letterbox", "center_crop", "direct_resize".
-    pub resize_mode: Option<String>,
+    /// Resize strategy.
+    pub resize_mode: Option<ResizeMode>,
     /// Normalization preset or custom values.
     pub normalization: Option<NormalizationConfig>,
-    /// Channel order: "rgb" (default) or "bgr".
-    pub channel_order: Option<String>,
+    /// Channel order.
+    pub channel_order: Option<ChannelOrder>,
     /// Letterbox padding fill value (0-255, default 114).
     pub pad_value: Option<u8>,
 }
@@ -132,8 +147,8 @@ pub struct PreProcessorConfig {
 /// Normalization configuration for preprocessing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizationConfig {
-    /// Preset name: "yolo", "imagenet", "symmetric", or "custom".
-    pub preset: Option<String>,
+    /// Preset name.
+    pub preset: Option<NormalizationPreset>,
     /// Custom mean `[R, G, B]` (only when preset = "custom").
     pub mean: Option<[f32; 3]>,
     /// Custom std `[R, G, B]` (only when preset = "custom").
@@ -147,9 +162,7 @@ pub struct NormalizationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostProcessorConfig {
     /// Force a specific postprocessor type (overrides auto-detection).
-    /// Values: "yolov8_detection", "yolov5_detection", "classification",
-    ///         "segmentation", "yolov8_pose", "anomaly_detection", "passthrough".
-    pub r#type: Option<String>,
+    pub r#type: Option<PostProcessorType>,
     /// Top-K for classification models.
     pub top_k: Option<usize>,
     /// Whether to apply softmax (classification).
@@ -160,10 +173,67 @@ pub struct PostProcessorConfig {
     pub num_keypoints: Option<usize>,
     /// Anomaly score threshold (anomaly detection models).
     pub anomaly_threshold: Option<f32>,
-    /// NMS algorithm variant: "classic" (default), "soft", "diou".
-    pub nms_variant: Option<String>,
+    /// NMS algorithm variant.
+    pub nms_variant: Option<NmsVariantConfig>,
     /// Sigma parameter for Soft-NMS Gaussian decay (only when nms_variant = "soft").
     pub soft_nms_sigma: Option<f32>,
+    /// Minimum prediction count to enable parallel candidate generation.
+    pub detection_parallel_threshold: Option<usize>,
+    /// Candidate pre-screen multiplier before NMS.
+    pub nms_prescreen_multiplier: Option<usize>,
+    /// Class-count threshold for classification small-input fast path.
+    pub classification_small_class_fast_path: Option<usize>,
+    /// Minimum pixel count to enable segmentation argmax parallelism.
+    pub segmentation_parallel_min_pixels: Option<usize>,
+}
+
+/// Supported preprocessing resize modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeMode {
+    Letterbox,
+    CenterCrop,
+    DirectResize,
+}
+
+/// Input channel ordering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelOrder {
+    Rgb,
+    Bgr,
+}
+
+/// Supported postprocessor override types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostProcessorType {
+    YoloV8Detection,
+    YoloV5Detection,
+    Classification,
+    Segmentation,
+    YoloV8Pose,
+    AnomalyDetection,
+    Passthrough,
+}
+
+/// Supported normalization presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NormalizationPreset {
+    Yolo,
+    Imagenet,
+    Symmetric,
+    Custom,
+}
+
+/// Configurable NMS variant type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NmsVariantConfig {
+    Classic,
+    Soft,
+    Diou,
 }
 
 /// Alarm rule applied to analysis results.
@@ -261,6 +331,17 @@ pub struct AnnotationConfig {
     /// Draw tracking IDs.
     #[serde(default = "bool_true")]
     pub draw_track_ids: bool,
+    /// Draw segmentation overlays.
+    #[serde(default = "bool_true")]
+    pub draw_segmentation: bool,
+    /// Segmentation overlay alpha in range `[0.0, 1.0]`.
+    #[serde(default = "default_segmentation_alpha")]
+    pub segmentation_alpha: f32,
+    /// Background class index to ignore for segmentation overlay.
+    ///
+    /// Set `None` to render all classes.
+    #[serde(default = "default_segmentation_background_class")]
+    pub segmentation_background_class: Option<u8>,
     /// Bounding box line thickness (pixels).
     #[serde(default = "default_line_thickness")]
     pub line_thickness: u32,
@@ -275,6 +356,12 @@ pub struct AnnotationConfig {
     /// Color palette for classes (hex colors, cycles if fewer than classes).
     #[serde(default = "default_color_palette")]
     pub color_palette: Vec<String>,
+    /// Behavior when annotation queue is full.
+    #[serde(default)]
+    pub queue_overflow_strategy: AnnotationQueueOverflowStrategy,
+    /// Max enqueue wait time in milliseconds when strategy is `wait_for_slot`.
+    #[serde(default = "default_annotation_enqueue_timeout_ms")]
+    pub enqueue_timeout_ms: u64,
 }
 
 impl Default for AnnotationConfig {
@@ -284,12 +371,191 @@ impl Default for AnnotationConfig {
             draw_labels: true,
             draw_confidence: true,
             draw_track_ids: true,
+            draw_segmentation: true,
+            segmentation_alpha: 0.4,
+            segmentation_background_class: Some(0),
             line_thickness: 2,
             font_scale: 0.6,
             jpeg_quality: 75,
             max_output_dimension: Some(1280),
             color_palette: default_color_palette(),
+            queue_overflow_strategy: AnnotationQueueOverflowStrategy::DropNewest,
+            enqueue_timeout_ms: default_annotation_enqueue_timeout_ms(),
         }
+    }
+}
+
+/// Queue overflow strategy for async frame annotation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationQueueOverflowStrategy {
+    /// Drop the newest annotation request when queue is full (hot path friendly).
+    #[default]
+    DropNewest,
+    /// Wait for a free queue slot up to `enqueue_timeout_ms`.
+    WaitForSlot,
+}
+
+/// Pipeline validation result for DAG/order constraints.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PipelineValidationReport {
+    /// Whether the pipeline satisfies all mandatory constraints.
+    pub valid: bool,
+    /// Hard validation errors that must be fixed before execution.
+    pub errors: Vec<String>,
+    /// Non-blocking warnings that may impact behaviour or quality.
+    pub warnings: Vec<String>,
+}
+
+impl PipelineValidationReport {
+    /// Create a successful validation report.
+    #[inline]
+    pub fn ok() -> Self {
+        Self {
+            valid: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn push_error(&mut self, message: String) {
+        self.valid = false;
+        self.errors.push(message);
+    }
+
+    #[inline]
+    fn push_warning(&mut self, message: String) {
+        self.warnings.push(message);
+    }
+}
+
+impl PipelineConfig {
+    /// Validate pipeline stage ordering and DAG-like constraints.
+    ///
+    /// Rules:
+    /// - At least one `Inference` stage is required.
+    /// - `FrameTransform` must be before any `Inference`.
+    /// - `Tracker` must appear after `Inference` and at most once.
+    /// - `ResultProcessor` must appear after `Inference`.
+    /// - `Inference` cannot appear after `Tracker`/`ResultProcessor`.
+    /// - `AlarmCondition::LineCrossing` requires a `Tracker` stage.
+    pub fn validate_dag(&self) -> PipelineValidationReport {
+        let mut report = PipelineValidationReport::ok();
+
+        if let Some(roi) = self.roi {
+            if !roi.is_valid() {
+                report.push_error(
+                    "pipeline.roi is invalid (expected normalized [0,1] bounds with min < max)"
+                        .to_string(),
+                );
+            }
+        }
+        for (idx, roi) in self.roi_regions.iter().enumerate() {
+            if !roi.is_valid() {
+                report.push_error(format!(
+                    "pipeline.roi_regions[{idx}] is invalid (expected normalized [0,1] bounds with min < max)"
+                ));
+            }
+        }
+
+        if self.stages.is_empty() {
+            report.push_warning(
+                "pipeline has no stages; no AI inference will be executed".to_string(),
+            );
+        }
+
+        let mut inference_count = 0usize;
+        let mut has_seen_inference = false;
+        let mut has_seen_tracker = false;
+        let mut has_seen_result_processor = false;
+        let mut tracker_count = 0usize;
+
+        for (idx, stage) in self.stages.iter().enumerate() {
+            let stage_no = idx + 1;
+            match stage {
+                StageConfig::FrameTransform { .. } => {
+                    if has_seen_inference {
+                        report.push_error(format!(
+                            "stage #{stage_no}: frame_transform must appear before any inference stage"
+                        ));
+                    }
+                    if has_seen_tracker {
+                        report.push_error(format!(
+                            "stage #{stage_no}: frame_transform cannot appear after tracker"
+                        ));
+                    }
+                    if has_seen_result_processor {
+                        report.push_error(format!(
+                            "stage #{stage_no}: frame_transform cannot appear after result_processor"
+                        ));
+                    }
+                }
+                StageConfig::Inference { .. } => {
+                    if has_seen_tracker {
+                        report.push_error(format!(
+                            "stage #{stage_no}: inference cannot appear after tracker"
+                        ));
+                    }
+                    if has_seen_result_processor {
+                        report.push_error(format!(
+                            "stage #{stage_no}: inference cannot appear after result_processor"
+                        ));
+                    }
+                    has_seen_inference = true;
+                    inference_count += 1;
+                }
+                StageConfig::Tracker { .. } => {
+                    if !has_seen_inference {
+                        report.push_error(format!(
+                            "stage #{stage_no}: tracker must appear after at least one inference stage"
+                        ));
+                    }
+                    if has_seen_result_processor {
+                        report.push_error(format!(
+                            "stage #{stage_no}: tracker cannot appear after result_processor"
+                        ));
+                    }
+                    tracker_count += 1;
+                    if tracker_count > 1 {
+                        report.push_error(format!(
+                            "stage #{stage_no}: only one tracker stage is allowed per pipeline"
+                        ));
+                    }
+                    has_seen_tracker = true;
+                }
+                StageConfig::ResultProcessor { .. } => {
+                    if !has_seen_inference {
+                        report.push_error(format!(
+                            "stage #{stage_no}: result_processor must appear after at least one inference stage"
+                        ));
+                    }
+                    has_seen_result_processor = true;
+                }
+            }
+        }
+
+        if inference_count == 0 {
+            report.push_error("pipeline must contain at least one inference stage".to_string());
+        }
+
+        let has_line_crossing_alarm = self.alarm_rules.iter().any(|rule| {
+            matches!(
+                rule.condition,
+                AlarmCondition::LineCrossing {
+                    line: _,
+                    class: _,
+                    direction: _
+                }
+            )
+        });
+        if has_line_crossing_alarm && !has_seen_tracker {
+            report.push_error(
+                "line_crossing alarm requires a tracker stage in the pipeline".to_string(),
+            );
+        }
+
+        report
     }
 }
 
@@ -339,4 +605,136 @@ fn default_color_palette() -> Vec<String> {
         "#FF95C8".into(),
         "#FF37C7".into(),
     ]
+}
+
+fn default_segmentation_alpha() -> f32 {
+    0.4
+}
+
+fn default_segmentation_background_class() -> Option<u8> {
+    Some(0)
+}
+
+fn default_annotation_enqueue_timeout_ms() -> u64 {
+    5
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::types::{AlarmSeverity, PipelineId};
+
+    fn make_pipeline(stages: Vec<StageConfig>, alarm_rules: Vec<AlarmRule>) -> PipelineConfig {
+        PipelineConfig {
+            id: PipelineId::new("p1"),
+            name: "test".to_string(),
+            sampling: SamplingStrategy::EveryFrame,
+            roi: None,
+            roi_regions: vec![],
+            stages,
+            alarm_rules,
+            annotation: AnnotationConfig::default(),
+        }
+    }
+
+    #[test]
+    fn validate_dag_accepts_multi_stage_pipeline() {
+        let pipeline = make_pipeline(
+            vec![
+                StageConfig::FrameTransform {
+                    module_id: "ft_1".to_string(),
+                    config: serde_json::json!({}),
+                },
+                StageConfig::Inference {
+                    model_id: "detector_a".to_string(),
+                    confidence_threshold: 0.5,
+                    nms_iou_threshold: Some(0.45),
+                    input_size: Some((640, 640)),
+                    preprocess: None,
+                    postprocess: None,
+                },
+                StageConfig::Inference {
+                    model_id: "detector_b".to_string(),
+                    confidence_threshold: 0.5,
+                    nms_iou_threshold: Some(0.45),
+                    input_size: Some((640, 640)),
+                    preprocess: None,
+                    postprocess: None,
+                },
+                StageConfig::Tracker {
+                    algorithm: TrackerAlgorithm::Sort,
+                    max_age: 30,
+                },
+                StageConfig::ResultProcessor {
+                    module_id: "rp_1".to_string(),
+                    config: serde_json::json!({}),
+                },
+            ],
+            vec![],
+        );
+
+        let report = pipeline.validate_dag();
+        assert!(report.valid, "expected valid DAG: {:?}", report.errors);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn validate_dag_rejects_frame_transform_after_inference() {
+        let pipeline = make_pipeline(
+            vec![
+                StageConfig::Inference {
+                    model_id: "detector_a".to_string(),
+                    confidence_threshold: 0.5,
+                    nms_iou_threshold: Some(0.45),
+                    input_size: Some((640, 640)),
+                    preprocess: None,
+                    postprocess: None,
+                },
+                StageConfig::FrameTransform {
+                    module_id: "ft_1".to_string(),
+                    config: serde_json::json!({}),
+                },
+            ],
+            vec![],
+        );
+
+        let report = pipeline.validate_dag();
+        assert!(!report.valid);
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("frame_transform must appear before any inference")));
+    }
+
+    #[test]
+    fn validate_dag_requires_tracker_for_line_crossing_alarm() {
+        let pipeline = make_pipeline(
+            vec![StageConfig::Inference {
+                model_id: "detector_a".to_string(),
+                confidence_threshold: 0.5,
+                nms_iou_threshold: Some(0.45),
+                input_size: Some((640, 640)),
+                preprocess: None,
+                postprocess: None,
+            }],
+            vec![AlarmRule {
+                name: "line".to_string(),
+                condition: AlarmCondition::LineCrossing {
+                    line: [(0.1, 0.2), (0.8, 0.2)],
+                    class: Some("person".to_string()),
+                    direction: Some(CrossingDirection::Any),
+                },
+                severity: AlarmSeverity::Warning,
+                cooldown_secs: 60,
+                min_duration_secs: None,
+            }],
+        );
+
+        let report = pipeline.validate_dag();
+        assert!(!report.valid);
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("line_crossing alarm requires a tracker stage")));
+    }
 }

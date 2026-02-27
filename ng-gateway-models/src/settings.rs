@@ -1612,6 +1612,12 @@ pub struct AiEngineConfig {
     /// Number of frame decoder worker threads.
     #[serde(default = "AiEngineConfig::default_decoder_workers")]
     pub decoder_workers: usize,
+    /// Capacity of async annotation queue.
+    ///
+    /// When the queue is full, new annotation requests are dropped to keep
+    /// the inference hot path non-blocking.
+    #[serde(default = "AiEngineConfig::default_annotate_queue_capacity")]
+    pub annotate_queue_capacity: usize,
     /// Inference-specific configuration.
     #[serde(default)]
     pub inference: InferenceConfig,
@@ -1628,6 +1634,7 @@ impl Default for AiEngineConfig {
             algorithms_dir: Self::default_algorithms_dir(),
             max_concurrent_inferences: Self::default_max_concurrent(),
             decoder_workers: Self::default_decoder_workers(),
+            annotate_queue_capacity: Self::default_annotate_queue_capacity(),
             inference: InferenceConfig::default(),
             wasm: WasmConfig::default(),
         }
@@ -1650,6 +1657,9 @@ impl AiEngineConfig {
     fn default_decoder_workers() -> usize {
         2
     }
+    fn default_annotate_queue_capacity() -> usize {
+        64
+    }
 }
 
 /// ONNX Runtime inference configuration.
@@ -1667,6 +1677,12 @@ pub struct InferenceConfig {
     /// Enable memory pattern optimization.
     #[serde(default = "InferenceConfig::default_enable_mem_pattern")]
     pub enable_mem_pattern: bool,
+    /// Number of parallel ONNX sessions per model.
+    #[serde(default = "InferenceConfig::default_sessions_per_model")]
+    pub sessions_per_model: usize,
+    /// Queue capacity per inference session worker.
+    #[serde(default = "InferenceConfig::default_request_queue_capacity")]
+    pub request_queue_capacity: usize,
 }
 
 impl Default for InferenceConfig {
@@ -1676,6 +1692,8 @@ impl Default for InferenceConfig {
             intra_op_threads: 0,
             inter_op_threads: 0,
             enable_mem_pattern: true,
+            sessions_per_model: Self::default_sessions_per_model(),
+            request_queue_capacity: Self::default_request_queue_capacity(),
         }
     }
 }
@@ -1686,6 +1704,12 @@ impl InferenceConfig {
     }
     fn default_enable_mem_pattern() -> bool {
         true
+    }
+    fn default_sessions_per_model() -> usize {
+        2
+    }
+    fn default_request_queue_capacity() -> usize {
+        32
     }
 }
 

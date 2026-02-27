@@ -1,4 +1,4 @@
-use crate::{DataType, DriverError, DriverResult, NGValue, Transform};
+use crate::{DataType, DriverError, DriverResult, NGValue, NGValueCastError, Transform};
 use bytes::Bytes;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use std::sync::Arc;
@@ -186,7 +186,7 @@ impl ValueCodec {
         if logical_dt == wire_dt {
             return Ok(value.clone());
         }
-        let cast_err = |e: crate::NGValueCastError| {
+        let cast_err = |e: NGValueCastError| {
             DriverError::ValidationError(format!(
                 "downlink datatype cast failed: logical={logical_dt:?} -> wire={wire_dt:?}, error={e}",
             ))

@@ -60,8 +60,8 @@ pub mod engine;
 
 // ── Engine-internal decoded frame type ─────────────────────────────
 
-mod decoded_frame;
-pub use decoded_frame::DecodedFrame;
+mod decoded;
+pub use decoded::DecodedFrame;
 
 // Engine-only re-exports
 #[cfg(feature = "engine")]

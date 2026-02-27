@@ -5,7 +5,9 @@
 //! - build/update AddressSpace (Objects/NG-Gateway/{channel}/{device}/{point})
 //! - write variable values efficiently
 //! - dispatch OPC UA Write requests to gateway southward actions
-use crate::{config::OpcuaServerPluginConfig, write_dispatch::WriteDispatcher};
+use crate::{
+    config::OpcuaServerPluginConfig, node_cache::NodeCache, write_dispatch::WriteDispatcher,
+};
 use base64::Engine;
 use ng_gateway_sdk::{
     log::fields as log_fields, AccessMode, DataType, NorthwardError, NorthwardResult,
@@ -166,7 +168,7 @@ impl OpcuaServerRuntime {
         app_id: i32,
         config: Arc<OpcuaServerPluginConfig>,
         _runtime: Arc<dyn NorthwardRuntimeApi>,
-        _node_cache: Arc<crate::node_cache::NodeCache>,
+        _node_cache: Arc<NodeCache>,
         write_dispatch: Arc<WriteDispatcher>,
         shutdown: CancellationToken,
     ) -> NorthwardResult<Self> {

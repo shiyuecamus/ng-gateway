@@ -1,4 +1,7 @@
-use crate::protocol::error::{Dl645ExceptionCode, ProtocolError};
+use crate::{
+    protocol::error::{Dl645ExceptionCode, ProtocolError},
+    Dl645Version,
+};
 use bytes::{BufMut, Bytes, BytesMut};
 use ng_gateway_sdk::{WireDecode, WireEncode};
 
@@ -43,11 +46,7 @@ impl<T> Dl645Frame<T> {
 
 impl Dl645TypedFrame {
     /// Create a new request frame with automatically derived control word.
-    pub fn new_request(
-        address: Dl645Address,
-        body: Dl645Body,
-        version: crate::types::Dl645Version,
-    ) -> Self {
+    pub fn new_request(address: Dl645Address, body: Dl645Body, version: Dl645Version) -> Self {
         let control = Dl645ControlWord::for_request(version, body.function_code());
         Self::new(address, control, body)
     }

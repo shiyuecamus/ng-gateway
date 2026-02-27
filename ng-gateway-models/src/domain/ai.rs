@@ -2,6 +2,7 @@
 
 use crate::ai::pipeline::PipelineConfig;
 use serde::Serialize;
+use std::sync::Arc;
 
 /// Pipeline summary returned by the pipeline list endpoint.
 ///
@@ -11,5 +12,5 @@ use serde::Serialize;
 pub struct AiPipelineSummary {
     pub channel_id: i32,
     #[serde(flatten)]
-    pub config: PipelineConfig,
+    pub config: Arc<PipelineConfig>,
 }

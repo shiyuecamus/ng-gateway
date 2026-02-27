@@ -385,5 +385,84 @@ async fn get_menu_seed_data(_: &mut InitContext) -> Result<Option<Vec<NewMenuWit
             keep_alive: true,
             ..Default::default()
         },
+        // AI module (Phase 2.4A)
+        NewMenuWithId {
+            id: 19,
+            name: "AI视觉分析".into(),
+            parent_id: DEFAULT_ROOT_TREE_ID,
+            r#type: MenuType::Directory,
+            path: Some("/ai".into()),
+            component: "BasicLayout".into(),
+            sort: Some(8),
+            title: "page.ai.title".into(),
+            icon: Some("lucide:cpu".into()),
+            ..Default::default()
+        },
+        NewMenuWithId {
+            id: 20,
+            name: "AI概览".into(),
+            parent_id: 19,
+            r#type: MenuType::Menu,
+            path: Some("/ai/overview".into()),
+            component: "/ai/overview/index".into(),
+            sort: Some(1),
+            title: "page.ai.overview.title".into(),
+            icon: Some("lucide:layout-dashboard".into()),
+            keep_alive: true,
+            ..Default::default()
+        },
+        NewMenuWithId {
+            id: 21,
+            name: "模型管理".into(),
+            parent_id: 19,
+            r#type: MenuType::Menu,
+            path: Some("/ai/model".into()),
+            component: "/ai/model/index".into(),
+            sort: Some(2),
+            title: "page.ai.model.title".into(),
+            icon: Some("lucide:boxes".into()),
+            keep_alive: true,
+            ..Default::default()
+        },
+        NewMenuWithId {
+            id: 22,
+            name: "Pipeline管理".into(),
+            parent_id: 19,
+            r#type: MenuType::Menu,
+            path: Some("/ai/pipeline".into()),
+            component: "/ai/pipeline/index".into(),
+            sort: Some(3),
+            title: "page.ai.pipeline.title".into(),
+            icon: Some("lucide:workflow".into()),
+            keep_alive: true,
+            ..Default::default()
+        },
+        NewMenuWithId {
+            id: 23,
+            name: "算法管理".into(),
+            parent_id: 19,
+            r#type: MenuType::Menu,
+            path: Some("/ai/algorithm".into()),
+            component: "/ai/algorithm/index".into(),
+            sort: Some(4),
+            title: "page.ai.algorithm.title".into(),
+            icon: Some("lucide:code-2".into()),
+            keep_alive: true,
+            ..Default::default()
+        },
+        NewMenuWithId {
+            id: 24,
+            name: "实时预览".into(),
+            parent_id: 19,
+            r#type: MenuType::Menu,
+            path: Some("/ai/live/:channelId".into()),
+            component: "/ai/live/index".into(),
+            sort: Some(99),
+            title: "page.ai.live.title".into(),
+            icon: Some("lucide:monitor-play".into()),
+            hide_in_menu: true,
+            keep_alive: false,
+            ..Default::default()
+        },
     ]))
 }

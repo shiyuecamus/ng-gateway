@@ -2,7 +2,7 @@
 
 #[cfg(feature = "engine")]
 mod inner {
-    use crate::decoded_frame::DecodedFrame;
+    use crate::decoded::DecodedFrame;
     use ng_gateway_models::ai::types::{
         AnomalyMap, Classification, Detection, KeypointDetection, SegmentationMask,
     };

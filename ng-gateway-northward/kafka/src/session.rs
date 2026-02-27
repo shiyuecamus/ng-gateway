@@ -6,8 +6,8 @@
 
 use super::{
     config::{
-        KafkaAcks, KafkaCompression, KafkaConnectionConfig, KafkaProducerConfig,
-        KafkaSaslMechanism, KafkaSecurityProtocol,
+        KafkaAcks, KafkaCompression, KafkaConnectionConfig, KafkaProducerConfig, KafkaSaslConfig,
+        KafkaSaslMechanism, KafkaSecurityProtocol, KafkaTlsConfig,
     },
     handle::{KafkaHandle, OutboundPublish},
 };
@@ -16,7 +16,10 @@ use futures_util::StreamExt;
 use ng_gateway_sdk::{
     northward::{
         codec::DecodeError,
-        downlink::{decode_event, AckPolicy, DownlinkMessageMeta, DownlinkRouteTable, KeyValue},
+        downlink::{
+            decode_event, AckPolicy, DownlinkMessageMeta, DownlinkRouteTable, FailurePolicy,
+            KeyValue,
+        },
     },
     supervision::{RunOutcome, Session, SessionContext},
     NorthwardError, NorthwardEvent, RetryController, RetryDecision, RetryPolicy,
@@ -442,10 +445,10 @@ async fn handle_downlink_message(
                 should_commit = true;
             } else {
                 match policy.failure_policy {
-                    crate::config::FailurePolicy::Drop => {
+                    FailurePolicy::Drop => {
                         should_commit = true;
                     }
-                    crate::config::FailurePolicy::Error => {
+                    FailurePolicy::Error => {
                         should_commit = false;
                     }
                 }
@@ -517,7 +520,7 @@ fn build_client_config_base(app_id: i32, conn: &KafkaConnectionConfig) -> Client
     cfg
 }
 
-fn apply_tls_config(cfg: &mut ClientConfig, tls: &crate::config::KafkaTlsConfig) {
+fn apply_tls_config(cfg: &mut ClientConfig, tls: &KafkaTlsConfig) {
     if let Some(v) = tls.ca_location.as_deref() {
         cfg.set("ssl.ca.location", v);
     }
@@ -535,7 +538,7 @@ fn apply_tls_config(cfg: &mut ClientConfig, tls: &crate::config::KafkaTlsConfig)
     }
 }
 
-fn apply_sasl_config(cfg: &mut ClientConfig, sasl: &crate::config::KafkaSaslConfig) {
+fn apply_sasl_config(cfg: &mut ClientConfig, sasl: &KafkaSaslConfig) {
     let mechanism = match sasl.mechanism {
         KafkaSaslMechanism::Plain => "PLAIN",
         KafkaSaslMechanism::ScramSha256 => "SCRAM-SHA-256",

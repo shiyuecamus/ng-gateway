@@ -1,5 +1,4 @@
-use crate::config::OpcuaServerPluginConfig;
-use crate::node_cache::NodeCache;
+use crate::{config::OpcuaServerPluginConfig, node_cache::NodeCache};
 use chrono::{DateTime as ChronoDateTime, Utc};
 use ng_gateway_sdk::{
     DataType, NGValue, NorthwardError, NorthwardEvent, NorthwardResult, NorthwardRuntimeApi,

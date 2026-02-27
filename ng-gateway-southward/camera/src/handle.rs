@@ -21,14 +21,14 @@ use crate::{
 };
 use async_trait::async_trait;
 use ng_gateway_ai::{
-    api::{AiEngineApi, AiEngineError, AlarmSeverity as AiAlarmSeverity, AnalysisResult, FrameAnalysisRequest, VideoFrame},
+    api::{AiEngineApi, AiEngineError, AnalysisResult, FrameAnalysisRequest, VideoFrame},
     pipeline::sampler::FrameSampler,
 };
 use ng_gateway_sdk::{
-    supervision::ReconnectHandle, AlarmData, AlarmSeverity, CollectItem,
-    CollectorConcurrencyProfile, DriverError, DriverResult, ExecuteOutcome, ExecuteResult, NGValue,
-    NorthwardData, PointValue, RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimeParameter,
-    RuntimePoint, SouthwardHandle, TelemetryData, WriteResult,
+    supervision::ReconnectHandle, AlarmData, CollectItem, CollectorConcurrencyProfile, DriverError,
+    DriverResult, ExecuteOutcome, ExecuteResult, NGValue, NorthwardData, PointValue, RuntimeAction,
+    RuntimeDelta, RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardHandle, TelemetryData,
+    WriteResult,
 };
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -160,6 +160,7 @@ impl CameraHandle {
                                         pipeline = %channel.config.pipeline_id,
                                         "AI engine at capacity, dropping frame"
                                     );
+                                    sampler.on_feedback(None, true);
                                     continue;
                                 }
 
@@ -179,12 +180,18 @@ impl CameraHandle {
 
                                 match ai_engine.analyze_frame(request).await {
                                     Ok(result) => {
+                                        sampler.on_feedback(
+                                            Some(result.inference_latency.as_secs_f64()),
+                                            false,
+                                        );
                                         let _ = result_tx.send(Some(result));
                                     }
                                     Err(AiEngineError::Backpressure) => {
+                                        sampler.on_feedback(None, true);
                                         tracing::trace!(seq, "AI backpressure, frame dropped");
                                     }
                                     Err(e) => {
+                                        sampler.on_feedback(None, false);
                                         tracing::warn!(seq, error = %e, "AI analysis error");
                                     }
                                 }
@@ -453,18 +460,13 @@ fn convert_analysis_to_northward(
         }
     }
 
-    // Convert alarm events to NorthwardData
-    for alarm in &analysis.alarms {
-        let severity = match alarm.severity {
-            AiAlarmSeverity::Info => AlarmSeverity::Info,
-            AiAlarmSeverity::Warning => AlarmSeverity::Warning,
-            AiAlarmSeverity::Critical => AlarmSeverity::Critical,
-        };
+    // Convert alarm events to NorthwardData.
+    for alarm in analysis.alarms.iter() {
         data.push(NorthwardData::Alarm(AlarmData::new(
             device.id(),
             device.device_name().to_string(),
             alarm.alarm_type.to_string(),
-            severity,
+            alarm.severity.into(),
             alarm.description.to_string(),
         )));
     }

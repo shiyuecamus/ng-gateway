@@ -1,6 +1,8 @@
 use super::common::{PageParams, TimeRangeParams};
-use crate::entities::action::{ActiveModel, Parameter, Parameters};
-use crate::enums::common::DataType;
+use crate::{
+    entities::action::{ActiveModel, Parameter, Parameters},
+    enums::common::DataType,
+};
 use ng_gateway_sdk::{DriverError, FromValidatedRow, RowMappingContext, ValidatedRow};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, ModelTrait};
 use serde::{Deserialize, Serialize};

@@ -29,9 +29,9 @@ pub struct Iec104Connector {
 impl Iec104Connector {
     /// Create the connector from init context (no I/O).
     pub fn from_init(ctx: SouthwardInitContext) -> DriverResult<Self> {
-        let transport_meter = ctx
-            .extensions
-            .get_or_default(|| Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>);
+        let transport_meter = ctx.extensions.get_or_default(|| {
+            Arc::new(NoopSouthwardTransportMeter) as Arc<dyn SouthwardTransportMeter>
+        });
         let channel = Arc::clone(&ctx.runtime_channel)
             .downcast_arc::<Iec104Channel>()
             .map_err(|_| DriverError::ConfigurationError("Invalid Iec104Channel".to_string()))?;

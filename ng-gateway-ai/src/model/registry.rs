@@ -7,19 +7,30 @@
 mod inner {
     use dashmap::DashMap;
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::model::{ModelFormat, ModelInfo, ModelTask, TensorDesc};
-    use std::path::{Path, PathBuf};
+    use ng_gateway_models::ai::model::{
+        ModelFormat, ModelInfo, ModelTask, ModelUpdateRequest, TensorDesc,
+    };
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use tracing::{info, warn};
 
     /// Model registry — manages AI model metadata and lazy loading.
     pub struct ModelRegistry {
         /// Model metadata cache keyed by model id.
-        models: DashMap<String, ModelInfo>,
+        models: DashMap<String, Arc<ModelInfo>>,
         /// Root directory for model files.
         models_dir: PathBuf,
     }
 
     impl ModelRegistry {
+        /// Get model info by ID (synchronous helper for hot registration paths).
+        #[inline]
+        pub fn get_shared(&self, model_id: &str) -> Option<Arc<ModelInfo>> {
+            self.models.get(model_id).map(|r| Arc::clone(r.value()))
+        }
+
         /// Create a new registry by scanning the models directory.
         ///
         /// Discovered `.onnx` files are probed for metadata. Models that
@@ -45,7 +56,7 @@ mod inner {
                         match Self::probe_model(&path).await {
                             Ok(info) => {
                                 info!(model_id = %info.id, path = %path.display(), "discovered AI model");
-                                registry.models.insert(info.id.clone(), info);
+                                registry.models.insert(info.id.clone(), Arc::new(info));
                             }
                             Err(e) => {
                                 warn!(path = %path.display(), error = %e, "failed to probe model");
@@ -120,6 +131,8 @@ mod inner {
                 outputs,
                 task,
                 labels,
+                default_preprocess: None,
+                default_postprocess: None,
                 loaded: false,
                 file_size: metadata.len(),
             })
@@ -163,26 +176,30 @@ mod inner {
         }
 
         /// Get model info by ID.
-        pub async fn get(&self, model_id: &str) -> Option<ModelInfo> {
-            self.models.get(model_id).map(|r| r.value().clone())
+        pub async fn get(&self, model_id: &str) -> Option<Arc<ModelInfo>> {
+            self.get_shared(model_id)
         }
 
         /// List all registered models.
-        pub async fn list_all(&self) -> Result<Vec<ModelInfo>, AiEngineError> {
-            Ok(self.models.iter().map(|r| r.value().clone()).collect())
+        pub async fn list_all(&self) -> Result<Vec<Arc<ModelInfo>>, AiEngineError> {
+            Ok(self
+                .models
+                .iter()
+                .map(|entry| Arc::clone(entry.value()))
+                .collect())
         }
 
         /// Mark a model as loaded in the registry.
         pub fn mark_loaded(&self, model_id: &str) {
             if let Some(mut entry) = self.models.get_mut(model_id) {
-                entry.loaded = true;
+                Arc::make_mut(entry.value_mut()).loaded = true;
             }
         }
 
         /// Mark a model as unloaded in the registry.
         pub fn mark_unloaded(&self, model_id: &str) {
             if let Some(mut entry) = self.models.get_mut(model_id) {
-                entry.loaded = false;
+                Arc::make_mut(entry.value_mut()).loaded = false;
             }
         }
 
@@ -194,9 +211,59 @@ mod inner {
             outputs: Vec<TensorDesc>,
         ) {
             if let Some(mut entry) = self.models.get_mut(model_id) {
-                entry.inputs = inputs;
-                entry.outputs = outputs;
+                let model = Arc::make_mut(entry.value_mut());
+                model.inputs = inputs;
+                model.outputs = outputs;
             }
+        }
+
+        /// Insert or replace model metadata entry.
+        pub fn upsert(&self, model_info: ModelInfo) {
+            self.models
+                .insert(model_info.id.clone(), Arc::new(model_info));
+        }
+
+        /// Insert or replace model metadata entry using shared ownership.
+        pub fn upsert_shared(&self, model_info: Arc<ModelInfo>) {
+            self.models
+                .insert(model_info.id.clone(), Arc::clone(&model_info));
+        }
+
+        /// Remove model metadata by identifier.
+        pub fn remove(&self, model_id: &str) -> Option<Arc<ModelInfo>> {
+            self.models.remove(model_id).map(|(_, info)| info)
+        }
+
+        /// Update mutable model metadata fields from API update request.
+        pub fn update_model_metadata(
+            &self,
+            model_id: &str,
+            request: ModelUpdateRequest,
+        ) -> Result<(), AiEngineError> {
+            let mut entry = self
+                .models
+                .get_mut(model_id)
+                .ok_or_else(|| AiEngineError::ModelNotFound(model_id.to_string()))?;
+
+            if let Some(v) = request.name {
+                Arc::make_mut(entry.value_mut()).name = v;
+            }
+            if let Some(v) = request.version {
+                Arc::make_mut(entry.value_mut()).version = v;
+            }
+            if let Some(v) = request.task {
+                Arc::make_mut(entry.value_mut()).task = v;
+            }
+            if let Some(v) = request.labels {
+                Arc::make_mut(entry.value_mut()).labels = v;
+            }
+            if let Some(v) = request.default_preprocess {
+                Arc::make_mut(entry.value_mut()).default_preprocess = Some(v);
+            }
+            if let Some(v) = request.default_postprocess {
+                Arc::make_mut(entry.value_mut()).default_postprocess = Some(v);
+            }
+            Ok(())
         }
 
         /// Get the models directory path.

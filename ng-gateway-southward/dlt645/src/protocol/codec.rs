@@ -1,8 +1,10 @@
-use crate::protocol::{
-    error::ProtocolError,
-    frame::{Dl645CodecContext, Dl645TypedFrame},
+use crate::{
+    protocol::{
+        error::ProtocolError,
+        frame::{Dl645CodecContext, Dl645TypedFrame},
+    },
+    types::Dl645Version,
 };
-use crate::types::Dl645Version;
 use bytes::{Buf, Bytes, BytesMut};
 use ng_gateway_sdk::{DriverError, DriverResult, WireDecode, WireEncode};
 use std::io;

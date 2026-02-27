@@ -9,10 +9,12 @@
 //! These wrappers are instantiated by macros to keep macro bodies clean.
 
 use crate::{
-    export::serde_json, northward::PluginFactory, southward::DriverFactory, CollectItem, Driver,
+    export::serde_json, northward::PluginFactory, southward::DriverFactory, ActionModel,
+    ChannelModel, CollectItem, CollectorConcurrencyProfile, ConnectionState, DeviceModel, Driver,
     DriverError, DriverResult, ExecuteResult, NGValue, NorthwardData, NorthwardError,
-    NorthwardInitContext, NorthwardResult, Plugin, PluginConfig, RuntimeAction, RuntimeChannel,
-    RuntimeDelta, RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardInitContext, WriteResult,
+    NorthwardInitContext, NorthwardResult, Plugin, PluginConfig, PointModel, RuntimeAction,
+    RuntimeChannel, RuntimeDelta, RuntimeDevice, RuntimeParameter, RuntimePoint,
+    SouthwardInitContext, WriteResult,
 };
 use std::sync::Arc;
 use tokio::{
@@ -63,29 +65,20 @@ impl DriverFactory for RuntimeAwareDriverFactory {
 
     fn convert_runtime_channel(
         &self,
-        channel: crate::ChannelModel,
+        channel: ChannelModel,
     ) -> DriverResult<Arc<dyn RuntimeChannel>> {
         self.inner.convert_runtime_channel(channel)
     }
 
-    fn convert_runtime_device(
-        &self,
-        device: crate::DeviceModel,
-    ) -> DriverResult<Arc<dyn RuntimeDevice>> {
+    fn convert_runtime_device(&self, device: DeviceModel) -> DriverResult<Arc<dyn RuntimeDevice>> {
         self.inner.convert_runtime_device(device)
     }
 
-    fn convert_runtime_point(
-        &self,
-        point: crate::PointModel,
-    ) -> DriverResult<Arc<dyn RuntimePoint>> {
+    fn convert_runtime_point(&self, point: PointModel) -> DriverResult<Arc<dyn RuntimePoint>> {
         self.inner.convert_runtime_point(point)
     }
 
-    fn convert_runtime_action(
-        &self,
-        action: crate::ActionModel,
-    ) -> DriverResult<Arc<dyn RuntimeAction>> {
+    fn convert_runtime_action(&self, action: ActionModel) -> DriverResult<Arc<dyn RuntimeAction>> {
         self.inner.convert_runtime_action(action)
     }
 }
@@ -266,7 +259,7 @@ impl Driver for RuntimeAwareDriver {
     }
 
     #[inline]
-    fn collector_concurrency_profile(&self) -> crate::CollectorConcurrencyProfile {
+    fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
         // Forward the inner driver's capability profile to the host.
         self.inner.collector_concurrency_profile()
     }
@@ -325,9 +318,7 @@ impl Driver for RuntimeAwareDriver {
         })?
     }
 
-    fn subscribe_connection_state(
-        &self,
-    ) -> tokio::sync::watch::Receiver<Arc<crate::ConnectionState>> {
+    fn subscribe_connection_state(&self) -> tokio::sync::watch::Receiver<Arc<ConnectionState>> {
         self.inner.subscribe_connection_state()
     }
 }
@@ -451,9 +442,7 @@ impl Plugin for RuntimeAwarePlugin {
             .map_err(|_| NorthwardError::NotConnected)
     }
 
-    fn subscribe_connection_state(
-        &self,
-    ) -> tokio::sync::watch::Receiver<Arc<crate::ConnectionState>> {
+    fn subscribe_connection_state(&self) -> tokio::sync::watch::Receiver<Arc<ConnectionState>> {
         self.inner.subscribe_connection_state()
     }
 

@@ -1,6 +1,13 @@
 use crate::{
     envelope::{EnvelopeEvent, EnvelopeKind, EnvelopeMeta, WireEnvelope},
-    northward::{NorthwardData, NorthwardEvent},
+    northward::{
+        model::{
+            AlarmData, AttributeData, ClientRpcResponse, Command, DeviceConnectedData,
+            DeviceDisconnectedData, ServerRpcResponse, TelemetryData, WritePoint,
+            WritePointResponse,
+        },
+        NorthwardData, NorthwardEvent,
+    },
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -320,13 +327,6 @@ fn decode_payload_by_kind(
     kind: EnvelopeKind,
     raw: Value,
 ) -> Result<NorthwardEnvelopePayload, NorthwardEnvelopeDecodeError> {
-    // NOTE: Types are re-exported at crate root, but referencing them through northward::model
-    // keeps the mapping centralized and explicit.
-    use crate::northward::model::{
-        AlarmData, AttributeData, ClientRpcResponse, Command, DeviceConnectedData,
-        DeviceDisconnectedData, ServerRpcResponse, TelemetryData, WritePoint, WritePointResponse,
-    };
-
     match kind {
         // ===== uplink kinds =====
         EnvelopeKind::DeviceConnected => {

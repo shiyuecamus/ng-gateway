@@ -1,17 +1,14 @@
+use crate::{middleware::RequestContext, rbac::has_any_role};
 use actix_web::{http::Method, web};
 use ng_gateway_common::casbin::NGPermChecker;
 use ng_gateway_error::{rbac::RBACError, WebResult};
-use ng_gateway_models::rbac::PermRule;
 use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE, domain::prelude::MenuTree, enums::common::Status,
-    web::WebResponse, PermChecker, DEFAULT_ROOT_TREE_ID,
+    rbac::PermRule, web::WebResponse, PermChecker, DEFAULT_ROOT_TREE_ID,
 };
 use ng_gateway_repository::menu::MenuRepository;
 use ng_gateway_utils::tree::build_tree;
 use tracing::{info, instrument};
-
-use crate::middleware::RequestContext;
-use crate::rbac::has_any_role;
 
 pub(super) const ROUTER_PREFIX: &str = "/menu";
 
