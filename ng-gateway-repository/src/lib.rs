@@ -5,6 +5,7 @@ use ng_gateway_storage::NGDbManager;
 use sea_orm::DatabaseConnection;
 
 pub mod action;
+pub mod ai;
 pub mod app;
 pub mod app_ext;
 pub mod app_sub;
@@ -21,6 +22,10 @@ pub mod role;
 pub mod user;
 
 pub use action::ActionRepository;
+pub use ai::{
+    AlarmEventRepository, AlarmRuleRepository, AlgorithmRepository, ModelRepository,
+    PipelineBindingRepository, PipelineRepository, PipelineStageRepository,
+};
 pub use app::AppRepository;
 pub use app_ext::AppExtRepository;
 pub use app_sub::AppSubRepository;

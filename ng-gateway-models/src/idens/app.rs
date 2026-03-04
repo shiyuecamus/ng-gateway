@@ -77,13 +77,13 @@ fn create_app_table(_: DatabaseBackend) -> TableCreateStatement {
             ColumnDef::new(App::CreatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("创建时间"),
+                .comment("Created at timestamp"),
         )
         .col(
             ColumnDef::new(App::UpdatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("更新时间"),
+                .comment("Updated at timestamp"),
         )
         .to_owned()
 }

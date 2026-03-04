@@ -17,7 +17,7 @@ mod inner {
     use crate::pipeline::preprocess::CoordinateTransform;
     use ndarray::ArrayD;
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::types::{
+    use ng_gateway_models::domain::prelude::{
         AnomalyMap, BoundingBox, Classification, Detection, Keypoint, KeypointDetection,
         SegmentationMask,
     };
@@ -101,7 +101,7 @@ mod inner {
             coord_transform: &CoordinateTransform,
             labels: &[String],
         ) -> Result<PostprocessOutput, AiEngineError> {
-            let tensor = &output.tensors[0].1;
+            let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
             if shape.len() != 3 {
                 return Err(AiEngineError::PostprocessError(format!(
@@ -109,8 +109,18 @@ mod inner {
                     shape.len()
                 )));
             }
+            if shape[1] < 5 {
+                return Err(AiEngineError::PostprocessError(format!(
+                    "{} expects at least 5 features (4 bbox + >=1 class), got {}",
+                    self.name(),
+                    shape[1]
+                )));
+            }
             let num_features = shape[1];
             let num_preds = shape[2];
+            if num_preds == 0 {
+                return Ok(PostprocessOutput::default());
+            }
             let num_classes = num_features - 4;
             let label_cache = build_label_cache(labels, num_classes);
 
@@ -305,7 +315,7 @@ mod inner {
             coord_transform: &CoordinateTransform,
             labels: &[String],
         ) -> Result<PostprocessOutput, AiEngineError> {
-            let tensor = &output.tensors[0].1;
+            let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
             if shape.len() != 3 {
                 return Err(AiEngineError::PostprocessError(format!(
@@ -313,7 +323,17 @@ mod inner {
                     shape.len()
                 )));
             }
+            if shape[2] < 6 {
+                return Err(AiEngineError::PostprocessError(format!(
+                    "{} expects features >= 6 (5 base + >=1 class), got {}",
+                    self.name(),
+                    shape[2]
+                )));
+            }
             let num_preds = shape[1];
+            if num_preds == 0 {
+                return Ok(PostprocessOutput::default());
+            }
             let num_classes = shape[2] - 5;
             let label_cache = build_label_cache(labels, num_classes);
 
@@ -530,7 +550,21 @@ mod inner {
             _coord_transform: &CoordinateTransform,
             labels: &[String],
         ) -> Result<PostprocessOutput, AiEngineError> {
-            let tensor = &output.tensors[0].1;
+            let tensor = first_output_tensor(output, self.name())?;
+            let shape = tensor.shape();
+            if shape.len() != 2 {
+                return Err(AiEngineError::PostprocessError(format!(
+                    "{} expects 2D tensor [1, C], got {}D",
+                    self.name(),
+                    shape.len()
+                )));
+            }
+            if shape[0] == 0 {
+                return Err(AiEngineError::PostprocessError(format!(
+                    "{} received empty batch dimension",
+                    self.name()
+                )));
+            }
             let num_classes = tensor.shape()[1];
             if num_classes == 0 || self.top_k == 0 {
                 return Ok(PostprocessOutput {
@@ -657,7 +691,7 @@ mod inner {
             _coord_transform: &CoordinateTransform,
             labels: &[String],
         ) -> Result<PostprocessOutput, AiEngineError> {
-            let tensor = &output.tensors[0].1;
+            let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
             if shape.len() != 4 {
                 return Err(AiEngineError::PostprocessError(format!(
@@ -665,7 +699,17 @@ mod inner {
                     shape.len()
                 )));
             }
+            if shape[0] == 0 {
+                return Err(AiEngineError::PostprocessError(
+                    "segmentation expects non-empty batch dimension".into(),
+                ));
+            }
             let num_classes = shape[1];
+            if num_classes == 0 {
+                return Err(AiEngineError::PostprocessError(
+                    "segmentation expects at least one class channel".into(),
+                ));
+            }
             let h = shape[2];
             let w = shape[3];
 
@@ -777,7 +821,7 @@ mod inner {
             coord_transform: &CoordinateTransform,
             labels: &[String],
         ) -> Result<PostprocessOutput, AiEngineError> {
-            let tensor = &output.tensors[0].1;
+            let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
 
             if shape.len() != 3 {
@@ -789,6 +833,9 @@ mod inner {
 
             let num_features = shape[1];
             let num_preds = shape[2];
+            if num_preds == 0 {
+                return Ok(PostprocessOutput::default());
+            }
             let expected_features = 5 + self.num_keypoints * 3;
 
             if num_features < expected_features {
@@ -1035,13 +1082,28 @@ mod inner {
 
     /// Build a class-id indexed label cache to avoid string lookups/allocation
     /// in hot detection loops.
+    fn first_output_tensor<'a>(
+        output: &'a RawInferenceOutput,
+        processor_name: &str,
+    ) -> Result<&'a ArrayD<f32>, AiEngineError> {
+        output
+            .tensors
+            .first()
+            .map(|(_, tensor)| tensor)
+            .ok_or_else(|| {
+                AiEngineError::PostprocessError(format!("{processor_name}: no output tensors"))
+            })
+    }
+
+    /// Build a class-id indexed label cache to avoid string lookups/allocation
+    /// in hot detection loops.
     fn build_label_cache(labels: &[String], num_classes: usize) -> Vec<Arc<str>> {
         let mut cache = Vec::with_capacity(num_classes);
         for class_id in 0..num_classes {
             let label = labels
                 .get(class_id)
                 .map(|s| Arc::<str>::from(s.as_str()))
-                .unwrap_or_else(|| Arc::from(format!("class_{class_id}")));
+                .unwrap_or(Arc::from(format!("class_{class_id}")));
             cache.push(label);
         }
         cache

@@ -31,7 +31,6 @@ use ng_gateway_common::{
 };
 use ng_gateway_error::{init::InitContextError, storage::StorageError, NGError, NGResult};
 use ng_gateway_models::{
-    ai::api::AiEngineApi,
     core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
         ChangeAppStatus, ChangeChannelStatus, ChangeDeviceStatus, LogLevel, NewAction, NewApp,
@@ -47,7 +46,7 @@ use ng_gateway_models::{
     },
     settings::Settings,
     web::PrometheusTextPayload,
-    ActionRuntimeCmd, AppRuntimeCmd, AppSubRuntimeCmd, ChannelRuntimeCmd, DbManager,
+    ActionRuntimeCmd, AiEngineApi, AppRuntimeCmd, AppSubRuntimeCmd, ChannelRuntimeCmd, DbManager,
     DeviceRuntimeCmd, DriverRuntimeCmd, Gateway, NorthwardManager, PluginRuntimeCmd,
     PointRuntimeCmd, RealtimeMonitorHub, SouthwardManager,
 };

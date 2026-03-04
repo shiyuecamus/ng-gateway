@@ -2,21 +2,34 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 pub use crate::{
-    ai::{
-        algorithm::{
-            AlgorithmTestInput, AlgorithmTestResult, AlgorithmUploadMetadata, WasmAlgorithmInfo,
-        },
-        api::AiEngineApi,
-        model::ModelInfo,
-        pipeline::PipelineConfig,
-        types::{
-            AnalysisResult, EngineStatus, FrameAnalysisRequest, PipelineId, ProcessorInfo,
-            VideoFrame,
-        },
-    },
     domain::{
         action::{ActionInfo, ActionPageParams, NewAction, UpdateAction},
-        ai::AiPipelineSummary,
+        ai::{
+            alarm_rule::{AlarmRuleInfo, NewAlarmRule, UpdateAlarmRule},
+            algorithm::{
+                AlgorithmInfo, AlgorithmPageParams, AlgorithmProbeInfo, AlgorithmTestInput,
+                AlgorithmTestResult, FrameTransformInput, FrameTransformOutput, NewAlgorithm,
+                ResultClassification, ResultDetection, ResultProcessorInput, ResultProcessorOutput,
+                UpdateAlgorithm, WasmAlgorithmManifestV1, WasmExports,
+                WASM_ALGORITHM_MANIFEST_SECTION,
+            },
+            model::{
+                ChangeModelStatus, ModelInfo, ModelInstallRequest, ModelPageParams, ModelProbeInfo,
+                ModelVariant, NewModel, ProducerInfo, UpdateModel,
+            },
+            pipeline::{
+                ChangePipelineStatus, NewPipeline, PipelineInfo, PipelinePageParams,
+                PipelineValidationReport, UpdatePipeline,
+            },
+            pipeline_stage::{NewPipelineStage, PipelineStageInfo, UpdatePipelineStage},
+            types::{
+                AlarmEvent, AnalysisCore, AnalysisResult, AnomalyMap, BoundingBox, Classification,
+                Detection, EngineAlgorithmStatus, EngineDecoderStatus, EngineInferenceStatus,
+                EngineModelStatus, EnginePipelineStatus, EngineStatus, FrameAnalysisRequest,
+                Keypoint, KeypointDetection, ParamType, ProcessorInfo, ProcessorParameter,
+                RenderArtifact, SegmentationMask, VideoFrame,
+            },
+        },
         app::{AppInfo, AppPageParams, ChangeAppStatus, NewApp, UpdateApp},
         app_sub::{
             AppSubInfo, AppSubPageParams, ChannelDeviceTree, DeviceTreeNode, NewAppSub,

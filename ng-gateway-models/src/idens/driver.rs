@@ -126,13 +126,13 @@ fn create_driver_table(_: DatabaseBackend) -> TableCreateStatement {
             ColumnDef::new(Driver::CreatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("创建时间"),
+                .comment("Created at timestamp"),
         )
         .col(
             ColumnDef::new(Driver::UpdatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("更新时间"),
+                .comment("Updated at timestamp"),
         )
         .to_owned()
 }

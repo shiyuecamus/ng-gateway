@@ -10,9 +10,9 @@ mod inner {
     use crate::decoded::DecodedFrame;
     use bytes::Bytes;
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::{
-        pipeline::AnnotationConfig,
-        types::{AnalysisCore, Detection, KeypointDetection, SegmentationMask},
+    use ng_gateway_models::{
+        domain::prelude::{AnalysisCore, Detection, KeypointDetection, SegmentationMask},
+        entities::ai::pipeline::AnnotationConfig,
     };
     use rayon::prelude::*;
 
@@ -207,6 +207,9 @@ mod inner {
     }
 
     /// Draw a rectangle outline on an RGB image with configurable thickness.
+    ///
+    /// Uses direct buffer writes instead of per-pixel `put_pixel()` calls,
+    /// filling horizontal spans in bulk to avoid per-pixel bounds checks.
     fn draw_rect(
         img: &mut image::RgbImage,
         x1: i32,
@@ -218,37 +221,44 @@ mod inner {
     ) {
         let w = img.width() as i32;
         let h = img.height() as i32;
-        let pixel = image::Rgb(color);
+        let buf = img.as_mut();
+        let stride = w as usize * 3;
         let t = thickness as i32;
 
+        let cx1 = x1.max(0) as usize;
+        let cx2 = x2.min(w - 1) as usize;
+        if cx1 > cx2 {
+            return;
+        }
+        let span_len = (cx2 - cx1 + 1) * 3;
+
+        let fill_hline = |buf: &mut [u8], y: i32| {
+            if y < 0 || y >= h {
+                return;
+            }
+            let row_start = y as usize * stride + cx1 * 3;
+            let row = &mut buf[row_start..row_start + span_len];
+            for chunk in row.chunks_exact_mut(3) {
+                chunk.copy_from_slice(&color);
+            }
+        };
+
+        let fill_pixel = |buf: &mut [u8], x: i32, y: i32| {
+            if x < 0 || x >= w || y < 0 || y >= h {
+                return;
+            }
+            let offset = y as usize * stride + x as usize * 3;
+            buf[offset] = color[0];
+            buf[offset + 1] = color[1];
+            buf[offset + 2] = color[2];
+        };
+
         for d in 0..t {
-            // Top edge
-            for x in x1..=x2 {
-                let y = y1 + d;
-                if x >= 0 && x < w && y >= 0 && y < h {
-                    img.put_pixel(x as u32, y as u32, pixel);
-                }
-            }
-            // Bottom edge
-            for x in x1..=x2 {
-                let y = y2 - d;
-                if x >= 0 && x < w && y >= 0 && y < h {
-                    img.put_pixel(x as u32, y as u32, pixel);
-                }
-            }
-            // Left edge
+            fill_hline(buf, y1 + d);
+            fill_hline(buf, y2 - d);
             for y in y1..=y2 {
-                let x = x1 + d;
-                if x >= 0 && x < w && y >= 0 && y < h {
-                    img.put_pixel(x as u32, y as u32, pixel);
-                }
-            }
-            // Right edge
-            for y in y1..=y2 {
-                let x = x2 - d;
-                if x >= 0 && x < w && y >= 0 && y < h {
-                    img.put_pixel(x as u32, y as u32, pixel);
-                }
+                fill_pixel(buf, x1 + d, y);
+                fill_pixel(buf, x2 - d, y);
             }
         }
     }
@@ -280,12 +290,22 @@ mod inner {
 
         let img_w = img.width() as i32;
         let img_h = img.height() as i32;
+        let stride = img_w as usize * 3;
 
-        // Fill background rectangle
-        let bg_pixel = image::Rgb(bg_color);
-        for py in bg_y.max(0)..((bg_y + box_h).min(img_h)) {
-            for px in bg_x.max(0)..((bg_x + box_w).min(img_w)) {
-                img.put_pixel(px as u32, py as u32, bg_pixel);
+        // Fill background rectangle using direct buffer writes.
+        {
+            let buf = img.as_mut();
+            let fill_x1 = bg_x.max(0) as usize;
+            let fill_x2 = (bg_x + box_w).min(img_w) as usize;
+            if fill_x1 < fill_x2 {
+                let span_len = (fill_x2 - fill_x1) * 3;
+                for py in bg_y.max(0)..(bg_y + box_h).min(img_h) {
+                    let row_start = py as usize * stride + fill_x1 * 3;
+                    let row = &mut buf[row_start..row_start + span_len];
+                    for chunk in row.chunks_exact_mut(3) {
+                        chunk.copy_from_slice(&bg_color);
+                    }
+                }
             }
         }
 
@@ -756,9 +776,7 @@ mod inner {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use ng_gateway_models::ai::types::{
-            AnalysisCore, BoundingBox, Detection, SegmentationMask,
-        };
+        use ng_gateway_models::domain::prelude::{BoundingBox, Detection, SegmentationMask};
 
         fn make_test_frame(w: u32, h: u32) -> DecodedFrame {
             DecodedFrame {

@@ -34,13 +34,13 @@
 /// Do not depend on `ng-gateway-models` or `ng-gateway-error` in drivers.
 pub mod api {
     pub use ng_gateway_error::ai::{AiEngineError, AiResult};
-    pub use ng_gateway_models::ai::{
-        api::AiEngineApi,
-        pipeline::{PipelineConfig, SamplingStrategy},
-        types::{
-            AlarmEvent, AlarmSeverity, AnalysisResult, FrameAnalysisRequest, FrameFormat,
-            PipelineId, VideoFrame,
+    pub use ng_gateway_models::{
+        domain::prelude::{
+            AlarmEvent, AnalysisResult, FrameAnalysisRequest, NewPipeline, PipelineInfo, VideoFrame,
         },
+        entities::ai::pipeline::RoiRegions,
+        enums::ai::{AlarmSeverity, FrameFormat, SamplingStrategy},
+        AiAlgorithmRegistry, AiEngineApi, AiInferenceRuntime, AiModelRegistry, AiPipelineRegistry,
     };
 }
 

@@ -83,6 +83,10 @@ pub enum EntityType {
     Device,
     Point,
     Action,
+    Model,
+    Algorithm,
+    Pipeline,
+    AlarmRule,
 }
 
 impl EntityType {
@@ -100,6 +104,10 @@ impl EntityType {
             Self::Device => "DEVICE",
             Self::Point => "POINT",
             Self::Action => "ACTION",
+            Self::Model => "AI_MODEL",
+            Self::Algorithm => "AI_ALGORITHM",
+            Self::Pipeline => "AI_PIPELINE",
+            Self::AlarmRule => "AI_ALARM_RULE",
         }
     }
 
@@ -117,6 +125,10 @@ impl EntityType {
             Self::Device => "Device",
             Self::Point => "Point",
             Self::Action => "Action",
+            Self::Model => "Model",
+            Self::Algorithm => "Algorithm",
+            Self::Pipeline => "Pipeline",
+            Self::AlarmRule => "AlarmRule",
         }
     }
 
@@ -140,6 +152,10 @@ impl EntityType {
             Self::Device,
             Self::Point,
             Self::Action,
+            Self::Model,
+            Self::Algorithm,
+            Self::Pipeline,
+            Self::AlarmRule,
         ]
     }
 }
@@ -311,6 +327,44 @@ pub static RESOURCE_OPERATIONS: Lazy<HashMap<EntityType, Vec<Operation>>> = Lazy
     // Driver operations
     map.insert(
         EntityType::Driver,
+        vec![
+            Operation::Create,
+            Operation::Read,
+            Operation::Write,
+            Operation::Delete,
+        ],
+    );
+
+    // AI operations
+    map.insert(
+        EntityType::Model,
+        vec![
+            Operation::Create,
+            Operation::Read,
+            Operation::Write,
+            Operation::Delete,
+        ],
+    );
+    map.insert(
+        EntityType::Algorithm,
+        vec![
+            Operation::Create,
+            Operation::Read,
+            Operation::Write,
+            Operation::Delete,
+        ],
+    );
+    map.insert(
+        EntityType::Pipeline,
+        vec![
+            Operation::Create,
+            Operation::Read,
+            Operation::Write,
+            Operation::Delete,
+        ],
+    );
+    map.insert(
+        EntityType::AlarmRule,
         vec![
             Operation::Create,
             Operation::Read,

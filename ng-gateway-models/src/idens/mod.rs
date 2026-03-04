@@ -1,4 +1,7 @@
 pub mod action;
+pub mod alarm_event;
+pub mod alarm_rule;
+pub mod algorithm;
 pub mod app;
 pub mod app_ext;
 pub mod app_sub;
@@ -9,6 +12,10 @@ pub mod credentials;
 pub mod device;
 pub mod driver;
 pub mod menu;
+pub mod model;
+pub mod pipeline;
+pub mod pipeline_binding;
+pub mod pipeline_stage;
 pub mod plugin;
 pub mod point;
 pub mod relation;
@@ -33,6 +40,13 @@ const INIT_PLUGIN_ORDER: i32 = INIT_ACTION_ORDER + 1;
 const INIT_APP_ORDER: i32 = INIT_PLUGIN_ORDER + 1;
 const INIT_APP_EXT_ORDER: i32 = INIT_APP_ORDER + 1;
 const INIT_APP_SUB_ORDER: i32 = INIT_APP_EXT_ORDER + 1;
+const INIT_MODEL_ORDER: i32 = INIT_APP_SUB_ORDER + 1;
+const INIT_ALGORITHM_ORDER: i32 = INIT_MODEL_ORDER + 1;
+const INIT_PIPELINE_ORDER: i32 = INIT_ALGORITHM_ORDER + 1;
+const INIT_PIPELINE_STAGE_ORDER: i32 = INIT_PIPELINE_ORDER + 1;
+const INIT_ALARM_RULE_ORDER: i32 = INIT_PIPELINE_STAGE_ORDER + 1;
+const INIT_PIPELINE_BINDING_ORDER: i32 = INIT_ALARM_RULE_ORDER + 1;
+const INIT_ALARM_EVENT_ORDER: i32 = INIT_PIPELINE_BINDING_ORDER + 1;
 
 #[allow(unused)]
 const INIT_LATEST_ORDER: i32 = 10000;

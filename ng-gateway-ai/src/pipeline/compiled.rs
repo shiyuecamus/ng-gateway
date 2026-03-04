@@ -11,13 +11,13 @@ mod inner {
         pipeline::{postprocess::PostProcessor, preprocess::PreProcessor},
     };
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::{
-        model::{ModelInfo, TensorDType},
-        pipeline::{
-            AlarmRule, AnnotationConfig, PipelineConfig, SamplingStrategy, StageConfig,
-            TrackerAlgorithm,
+    use ng_gateway_models::{
+        domain::prelude::{AlarmRuleInfo, ModelInfo, NewPipeline},
+        entities::ai::{
+            pipeline::{AnnotationConfig, RegionOfInterest},
+            pipeline_stage::StageConfig,
         },
-        types::{PipelineId, RegionOfInterest},
+        enums::ai::{SamplingStrategy, TensorDType, TrackerAlgorithm},
     };
     use std::sync::Arc;
 
@@ -93,8 +93,6 @@ mod inner {
 
     /// Runtime-optimized pipeline representation.
     pub struct CompiledPipeline {
-        /// Pipeline identifier.
-        pub id: PipelineId,
         /// Pipeline name.
         pub name: Arc<str>,
         /// Sampling policy.
@@ -106,9 +104,9 @@ mod inner {
         /// Ordered compiled stages.
         pub stages: Arc<[CompiledStage]>,
         /// Alarm rules.
-        pub alarm_rules: Arc<[AlarmRule]>,
-        /// Annotation settings.
-        pub annotation: AnnotationConfig,
+        pub alarm_rules: Arc<[AlarmRuleInfo]>,
+        /// Pre-compiled annotation config shared across frames (avoids per-frame clone).
+        pub annotation: Arc<AnnotationConfig>,
         /// Referenced compiled model table.
         pub models: Arc<[CompiledModel]>,
     }
@@ -123,15 +121,15 @@ mod inner {
 
     /// Compile a user pipeline into a runtime-optimized immutable plan.
     pub fn compile_pipeline(
-        config: &PipelineConfig,
+        config: &NewPipeline,
         model_registry: &ModelRegistry,
     ) -> Result<CompiledPipeline, AiEngineError> {
         let mut models: Vec<CompiledModel> = Vec::new();
         let mut stages: Vec<CompiledStage> = Vec::with_capacity(config.stages.len());
 
-        for (stage_index, stage) in config.stages.iter().enumerate() {
+        for (stage_index, stage_info) in config.stages.iter().enumerate() {
             let stage_handle = StageHandle(stage_index);
-            match stage {
+            match &stage_info.config {
                 StageConfig::Inference {
                     model_id,
                     confidence_threshold,
@@ -141,12 +139,14 @@ mod inner {
                     postprocess: post_cfg,
                 } => {
                     let model_info = model_registry
-                        .get_shared(model_id)
-                        .ok_or_else(|| AiEngineError::ModelNotFound(model_id.clone()))?;
+                        .get_by_key(model_id)
+                        .ok_or(AiEngineError::ModelNotFound(model_id.to_string()))?;
                     let model_handle = push_or_get_model_handle(&mut models, model_info);
-                    let model = models.get(model_handle.0).ok_or_else(|| {
-                        AiEngineError::InternalError("compiled model handle out of bounds".into())
-                    })?;
+                    let model = models
+                        .get(model_handle.0)
+                        .ok_or(AiEngineError::InternalError(
+                            "compiled model handle out of bounds".into(),
+                        ))?;
                     let (preprocessor, postprocessor) = resolve_stage_processors(
                         model.info.as_ref(),
                         *confidence_threshold,
@@ -156,7 +156,7 @@ mod inner {
                     )?;
                     let input_shape: Arc<[i64]> = input_size
                         .map(|(w, h)| Arc::from([1_i64, 3, h as i64, w as i64]))
-                        .unwrap_or_else(|| Arc::clone(&model.default_input_shape));
+                        .unwrap_or(Arc::clone(&model.default_input_shape));
                     stages.push(CompiledStage::Inference(CompiledInferenceStage {
                         stage: stage_handle,
                         model: model_handle,
@@ -191,14 +191,13 @@ mod inner {
         }
 
         Ok(CompiledPipeline {
-            id: config.id.clone(),
             name: Arc::<str>::from(config.name.as_str()),
             sampling: config.sampling.clone(),
-            roi: config.roi,
-            roi_regions: config.roi_regions.clone().into(),
+            roi: None,
+            roi_regions: config.roi_regions.0.clone().into(),
             stages: stages.into(),
             alarm_rules: config.alarm_rules.clone().into(),
-            annotation: config.annotation.clone(),
+            annotation: Arc::new(config.annotation.clone()),
             models: models.into(),
         })
     }
@@ -217,12 +216,14 @@ mod inner {
 
         let default_input_shape: Arc<[i64]> = info
             .inputs
-            .first()
+            .as_ref()
+            .and_then(|inputs| inputs.0.first())
             .map(|input| input.shape.clone().into())
-            .unwrap_or_else(|| Arc::from([1_i64, 3, 640, 640]));
+            .unwrap_or(Arc::from([1_i64, 3, 640, 640]));
         let default_input_dtype = info
             .inputs
-            .first()
+            .as_ref()
+            .and_then(|inputs| inputs.0.first())
             .map(|input| input.dtype)
             .unwrap_or(TensorDType::Float32);
         let handle = ModelHandle(models.len());

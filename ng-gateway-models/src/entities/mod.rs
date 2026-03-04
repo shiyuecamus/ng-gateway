@@ -4,6 +4,7 @@ use downcast_rs::{impl_downcast, DowncastSync};
 
 use crate::enums::common::{EntityType, Status};
 pub mod action;
+pub mod ai;
 pub mod app;
 pub mod app_ext;
 pub mod app_sub;

@@ -447,11 +447,10 @@ impl SouthwardHandle for Dnp3Handle {
                                 self.points_map.remove(&(old_group, old_index));
                             }
                         }
-                        let dev_name = device_name.as_ref().cloned().or_else(|| {
-                            self.device_name_index
-                                .get(&dp.device_id)
-                                .map(|v| Arc::clone(v.value()))
-                        });
+                        let dev_name = device_name.as_ref().cloned().or(self
+                            .device_name_index
+                            .get(&dp.device_id)
+                            .map(|v| Arc::clone(v.value())));
                         if let Some(name) = dev_name {
                             let meta = PointMeta {
                                 point_id: dp.id,
@@ -477,11 +476,10 @@ impl SouthwardHandle for Dnp3Handle {
 
                 for p in added {
                     if let Some(dp) = p.downcast_ref::<Dnp3Point>() {
-                        let dev_name = device_name.as_ref().cloned().or_else(|| {
-                            self.device_name_index
-                                .get(&dp.device_id)
-                                .map(|v| Arc::clone(v.value()))
-                        });
+                        let dev_name = device_name.as_ref().cloned().or(self
+                            .device_name_index
+                            .get(&dp.device_id)
+                            .map(|v| Arc::clone(v.value())));
                         if let Some(name) = dev_name {
                             let meta = PointMeta {
                                 point_id: dp.id,

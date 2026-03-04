@@ -12,7 +12,7 @@ use crate::{
     session::CameraSession,
     types::{CameraChannel, CameraProtocol},
 };
-use ng_gateway_ai::api::{AiEngineApi, PipelineConfig};
+use ng_gateway_ai::api::AiEngineApi;
 use ng_gateway_sdk::{
     supervision::{Connector, Session, SessionContext},
     CollectorConcurrencyProfile, DriverError, FailureKind, FailurePhase, SouthwardInitContext,
@@ -60,29 +60,21 @@ impl Connector for CameraConnector {
                 DriverError::ConfigurationError("Invalid CameraChannel type".to_string())
             })?;
 
-        // 3. Register the pipeline for this channel
-        // The AI engine needs to know about this channel's pipeline configuration.
-        // Pipeline registration is idempotent; reconnects re-register safely.
-        ai_engine
-            .register_pipeline(
-                channel.id,
-                PipelineConfig {
-                    id: channel.config.pipeline_id.clone(),
-                    name: format!("camera-{}", channel.id),
-                    sampling: channel.config.sampling.clone(),
-                    roi: None,
-                    roi_regions: vec![],
-                    stages: vec![],
-                    alarm_rules: vec![],
-                    annotation: Default::default(),
-                },
-            )
-            .map_err(|e| {
-                DriverError::ConfigurationError(format!(
-                    "Invalid AI pipeline configuration for channel {}: {}",
-                    channel.id, e
-                ))
-            })?;
+        // 3. Verify pipeline binding for this channel.
+        //
+        // Pipeline bindings are established at the API level when creating or
+        // updating a channel. By the time the connector is instantiated, the
+        // binding should already be active in the PipelineRegistry.
+        if ai_engine
+            .pipelines()
+            .get_channel_pipeline(channel.id)
+            .is_none()
+        {
+            return Err(DriverError::ConfigurationError(format!(
+                "No AI pipeline bound to channel {} — bind pipeline {} via API first",
+                channel.id, channel.config.pipeline_id
+            )));
+        }
 
         // 4. Create shared handle
         let handle = Arc::new(CameraHandle::new(

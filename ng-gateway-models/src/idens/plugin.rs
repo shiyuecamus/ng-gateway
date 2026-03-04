@@ -127,13 +127,13 @@ fn create_plugin_table(_: DatabaseBackend) -> TableCreateStatement {
             ColumnDef::new(Plugin::CreatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("创建时间"),
+                .comment("Created at timestamp"),
         )
         .col(
             ColumnDef::new(Plugin::UpdatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("更新时间"),
+                .comment("Updated at timestamp"),
         )
         .to_owned()
 }

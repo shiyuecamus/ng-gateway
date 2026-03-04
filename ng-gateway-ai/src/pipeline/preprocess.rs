@@ -11,7 +11,7 @@ mod inner {
     use fast_image_resize::{images::Image, PixelType, Resizer};
     use ndarray::Array4;
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::{model::TensorDType, types::BoundingBox};
+    use ng_gateway_models::{domain::prelude::BoundingBox, enums::ai::TensorDType};
     use rayon::prelude::*;
     use std::borrow::Cow;
 
@@ -191,9 +191,9 @@ mod inner {
             let h = target_h as usize;
             let w = target_w as usize;
             let mut tensor = Array4::<f32>::zeros((1, channels, h, w));
-            let tensor_data = tensor.as_slice_mut().ok_or_else(|| {
-                AiEngineError::PreprocessError("tensor storage must be contiguous".into())
-            })?;
+            let tensor_data = tensor.as_slice_mut().ok_or(AiEngineError::PreprocessError(
+                "tensor storage must be contiguous".into(),
+            ))?;
             let plane_size = h * w;
             fill_tensor_with_normalized_pad(
                 tensor_data,
@@ -413,6 +413,10 @@ mod inner {
     // ── Helpers ─────────────────────────────────────────────────────
 
     /// SIMD-accelerated image resize using `fast_image_resize`.
+    ///
+    /// Returns `Cow::Borrowed` when no resize is needed (zero-copy fast path).
+    /// When resizing, uses `from_slice_u8` on a mutable copy to avoid an
+    /// extra allocation inside the Image constructor.
     fn resize_rgb<'a>(
         frame: &'a DecodedFrame,
         new_w: u32,
@@ -422,13 +426,9 @@ mod inner {
             return Ok(Cow::Borrowed(frame.data.as_ref()));
         }
 
-        let src = Image::from_vec_u8(
-            frame.width,
-            frame.height,
-            frame.data.as_ref().to_vec(),
-            PixelType::U8x3,
-        )
-        .map_err(|e| AiEngineError::PreprocessError(format!("source image error: {e}")))?;
+        let mut src_buf = frame.data.as_ref().to_vec();
+        let src = Image::from_slice_u8(frame.width, frame.height, &mut src_buf, PixelType::U8x3)
+            .map_err(|e| AiEngineError::PreprocessError(format!("source image error: {e}")))?;
 
         let mut dst = Image::new(new_w, new_h, PixelType::U8x3);
         let mut resizer = Resizer::new();

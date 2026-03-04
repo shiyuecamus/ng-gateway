@@ -154,7 +154,7 @@ impl CameraHandle {
                                     // by the sampler for that mode.
                                 }
 
-                                if !ai_engine.has_capacity(&channel.config.pipeline_id) {
+                                if !ai_engine.runtime().has_capacity(&channel.id) {
                                     tracing::trace!(
                                         seq,
                                         pipeline = %channel.config.pipeline_id,
@@ -178,7 +178,7 @@ impl CameraHandle {
                                     roi: None,
                                 };
 
-                                match ai_engine.analyze_frame(request).await {
+                                match ai_engine.runtime().analyze_frame(request).await {
                                     Ok(result) => {
                                         sampler.on_feedback(
                                             Some(result.inference_latency.as_secs_f64()),
@@ -466,7 +466,15 @@ fn convert_analysis_to_northward(
             device.id(),
             device.device_name().to_string(),
             alarm.alarm_type.to_string(),
-            alarm.severity.into(),
+            match alarm.severity {
+                ng_gateway_ai::api::AlarmSeverity::Critical => {
+                    ng_gateway_sdk::AlarmSeverity::Critical
+                }
+                ng_gateway_ai::api::AlarmSeverity::Warning => {
+                    ng_gateway_sdk::AlarmSeverity::Warning
+                }
+                ng_gateway_ai::api::AlarmSeverity::Info => ng_gateway_sdk::AlarmSeverity::Info,
+            },
             alarm.description.to_string(),
         )));
     }

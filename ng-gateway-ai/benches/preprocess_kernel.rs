@@ -10,7 +10,7 @@ use ng_gateway_ai::{
     },
     DecodedFrame,
 };
-use ng_gateway_models::ai::model::TensorDType;
+use ng_gateway_models::enums::ai::TensorDType;
 use std::hint::black_box;
 
 /// Build a deterministic RGB frame payload for benchmark reproducibility.

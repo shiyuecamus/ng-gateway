@@ -5,6 +5,37 @@ pub use crate::entities::{
         ActiveModel as ActionActiveModel, Column as ActionColumn, Entity as Action,
         Model as ActionModel, Parameter, Parameters,
     },
+    ai::{
+        alarm_event::{
+            ActiveModel as AlarmEventActiveModel, Column as AlarmEventColumn, Entity as AlarmEvent,
+            Model as AlarmEventModel,
+        },
+        alarm_rule::{
+            ActiveModel as AlarmRuleActiveModel, AlarmCondition, Column as AlarmRuleColumn,
+            Entity as AlarmRule, Model as AlarmRuleModel,
+        },
+        algorithm::{
+            ActiveModel as AlgorithmActiveModel, Column as AlgorithmColumn, Entity as Algorithm,
+            Model as AlgorithmModel,
+        },
+        model::{
+            ActiveModel as ModelActiveModel, Column as ModelColumn, Entity as Model, Labels,
+            Model as ModelModel, TensorDesc, TensorDescs,
+        },
+        pipeline::{
+            ActiveModel as PipelineActiveModel, AnnotationConfig, Column as PipelineColumn,
+            Entity as Pipeline, Model as PipelineModel, NormalizationConfig, PostProcessorConfig,
+            PreProcessorConfig, RegionOfInterest, RoiRegions,
+        },
+        pipeline_binding::{
+            ActiveModel as PipelineBindingActiveModel, Column as PipelineBindingColumn,
+            Entity as PipelineBinding, Model as PipelineBindingModel,
+        },
+        pipeline_stage::{
+            ActiveModel as PipelineStageActiveModel, Column as PipelineStageColumn,
+            Entity as PipelineStage, Model as PipelineStageModel, StageConfig,
+        },
+    },
     app::{ActiveModel as AppActiveModel, Column as AppColumn, Entity as App, Model as AppModel},
     app_ext::{
         ActiveModel as AppExtActiveModel, Column as AppExtColumn, Entity as AppExt,

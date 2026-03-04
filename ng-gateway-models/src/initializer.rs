@@ -110,6 +110,13 @@ pub fn initializers() -> Vec<Box<dyn NGInitializer>> {
         Box::new(idens::app::App::Table),
         Box::new(idens::app_sub::AppSub::Table),
         Box::new(idens::app_ext::AppExt::Table),
+        Box::new(idens::model::Model::Table),
+        Box::new(idens::algorithm::Algorithm::Table),
+        Box::new(idens::pipeline::Pipeline::Table),
+        Box::new(idens::pipeline_stage::PipelineStage::Table),
+        Box::new(idens::alarm_rule::AlarmRule::Table),
+        Box::new(idens::pipeline_binding::PipelineBinding::Table),
+        Box::new(idens::alarm_event::AlarmEvent::Table),
     ];
 
     initializers.sort_by_key(|init| init.order());

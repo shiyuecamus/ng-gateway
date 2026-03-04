@@ -244,6 +244,27 @@ version = "0.28"
 version = "0.14"
 [workspace.dependencies.prost]
 version = "0.14"
+[workspace.dependencies.scopeguard]
+version = "1"
+[workspace.dependencies.ndarray]
+version = "0.17"
+[workspace.dependencies.image]
+version = "0.25"
+default-features = false
+[workspace.dependencies.fast_image_resize]
+version = "6"
+[workspace.dependencies.rayon]
+version = "1"
+[workspace.dependencies.ffmpeg-next]
+version = "8"
+[workspace.dependencies.wasmtime]
+version = "42"
+[workspace.dependencies.wasmparser]
+version = "0.245"
+[workspace.dependencies.criterion]
+version = "0.8.2"
+[workspace.dependencies.ort]
+version = "2.0.0-rc.11"
 
 # Tls
 [workspace.dependencies.rustls]

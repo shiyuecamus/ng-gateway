@@ -5,7 +5,7 @@ mod inner {
     use crate::decoded::{DecodedFrame, FrameView};
     use bytes::Bytes;
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::types::RegionOfInterest;
+    use ng_gateway_models::entities::ai::pipeline::RegionOfInterest;
 
     /// Cropping plan for one ROI on a source frame.
     #[derive(Debug, Clone, Copy)]

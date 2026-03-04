@@ -1,274 +1,423 @@
-//! Model registry — manages AI model lifecycle.
+//! Model registry — write-through cache with full lifecycle management.
 //!
-//! Scans a directory for `.onnx` files at startup, extracts input/output
-//! metadata via ONNX Runtime, and provides lazy loading on first use.
+//! The registry is a write-through cache: all mutations go to the database
+//! first, then the in-memory cache is updated. On startup the cache is
+//! hydrated from DB records and validated against disk artifacts.
+//!
+//! This module implements [`AiModelRegistry`] and owns:
+//! - Probe (via [`ProberRegistry`])
+//! - Install (probe → DB insert → atomic file move → cache)
+//! - Load / Unload (delegated to [`ModelBackend`])
+//! - Update metadata (DB update → cache refresh)
+//! - Uninstall (backend unload → file delete → DB delete → cache evict)
 
 #[cfg(feature = "engine")]
 mod inner {
+    use crate::{
+        decoded::DecodedFrame,
+        inference::backend::{InferTiming, ModelBackend},
+        model::prober::ProberRegistry,
+        pipeline::{
+            postprocess::RawInferenceOutput,
+            preprocess::{CoordinateTransform, PreProcessor},
+        },
+    };
     use dashmap::DashMap;
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::model::{
-        ModelFormat, ModelInfo, ModelTask, ModelUpdateRequest, TensorDesc,
+    use ng_gateway_models::{
+        domain::prelude::{
+            ModelInfo, ModelInstallRequest, ModelPageParams, ModelProbeInfo, NewModel, PageResult,
+            UpdateModel,
+        },
+        enums::ai::{ModelFormat, TensorDType},
+        AiModelRegistry,
     };
+    use ng_gateway_repository::ModelRepository;
+    use sea_orm::IntoActiveModel;
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
     };
     use tracing::{info, warn};
 
-    /// Model registry — manages AI model metadata and lazy loading.
+    /// Model registry — DB-backed write-through cache with full lifecycle.
+    ///
+    /// Keyed by `model_id` (i32). All mutations are DB-first, then cache.
+    /// Maintains a secondary `key_index` for O(1) lookup by `model_key`,
+    /// which is critical for the per-frame inference hot path.
     pub struct ModelRegistry {
-        /// Model metadata cache keyed by model id.
-        models: DashMap<String, Arc<ModelInfo>>,
-        /// Root directory for model files.
+        /// Cached model info keyed by model id.
+        cache: DashMap<i32, Arc<ModelInfo>>,
+        /// Reverse index: model_key -> model_id for O(1) key-based lookup.
+        key_index: DashMap<String, i32>,
+        /// Root directory for model artifact files.
         models_dir: PathBuf,
+        /// Prober registry for extracting metadata from model files.
+        prober_registry: Arc<ProberRegistry>,
+        /// Inference backends keyed by model format.
+        backends: Vec<Arc<dyn ModelBackend>>,
     }
 
     impl ModelRegistry {
-        /// Get model info by ID (synchronous helper for hot registration paths).
-        #[inline]
-        pub fn get_shared(&self, model_id: &str) -> Option<Arc<ModelInfo>> {
-            self.models.get(model_id).map(|r| Arc::clone(r.value()))
-        }
-
-        /// Create a new registry by scanning the models directory.
+        /// Initialize from database records (DB is the source of truth).
         ///
-        /// Discovered `.onnx` files are probed for metadata. Models that
-        /// fail to probe are logged as warnings and skipped.
-        pub async fn new(models_dir: &Path) -> Result<Self, AiEngineError> {
-            let registry = Self {
-                models: DashMap::new(),
-                models_dir: models_dir.to_path_buf(),
-            };
-
-            if models_dir.exists() {
-                let mut entries = tokio::fs::read_dir(models_dir)
-                    .await
-                    .map_err(|e| AiEngineError::IoError(e.to_string()))?;
-
-                while let Some(entry) = entries
-                    .next_entry()
-                    .await
-                    .map_err(|e| AiEngineError::IoError(e.to_string()))?
-                {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|ext| ext == "onnx") {
-                        match Self::probe_model(&path).await {
-                            Ok(info) => {
-                                info!(model_id = %info.id, path = %path.display(), "discovered AI model");
-                                registry.models.insert(info.id.clone(), Arc::new(info));
-                            }
-                            Err(e) => {
-                                warn!(path = %path.display(), error = %e, "failed to probe model");
-                            }
-                        }
-                    }
-                }
-            } else {
-                info!(dir = %models_dir.display(), "AI models directory does not exist, creating");
-                tokio::fs::create_dir_all(models_dir)
+        /// Loads all model records and validates that artifact files exist.
+        /// Models whose files are missing are logged as warnings and skipped.
+        pub async fn new(
+            models_dir: PathBuf,
+            prober_registry: Arc<ProberRegistry>,
+            backends: Vec<Arc<dyn ModelBackend>>,
+        ) -> Result<Self, AiEngineError> {
+            if !models_dir.exists() {
+                info!(dir = %models_dir.display(), "models directory does not exist, creating");
+                tokio::fs::create_dir_all(&models_dir)
                     .await
                     .map_err(|e| AiEngineError::IoError(e.to_string()))?;
             }
 
+            let registry = Self {
+                cache: DashMap::new(),
+                key_index: DashMap::new(),
+                models_dir,
+                prober_registry,
+                backends,
+            };
+
+            let db_models = ModelRepository::list_all()
+                .await
+                .map_err(|e| AiEngineError::IoError(e.to_string()))?;
+
+            for entity in db_models {
+                let info = ModelInfo::from(entity);
+                let artifact_path = Path::new(&info.path);
+                if artifact_path.exists() {
+                    registry.key_index.insert(info.model_key.clone(), info.id);
+                    registry.cache.insert(info.id, Arc::new(info));
+                } else {
+                    warn!(
+                        model_id = info.id,
+                        model_key = %info.model_key,
+                        path = %info.path,
+                        "model artifact missing while restoring from DB"
+                    );
+                }
+            }
+
             info!(
-                count = registry.models.len(),
-                "AI model registry initialized"
+                count = registry.cache.len(),
+                "model registry initialized from DB"
             );
             Ok(registry)
         }
 
-        /// Probe a model file to extract metadata.
-        ///
-        /// Phase 1: uses file-level metadata only. Full ONNX Runtime probing
-        /// (input/output shapes) happens when the model is first loaded.
-        async fn probe_model(path: &Path) -> Result<ModelInfo, AiEngineError> {
-            let file_name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            let metadata = tokio::fs::metadata(path)
-                .await
-                .map_err(|e| AiEngineError::IoError(e.to_string()))?;
-
-            // Try to load a sidecar labels file: `<model_name>.labels.txt`
-            let labels_path = path.with_extension("labels.txt");
-            let labels = if labels_path.exists() {
-                tokio::fs::read_to_string(&labels_path)
-                    .await
-                    .map(|s| {
-                        s.lines()
-                            .map(|l| l.trim().to_string())
-                            .filter(|l| !l.is_empty())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            // Try to load a sidecar config: `<model_name>.json`
-            let config_path = path.with_extension("json");
-            let (task, inputs, outputs) = if config_path.exists() {
-                Self::parse_sidecar_config(&config_path).await.unwrap_or((
-                    ModelTask::ObjectDetection,
-                    Vec::new(),
-                    Vec::new(),
-                ))
-            } else {
-                (ModelTask::ObjectDetection, Vec::new(), Vec::new())
-            };
-
-            Ok(ModelInfo {
-                id: file_name.clone(),
-                name: file_name,
-                version: "1.0.0".to_string(),
-                format: ModelFormat::Onnx,
-                path: path.to_path_buf(),
-                inputs,
-                outputs,
-                task,
-                labels,
-                default_preprocess: None,
-                default_postprocess: None,
-                loaded: false,
-                file_size: metadata.len(),
-            })
+        /// Look up a model by id from cache.
+        #[inline]
+        pub fn get(&self, model_id: i32) -> Option<Arc<ModelInfo>> {
+            self.cache.get(&model_id).map(|r| Arc::clone(r.value()))
         }
 
-        /// Parse an optional sidecar JSON config for model metadata.
-        ///
-        /// Expected format:
-        /// ```json
-        /// {
-        ///   "task": "object_detection",
-        ///   "inputs": [{"name": "images", "shape": [1,3,640,640], "dtype": "float32"}],
-        ///   "outputs": [{"name": "output0", "shape": [1,84,8400], "dtype": "float32"}]
-        /// }
-        /// ```
-        async fn parse_sidecar_config(
-            path: &Path,
-        ) -> Result<(ModelTask, Vec<TensorDesc>, Vec<TensorDesc>), AiEngineError> {
-            let content = tokio::fs::read_to_string(path)
-                .await
-                .map_err(|e| AiEngineError::IoError(e.to_string()))?;
-
-            #[derive(serde::Deserialize)]
-            struct SidecarConfig {
-                #[serde(default)]
-                task: Option<ModelTask>,
-                #[serde(default)]
-                inputs: Vec<TensorDesc>,
-                #[serde(default)]
-                outputs: Vec<TensorDesc>,
-            }
-
-            let cfg: SidecarConfig = serde_json::from_str(&content)
-                .map_err(|e| AiEngineError::IoError(format!("sidecar config parse: {e}")))?;
-
-            Ok((
-                cfg.task.unwrap_or(ModelTask::ObjectDetection),
-                cfg.inputs,
-                cfg.outputs,
-            ))
+        /// Look up a model by model_key from cache using O(1) reverse index.
+        pub fn get_by_key(&self, model_key: &str) -> Option<Arc<ModelInfo>> {
+            let model_id = *self.key_index.get(model_key)?;
+            self.cache.get(&model_id).map(|r| Arc::clone(r.value()))
         }
 
-        /// Get model info by ID.
-        pub async fn get(&self, model_id: &str) -> Option<Arc<ModelInfo>> {
-            self.get_shared(model_id)
+        /// List all cached models.
+        pub fn list_all(&self) -> Vec<Arc<ModelInfo>> {
+            self.cache.iter().map(|r| Arc::clone(r.value())).collect()
         }
 
-        /// List all registered models.
-        pub async fn list_all(&self) -> Result<Vec<Arc<ModelInfo>>, AiEngineError> {
-            Ok(self
-                .models
-                .iter()
-                .map(|entry| Arc::clone(entry.value()))
-                .collect())
+        /// Number of cached models.
+        pub fn len(&self) -> usize {
+            self.cache.len()
         }
 
-        /// Mark a model as loaded in the registry.
-        pub fn mark_loaded(&self, model_id: &str) {
-            if let Some(mut entry) = self.models.get_mut(model_id) {
-                Arc::make_mut(entry.value_mut()).loaded = true;
-            }
-        }
-
-        /// Mark a model as unloaded in the registry.
-        pub fn mark_unloaded(&self, model_id: &str) {
-            if let Some(mut entry) = self.models.get_mut(model_id) {
-                Arc::make_mut(entry.value_mut()).loaded = false;
-            }
-        }
-
-        /// Update model metadata (e.g., after ONNX Runtime probing reveals shapes).
-        pub fn update_tensor_info(
-            &self,
-            model_id: &str,
-            inputs: Vec<TensorDesc>,
-            outputs: Vec<TensorDesc>,
-        ) {
-            if let Some(mut entry) = self.models.get_mut(model_id) {
-                let model = Arc::make_mut(entry.value_mut());
-                model.inputs = inputs;
-                model.outputs = outputs;
-            }
-        }
-
-        /// Insert or replace model metadata entry.
-        pub fn upsert(&self, model_info: ModelInfo) {
-            self.models
-                .insert(model_info.id.clone(), Arc::new(model_info));
-        }
-
-        /// Insert or replace model metadata entry using shared ownership.
-        pub fn upsert_shared(&self, model_info: Arc<ModelInfo>) {
-            self.models
-                .insert(model_info.id.clone(), Arc::clone(&model_info));
-        }
-
-        /// Remove model metadata by identifier.
-        pub fn remove(&self, model_id: &str) -> Option<Arc<ModelInfo>> {
-            self.models.remove(model_id).map(|(_, info)| info)
-        }
-
-        /// Update mutable model metadata fields from API update request.
-        pub fn update_model_metadata(
-            &self,
-            model_id: &str,
-            request: ModelUpdateRequest,
-        ) -> Result<(), AiEngineError> {
-            let mut entry = self
-                .models
-                .get_mut(model_id)
-                .ok_or_else(|| AiEngineError::ModelNotFound(model_id.to_string()))?;
-
-            if let Some(v) = request.name {
-                Arc::make_mut(entry.value_mut()).name = v;
-            }
-            if let Some(v) = request.version {
-                Arc::make_mut(entry.value_mut()).version = v;
-            }
-            if let Some(v) = request.task {
-                Arc::make_mut(entry.value_mut()).task = v;
-            }
-            if let Some(v) = request.labels {
-                Arc::make_mut(entry.value_mut()).labels = v;
-            }
-            if let Some(v) = request.default_preprocess {
-                Arc::make_mut(entry.value_mut()).default_preprocess = Some(v);
-            }
-            if let Some(v) = request.default_postprocess {
-                Arc::make_mut(entry.value_mut()).default_postprocess = Some(v);
-            }
-            Ok(())
+        /// Check if the cache is empty.
+        pub fn is_empty(&self) -> bool {
+            self.cache.is_empty()
         }
 
         /// Get the models directory path.
         pub fn models_dir(&self) -> &Path {
             &self.models_dir
+        }
+
+        /// Find the appropriate backend for a model format.
+        fn backend_for(&self, format: ModelFormat) -> Option<&dyn ModelBackend> {
+            self.backends
+                .iter()
+                .find(|b| b.format() == format)
+                .map(|b| b.as_ref())
+        }
+
+        /// Total loaded model count across all backends.
+        pub fn total_loaded_count(&self) -> usize {
+            self.backends.iter().map(|b| b.loaded_count()).sum()
+        }
+
+        /// Total estimated memory across all backends.
+        pub fn total_estimated_memory_bytes(&self) -> u64 {
+            self.backends
+                .iter()
+                .map(|b| b.estimated_memory_bytes())
+                .sum()
+        }
+
+        /// Run preprocessing + inference on a decoded frame, routing to the
+        /// correct backend based on model format.
+        ///
+        /// This is the primary inference entry point for the engine hot path,
+        /// replacing the legacy `InferencePool::infer_compiled`.
+        pub async fn infer_by_key(
+            &self,
+            model_key: &str,
+            frame: &DecodedFrame,
+            preprocessor: &dyn PreProcessor,
+            input_shape: &[i64],
+            input_dtype: TensorDType,
+        ) -> Result<(RawInferenceOutput, CoordinateTransform, InferTiming), AiEngineError> {
+            let info = self
+                .get_by_key(model_key)
+                .ok_or(AiEngineError::ModelNotFound(model_key.to_string()))?;
+
+            let backend = self
+                .backend_for(info.format)
+                .ok_or(AiEngineError::ModelLoadError(format!(
+                    "no backend for format {:?}",
+                    info.format
+                )))?;
+
+            if !backend.is_loaded(info.id) {
+                backend.load(info.id, Path::new(&info.path)).await?;
+            }
+
+            backend
+                .infer(info.id, frame, preprocessor, input_shape, input_dtype)
+                .await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AiModelRegistry for ModelRegistry {
+        async fn probe_model(&self, file_path: &Path) -> Result<ModelProbeInfo, AiEngineError> {
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+            let prober_registry = Arc::clone(&self.prober_registry);
+            let ext_owned = ext.to_string();
+            let path = file_path.to_path_buf();
+
+            tokio::task::spawn_blocking(move || {
+                let prober = prober_registry.find_by_extension(&ext_owned).ok_or(
+                    AiEngineError::ModelLoadError(format!(
+                        "unsupported model format: .{ext_owned}"
+                    )),
+                )?;
+                prober.probe(&path)
+            })
+            .await
+            .map_err(|e| AiEngineError::ModelLoadError(format!("probe join error: {e}")))?
+        }
+
+        async fn install_model(
+            &self,
+            file_path: &Path,
+            user_meta: ModelInstallRequest,
+        ) -> Result<ModelInfo, AiEngineError> {
+            use ng_gateway_models::entities::ai::model::{Labels, TensorDescs};
+
+            // 1. Probe
+            let probe_info = self.probe_model(file_path).await?;
+
+            // 2. Derive model_key from filename stem
+            let file_stem = file_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("model");
+            let model_key = user_meta
+                .name
+                .as_deref()
+                .map(|n| n.to_lowercase().replace(' ', "-"))
+                .unwrap_or(file_stem.to_string());
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("onnx");
+            let dest_filename = format!("{model_key}.{ext}");
+            let dest_path = self.models_dir.join(&dest_filename);
+
+            // 3. Determine task from probe or user override
+            let task = user_meta
+                .task
+                .or(probe_info.inferred_task)
+                .unwrap_or(ng_gateway_models::enums::ai::ModelTask::ObjectDetection);
+
+            // 4. Build labels from probe or user override
+            let labels = user_meta
+                .labels
+                .map(Labels)
+                .or(probe_info.labels.map(Labels));
+
+            // 5. Build NewModel
+            let new_model = NewModel {
+                model_key: model_key.clone(),
+                name: user_meta.name.unwrap_or(file_stem.to_string()),
+                version: user_meta.version.unwrap_or("1.0.0".into()),
+                task,
+                format: probe_info.format,
+                path: dest_path.to_string_lossy().to_string(),
+                labels,
+                default_preprocess: user_meta
+                    .default_preprocess
+                    .or(probe_info.recommended_preprocess),
+                default_postprocess: user_meta.default_postprocess.or(probe_info
+                    .recommended_postprocessor
+                    .map(
+                        |t| ng_gateway_models::entities::ai::pipeline::PostProcessorConfig {
+                            r#type: Some(t),
+                            top_k: None,
+                            apply_softmax: None,
+                            max_detections: None,
+                            num_keypoints: None,
+                            anomaly_threshold: None,
+                            nms_variant: None,
+                            soft_nms_sigma: None,
+                            detection_parallel_threshold: None,
+                            nms_prescreen_multiplier: None,
+                            classification_small_class_fast_path: None,
+                            segmentation_parallel_min_pixels: None,
+                        },
+                    )),
+                inputs: TensorDescs(probe_info.inputs),
+                outputs: TensorDescs(probe_info.outputs),
+                size: probe_info.size,
+                checksum: probe_info.checksum.clone(),
+            };
+
+            let entity = ModelRepository::create(
+                new_model.into_active_model(),
+                None::<&sea_orm::DatabaseConnection>,
+            )
+            .await
+            .map_err(|e| AiEngineError::IoError(format!("DB insert: {e}")))?;
+
+            // 6. Copy artifact to models directory
+            if let Err(e) = tokio::fs::copy(file_path, &dest_path).await {
+                let _ =
+                    ModelRepository::delete_by_key::<sea_orm::DatabaseConnection>(&model_key, None)
+                        .await;
+                return Err(AiEngineError::IoError(format!("copy model file: {e}")));
+            }
+
+            // 7. Cache + reverse index
+            let info = ModelInfo::from(entity);
+            self.key_index.insert(info.model_key.clone(), info.id);
+            self.cache.insert(info.id, Arc::new(info.clone()));
+
+            info!(
+                model_id = info.id,
+                model_key = %info.model_key,
+                format = ?info.format,
+                "model installed"
+            );
+            Ok(info)
+        }
+
+        async fn uninstall_model(&self, model_id: i32) -> Result<(), AiEngineError> {
+            let info = self
+                .get(model_id)
+                .ok_or(AiEngineError::ModelNotFound(format!("model {model_id}")))?;
+
+            // 1. Unload from backend if loaded
+            if let Some(backend) = self.backend_for(info.format) {
+                backend.unload(model_id);
+            }
+
+            // 2. Remove file (best-effort)
+            let _ = tokio::fs::remove_file(&info.path).await;
+
+            // 3. DB delete
+            ModelRepository::delete_by_key::<sea_orm::DatabaseConnection>(&info.model_key, None)
+                .await
+                .map_err(|e| AiEngineError::IoError(format!("DB delete: {e}")))?;
+
+            // 4. Evict cache + reverse index
+            self.key_index.remove(&info.model_key);
+            self.cache.remove(&model_id);
+
+            info!(model_id, model_key = %info.model_key, "model uninstalled");
+            Ok(())
+        }
+
+        async fn update_model(&self, model: UpdateModel) -> Result<ModelInfo, AiEngineError> {
+            let model_id = model.id;
+            let existing = self
+                .get(model_id)
+                .ok_or(AiEngineError::ModelNotFound(format!("model {model_id}")))?;
+
+            let entity = ModelRepository::update(
+                model.into_active_model(),
+                None::<&sea_orm::DatabaseConnection>,
+            )
+            .await
+            .map_err(|e| AiEngineError::IoError(format!("DB update: {e}")))?;
+
+            let info = ModelInfo::from(entity);
+            if existing.model_key != info.model_key {
+                self.key_index.remove(&existing.model_key);
+            }
+            self.key_index.insert(info.model_key.clone(), info.id);
+            self.cache.insert(info.id, Arc::new(info.clone()));
+            Ok(info)
+        }
+
+        async fn load_model(&self, model_id: i32) -> Result<(), AiEngineError> {
+            let info = self
+                .get(model_id)
+                .ok_or(AiEngineError::ModelNotFound(format!("model {model_id}")))?;
+
+            let backend = self
+                .backend_for(info.format)
+                .ok_or(AiEngineError::ModelLoadError(format!(
+                    "no backend for format {:?}",
+                    info.format
+                )))?;
+
+            if backend.is_loaded(model_id) {
+                return Ok(());
+            }
+
+            backend.load(model_id, Path::new(&info.path)).await?;
+            info!(model_id, model_key = %info.model_key, "model loaded into backend");
+            Ok(())
+        }
+
+        async fn unload_model(&self, model_id: i32) -> Result<(), AiEngineError> {
+            let info = self
+                .get(model_id)
+                .ok_or(AiEngineError::ModelNotFound(format!("model {model_id}")))?;
+
+            if let Some(backend) = self.backend_for(info.format) {
+                backend.unload(model_id);
+                info!(model_id, model_key = %info.model_key, "model unloaded from backend");
+            }
+            Ok(())
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, AiEngineError> {
+            Ok(self.list_all().into_iter().map(|m| (*m).clone()).collect())
+        }
+
+        async fn get_model(&self, model_id: i32) -> Result<Option<ModelInfo>, AiEngineError> {
+            Ok(self.get(model_id).map(|m| (*m).clone()))
+        }
+
+        async fn page_models(
+            &self,
+            params: ModelPageParams,
+        ) -> Result<PageResult<ModelInfo>, AiEngineError> {
+            ModelRepository::page(params)
+                .await
+                .map_err(|e| AiEngineError::IoError(e.to_string()))
         }
     }
 }

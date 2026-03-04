@@ -15,10 +15,9 @@ use ng_gateway_common::metrics::{
     southward::SouthwardChannelMetricHandles, NGMetricsHub, SouthwardChannelSnapshotParams,
 };
 use ng_gateway_models::{
-    ai::api::AiEngineApi,
     core::metrics::{ChannelStatsSnapshot, SouthwardManagerMetricsSnapshot},
     settings::Southward,
-    SouthwardManager,
+    AiEngineApi, SouthwardManager,
 };
 use ng_gateway_sdk::{ConnectionState, DeviceState, RuntimeAction, RuntimeDelta, RuntimePoint};
 use std::sync::{atomic::AtomicUsize, Arc};

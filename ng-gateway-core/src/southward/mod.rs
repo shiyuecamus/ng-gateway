@@ -20,9 +20,9 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use ng_gateway_common::metrics::{southward::SouthwardChannelMetricHandles, NGMetricsHub};
 use ng_gateway_models::{
-    ai::api::AiEngineApi,
     entities::prelude::{ActionModel, ChannelModel, DeviceModel, PointModel},
     settings::Southward,
+    AiEngineApi,
 };
 use ng_gateway_sdk::{
     ConnectionState, DeviceState, Driver, DriverFactory, NGValue, RuntimeChannel, RuntimeDevice,

@@ -16,6 +16,8 @@ pub mod postprocess;
 #[cfg(feature = "engine")]
 pub mod preprocess;
 #[cfg(feature = "engine")]
+pub mod registry;
+#[cfg(feature = "engine")]
 pub mod roi;
 #[cfg(feature = "engine")]
 pub mod tracker;

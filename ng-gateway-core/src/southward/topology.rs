@@ -20,7 +20,7 @@ use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use ng_gateway_common::metrics::southward::SouthwardChannelMetricHandles;
 use ng_gateway_error::{NGError, NGResult};
-use ng_gateway_models::{ai::api::AiEngineApi, entities::prelude::ChannelModel};
+use ng_gateway_models::{entities::prelude::ChannelModel, AiEngineApi};
 use ng_gateway_sdk::{
     supervision::ObserverFactory, ConnectionState, DeviceState, Driver, Extensions, Phase,
     RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimePoint, SouthwardInitContext,

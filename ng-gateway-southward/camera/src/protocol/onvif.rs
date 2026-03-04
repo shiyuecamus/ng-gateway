@@ -250,7 +250,7 @@ impl OnvifClient {
         })?;
 
         if !status.is_success() {
-            let fault = parse_soap_fault(&text).unwrap_or_else(|| text.clone());
+            let fault = parse_soap_fault(&text).unwrap_or(text.clone());
             return Err(DriverError::SessionError(format!(
                 "ONVIF SOAP error (HTTP {status}): {fault}"
             )));
@@ -450,7 +450,7 @@ fn parse_profiles(xml: &str) -> Vec<OnvifProfile> {
                     if depth == 0 {
                         if let Some((token, name)) = current.take() {
                             profiles.push(OnvifProfile {
-                                name: name.unwrap_or_else(|| token.clone()),
+                                name: name.unwrap_or(token.clone()),
                                 token,
                             });
                         }

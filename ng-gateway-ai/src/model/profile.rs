@@ -26,11 +26,12 @@ mod inner {
         },
     };
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::{
-        model::{ModelInfo, ModelTask},
-        pipeline::{
-            ChannelOrder, NmsVariantConfig, NormalizationConfig, NormalizationPreset,
-            PostProcessorConfig, PostProcessorType, PreProcessorConfig, ResizeMode,
+    use ng_gateway_models::{
+        domain::prelude::ModelInfo,
+        entities::ai::pipeline::{NormalizationConfig, PostProcessorConfig, PreProcessorConfig},
+        enums::ai::{
+            ChannelOrder, ModelTask, NmsVariantConfig, NormalizationPreset, PostProcessorType,
+            ResizeMode,
         },
     };
     use std::sync::Arc;
@@ -111,7 +112,7 @@ mod inner {
         };
 
         ModelProfile {
-            model_id: model_info.id.clone(),
+            model_id: model_info.model_key.clone(),
             preprocessor: pre,
             postprocessor: post,
             annotator: Some(Arc::new(DefaultFrameAnnotator)),
@@ -154,7 +155,7 @@ mod inner {
     ) -> Result<Arc<dyn PreProcessor>, AiEngineError> {
         let mode = cfg
             .and_then(|c| c.resize_mode)
-            .map_or_else(|| parse_resize_mode_str(fallback_type), Ok)?;
+            .map_or(parse_resize_mode_str(fallback_type), Ok)?;
         let rgb_order = parse_channel_order(cfg.and_then(|c| c.channel_order))?;
 
         let default_norm = default_normalization_for_mode(model_info, mode)?;
@@ -190,7 +191,7 @@ mod inner {
     ) -> Result<Arc<dyn PostProcessor>, AiEngineError> {
         let post_type = cfg
             .and_then(|c| c.r#type)
-            .map_or_else(|| parse_postprocess_type_str(fallback_type), Ok)?;
+            .map_or(parse_postprocess_type_str(fallback_type), Ok)?;
         let nms_iou = nms_iou_threshold.unwrap_or(DEFAULT_NMS_IOU_THRESHOLD);
         let nms_variant = parse_nms_variant(
             cfg.and_then(|c| c.nms_variant),
@@ -280,16 +281,12 @@ mod inner {
 
         let preset = cfg.preset.unwrap_or(NormalizationPreset::Yolo);
         if matches!(preset, NormalizationPreset::Custom) {
-            let mean = cfg.mean.ok_or_else(|| {
-                AiEngineError::PipelineConfigError(
-                    "normalization preset 'custom' requires mean".to_string(),
-                )
-            })?;
-            let std = cfg.std.ok_or_else(|| {
-                AiEngineError::PipelineConfigError(
-                    "normalization preset 'custom' requires std".to_string(),
-                )
-            })?;
+            let mean = cfg.mean.ok_or(AiEngineError::PipelineConfigError(
+                "normalization preset 'custom' requires mean".to_string(),
+            ))?;
+            let std = cfg.std.ok_or(AiEngineError::PipelineConfigError(
+                "normalization preset 'custom' requires std".to_string(),
+            ))?;
             return Ok(NormalizationParams { mean, std });
         }
 
@@ -299,11 +296,9 @@ mod inner {
             NormalizationPreset::Symmetric => "symmetric",
             NormalizationPreset::Custom => "custom",
         };
-        NormalizationParams::from_preset(preset_name).ok_or_else(|| {
-            AiEngineError::PipelineConfigError(format!(
-                "unsupported normalization preset '{preset_name}'"
-            ))
-        })
+        NormalizationParams::from_preset(preset_name).ok_or(AiEngineError::PipelineConfigError(
+            format!("unsupported normalization preset '{preset_name}'"),
+        ))
     }
 
     fn default_normalization_for_mode(
@@ -372,7 +367,7 @@ mod inner {
     /// where C is typically 1-80 classes. We check if the feature dimension
     /// matches the pose pattern (5 + 3×K for common K values).
     fn is_pose_model(model_info: &ModelInfo) -> bool {
-        if let Some(output) = model_info.outputs.first() {
+        if let Some(output) = model_info.outputs.as_ref().and_then(|o| o.0.first()) {
             if output.shape.len() == 3 {
                 let features = output.shape[1];
                 // 5 + 17×3 = 56 (COCO), 5 + 13×3 = 44 (MPII-like), 5 + 21×3 = 68 (hand)
@@ -388,35 +383,42 @@ mod inner {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use ng_gateway_models::ai::{
-            model::{ModelFormat, TensorDType, TensorDesc},
-            pipeline::{NormalizationConfig, PostProcessorConfig, PreProcessorConfig},
+        use ng_gateway_models::{
+            entities::ai::{
+                model::TensorDesc,
+                pipeline::{NormalizationConfig, PostProcessorConfig, PreProcessorConfig},
+            },
+            enums::ai::{ModelFormat, TensorDType},
         };
-        use std::path::PathBuf;
 
         fn detection_model() -> ModelInfo {
+            use ng_gateway_models::entities::ai::model::{Labels, TensorDescs};
+
             ModelInfo {
-                id: "det_model".to_string(),
+                id: 0,
+                model_key: "det_model".to_string(),
                 name: "det".to_string(),
                 version: "1.0.0".to_string(),
                 format: ModelFormat::Onnx,
-                path: PathBuf::from("det.onnx"),
-                inputs: vec![TensorDesc {
+                path: "det.onnx".to_string(),
+                inputs: Some(TensorDescs(vec![TensorDesc {
                     name: "images".to_string(),
                     shape: vec![1, 3, 640, 640],
                     dtype: TensorDType::Float32,
-                }],
-                outputs: vec![TensorDesc {
+                }])),
+                outputs: Some(TensorDescs(vec![TensorDesc {
                     name: "output0".to_string(),
                     shape: vec![1, 84, 8400],
                     dtype: TensorDType::Float32,
-                }],
+                }])),
                 task: ModelTask::ObjectDetection,
-                labels: vec!["person".to_string()],
+                labels: Some(Labels(vec!["person".to_string()])),
                 default_preprocess: None,
                 default_postprocess: None,
-                loaded: false,
-                file_size: 1,
+                size: 1,
+                checksum: "test".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
             }
         }
 

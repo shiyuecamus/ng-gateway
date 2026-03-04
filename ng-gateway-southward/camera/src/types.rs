@@ -6,7 +6,7 @@
 //! - [`CameraPoint`]: AI output mapping point (detection_count, person_count, …)
 //! - [`CameraAction`]: camera-specific actions (PTZ, snapshot, restart pipeline)
 
-use ng_gateway_ai::api::{PipelineId, SamplingStrategy};
+use ng_gateway_ai::api::SamplingStrategy;
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     DriverError, ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimeParameter,
@@ -40,7 +40,7 @@ pub struct CameraChannelConfig {
     /// Video source protocol configuration.
     pub protocol: CameraProtocol,
     /// AI pipeline identifier for this camera channel.
-    pub pipeline_id: PipelineId,
+    pub pipeline_id: i32,
     /// Frame sampling strategy.
     #[serde(default)]
     pub sampling: SamplingStrategy,

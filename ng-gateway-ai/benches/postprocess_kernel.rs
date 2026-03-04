@@ -13,7 +13,7 @@ use ng_gateway_ai::{
         preprocess::CoordinateTransform,
     },
 };
-use ng_gateway_models::ai::types::{BoundingBox, Detection};
+use ng_gateway_models::domain::prelude::{BoundingBox, Detection};
 use rayon::prelude::*;
 use std::{hint::black_box, sync::Arc};
 

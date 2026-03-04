@@ -83,13 +83,13 @@ fn create_user_table(_backend: DatabaseBackend) -> TableCreateStatement {
             ColumnDef::new(User::CreatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("创建时间"),
+                .comment("Created at timestamp"),
         )
         .col(
             ColumnDef::new(User::UpdatedAt)
                 .timestamp()
                 .default(Expr::current_timestamp())
-                .comment("更新时间"),
+                .comment("Updated at timestamp"),
         )
         .to_owned()
 }

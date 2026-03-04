@@ -1,4 +1,6 @@
-//! AI model management — registry, metadata, and processor profiles.
+//! AI model management — probing, registry, and processor profiles.
+
+pub mod prober;
 
 #[cfg(feature = "engine")]
 pub mod profile;

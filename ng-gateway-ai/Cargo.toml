@@ -22,7 +22,10 @@ engine = [
   "dep:scopeguard",
   "dep:ffmpeg-next",
   "dep:wasmtime",
+  "dep:wasmparser",
   "dep:ng-gateway-common",
+  "dep:ng-gateway-repository",
+  "dep:sea-orm",
 ]
 
 [dependencies]
@@ -30,6 +33,7 @@ engine = [
 # All public API types, traits, config, and error types live here.
 ng-gateway-models.workspace = true
 ng-gateway-error.workspace = true
+ng-gateway-repository = { workspace = true, optional = true }
 
 # ── Always available (engine internals layer) ───────────────────────
 serde = { workspace = true, features = ["rc"] }
@@ -39,29 +43,35 @@ chrono.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "macros", "fs"] }
+tokio-util.workspace = true
 ng-gateway-common = { workspace = true, optional = true }
+sea-orm = { workspace = true, optional = true }
+hex.workspace = true
+sha2.workspace = true
+prost.workspace = true
 
 # ── Engine feature dependencies ─────────────────────────────────────
 # Only compiled when the `engine` feature is enabled.
-scopeguard = { version = "1", optional = true }
-ort = { version = "2.0.0-rc.11", features = ["load-dynamic"], optional = true }
-ndarray = { version = "0.17", optional = true }
-image = { version = "0.25", default-features = false, features = [
+scopeguard = { workspace = true, optional = true }
+ort = { workspace = true, features = ["load-dynamic"], optional = true }
+ndarray = { workspace = true, optional = true }
+image = { workspace = true, default-features = false, features = [
   "jpeg",
   "png",
 ], optional = true }
-fast_image_resize = { version = "6", optional = true }
-rayon = { version = "1", optional = true }
+fast_image_resize = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
-ffmpeg-next = { version = "8", optional = true }
-wasmtime = { version = "42", optional = true }
+ffmpeg-next = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+wasmparser = { workspace = true, optional = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 ng-gateway-common.workspace = true
-criterion = "0.8.2"
+criterion.workspace = true
 
 [[bench]]
 name = "preprocess_kernel"

@@ -1,61 +1,20 @@
-//! Core AI engine data types.
-//!
-//! These types form the public API boundary between the AI engine and camera
-//! drivers. They are lightweight (no heavy ML dependencies) and always available
-//! regardless of feature flags.
-
+use crate::enums::ai::{AlarmSeverity, FrameFormat};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{sync::Arc, time::Duration};
 
-fn serialize_duration_ms<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_f64(d.as_secs_f64() * 1000.0)
-}
-
-fn deserialize_duration_ms<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
-    let ms: f64 = Deserialize::deserialize(d)?;
-    Ok(Duration::from_secs_f64(ms / 1000.0))
-}
-
-// ───────────────────────────────────────────────────────────────────
-// Pipeline identity
-// ───────────────────────────────────────────────────────────────────
-
-/// Unique identifier for a processing pipeline instance.
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PipelineId(pub Arc<str>);
-
-impl PipelineId {
-    #[inline]
-    pub fn new(id: impl Into<Arc<str>>) -> Self {
-        Self(id.into())
-    }
-}
-
-impl std::fmt::Display for PipelineId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-// ───────────────────────────────────────────────────────────────────
-// Video frame types
-// ───────────────────────────────────────────────────────────────────
-
-/// Frame encoding format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FrameFormat {
-    /// Raw RGB24 (3 bytes per pixel, row-major).
-    Rgb24,
-    /// Raw NV12 (Y plane + interleaved UV, common in HW decoders).
-    Nv12,
-    /// JPEG compressed.
-    Jpeg,
-    /// H.264 NAL unit (requires decoding).
-    H264Nal,
-    /// H.265 NAL unit.
-    H265Nal,
+/// Frame analysis request from a camera driver to the AI engine.
+#[derive(Debug, Clone)]
+pub struct FrameAnalysisRequest {
+    /// Source channel identifier (for pipeline routing).
+    pub channel_id: i32,
+    /// Source device identifier.
+    pub device_id: i32,
+    /// The video frame to analyze.
+    pub frame: VideoFrame,
+    /// Optional ROI override (if not set, uses pipeline default).
+    pub roi: Option<BoundingBox>,
 }
 
 /// A video frame submitted for AI analysis.
@@ -76,134 +35,6 @@ pub struct VideoFrame {
     pub timestamp: DateTime<Utc>,
     /// Monotonic frame sequence number (per-channel).
     pub seq: u64,
-}
-
-/// Rectangular region of interest within a frame.
-///
-/// All coordinates are normalized to `[0.0, 1.0]` relative to frame dimensions.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct RegionOfInterest {
-    pub x_min: f32,
-    pub y_min: f32,
-    pub x_max: f32,
-    pub y_max: f32,
-}
-
-impl RegionOfInterest {
-    /// Full frame (no cropping).
-    pub const FULL: Self = Self {
-        x_min: 0.0,
-        y_min: 0.0,
-        x_max: 1.0,
-        y_max: 1.0,
-    };
-
-    /// Validate that coordinates are within `[0.0, 1.0]` and min < max.
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        self.x_min >= 0.0
-            && self.y_min >= 0.0
-            && self.x_max <= 1.0
-            && self.y_max <= 1.0
-            && self.x_min < self.x_max
-            && self.y_min < self.y_max
-    }
-}
-
-// ───────────────────────────────────────────────────────────────────
-// Frame analysis request / response
-// ───────────────────────────────────────────────────────────────────
-
-/// Frame analysis request from a camera driver to the AI engine.
-#[derive(Debug, Clone)]
-pub struct FrameAnalysisRequest {
-    /// Source channel identifier (for pipeline routing).
-    pub channel_id: i32,
-    /// Source device identifier.
-    pub device_id: i32,
-    /// The video frame to analyze.
-    pub frame: VideoFrame,
-    /// Optional ROI override (if not set, uses pipeline default).
-    pub roi: Option<RegionOfInterest>,
-}
-
-/// Aggregated analysis results from the AI pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnalysisResult {
-    /// Source frame sequence number.
-    pub frame_seq: u64,
-    /// Source frame timestamp.
-    pub frame_timestamp: DateTime<Utc>,
-    /// Object detections (bounding boxes with class and confidence).
-    pub detections: Arc<[Detection]>,
-    /// Classification results (whole-frame or per-ROI).
-    pub classifications: Arc<[Classification]>,
-    /// Keypoint/pose detections (e.g., YOLOv8-Pose).
-    pub keypoint_detections: Arc<[KeypointDetection]>,
-    /// Segmentation masks (semantic segmentation output).
-    pub segmentation_masks: Arc<[SegmentationMask]>,
-    /// Anomaly detection results.
-    pub anomaly_maps: Arc<[AnomalyMap]>,
-    /// Triggered alarm events.
-    pub alarms: Arc<[AlarmEvent]>,
-    /// Inference latency (end-to-end pipeline) in milliseconds.
-    #[serde(
-        serialize_with = "serialize_duration_ms",
-        deserialize_with = "deserialize_duration_ms"
-    )]
-    pub inference_latency: Duration,
-    /// Optional annotated frame (JPEG with drawn bounding boxes).
-    /// Excluded from JSON serialization (binary data).
-    #[serde(skip)]
-    pub annotated_frame: Option<Bytes>,
-}
-
-/// Core structured analysis result without render payload.
-///
-/// This type is optimized for shared caching and low-copy snapshot serving.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AnalysisCore {
-    /// Source frame sequence number.
-    pub frame_seq: u64,
-    /// Object detections.
-    pub detections: Arc<[Detection]>,
-    /// Classification results.
-    pub classifications: Arc<[Classification]>,
-    /// Keypoint/pose detections.
-    pub keypoint_detections: Arc<[KeypointDetection]>,
-    /// Segmentation masks.
-    pub segmentation_masks: Arc<[SegmentationMask]>,
-    /// Anomaly map outputs.
-    pub anomaly_maps: Arc<[AnomalyMap]>,
-    /// Triggered alarm events.
-    pub alarms: Arc<[AlarmEvent]>,
-}
-
-/// Render-specific artifacts generated from one analysis result.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RenderArtifact {
-    /// Optional annotated JPEG.
-    #[serde(skip)]
-    pub annotated_frame: Option<Bytes>,
-}
-
-// ───────────────────────────────────────────────────────────────────
-// Detection / classification / alarm types
-// ───────────────────────────────────────────────────────────────────
-
-/// A single object detection result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Detection {
-    /// Bounding box in normalized coordinates `[0.0, 1.0]`.
-    pub bbox: BoundingBox,
-    /// Detected class label.
-    pub class: Arc<str>,
-    /// Class index (model output index).
-    pub class_id: u32,
-    /// Detection confidence score `[0.0, 1.0]`.
-    pub confidence: f32,
-    /// Optional tracking ID (if tracker is enabled in pipeline).
-    pub track_id: Option<u64>,
 }
 
 /// Axis-aligned bounding box in normalized coordinates.
@@ -252,6 +83,21 @@ impl BoundingBox {
             inter / union
         }
     }
+}
+
+/// A single object detection result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Detection {
+    /// Bounding box in normalized coordinates `[0.0, 1.0]`.
+    pub bbox: BoundingBox,
+    /// Detected class label.
+    pub class: Arc<str>,
+    /// Class index (model output index).
+    pub class_id: u32,
+    /// Detection confidence score `[0.0, 1.0]`.
+    pub confidence: f32,
+    /// Optional tracking ID (if tracker is enabled in pipeline).
+    pub track_id: Option<u64>,
 }
 
 /// A classification result.
@@ -345,29 +191,6 @@ pub struct AlarmEvent {
     #[serde(skip)]
     pub snapshot: Option<Bytes>,
 }
-
-/// Alarm severity level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AlarmSeverity {
-    Info,
-    Warning,
-    Critical,
-}
-
-impl From<AlarmSeverity> for ng_gateway_sdk::AlarmSeverity {
-    fn from(value: AlarmSeverity) -> Self {
-        match value {
-            AlarmSeverity::Info => ng_gateway_sdk::AlarmSeverity::Info,
-            AlarmSeverity::Warning => ng_gateway_sdk::AlarmSeverity::Warning,
-            AlarmSeverity::Critical => ng_gateway_sdk::AlarmSeverity::Critical,
-        }
-    }
-}
-
-// ───────────────────────────────────────────────────────────────────
-// Engine status (for REST API)
-// ───────────────────────────────────────────────────────────────────
 
 /// AI engine global status snapshot (returned by `GET /api/ai/engine/status`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,4 +313,77 @@ pub enum ParamType {
         /// Expected number of elements.
         len: usize,
     },
+}
+
+/// Aggregated analysis results from the AI pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisResult {
+    /// Source frame sequence number.
+    pub frame_seq: u64,
+    /// Source frame timestamp.
+    pub frame_timestamp: DateTime<Utc>,
+    /// Object detections (bounding boxes with class and confidence).
+    pub detections: Arc<[Detection]>,
+    /// Classification results (whole-frame or per-ROI).
+    pub classifications: Arc<[Classification]>,
+    /// Keypoint/pose detections (e.g., YOLOv8-Pose).
+    pub keypoint_detections: Arc<[KeypointDetection]>,
+    /// Segmentation masks (semantic segmentation output).
+    pub segmentation_masks: Arc<[SegmentationMask]>,
+    /// Anomaly detection results.
+    pub anomaly_maps: Arc<[AnomalyMap]>,
+    /// Triggered alarm events.
+    pub alarms: Arc<[AlarmEvent]>,
+    /// Inference latency (end-to-end pipeline) in milliseconds.
+    #[serde(
+        serialize_with = "serialize_duration_ms",
+        deserialize_with = "deserialize_duration_ms"
+    )]
+    pub inference_latency: Duration,
+    /// Optional annotated frame (JPEG with drawn bounding boxes).
+    /// Excluded from JSON serialization (binary data).
+    #[serde(skip)]
+    pub annotated_frame: Option<Bytes>,
+}
+
+fn serialize_duration_ms<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(d.as_secs_f64() * 1000.0)
+}
+
+fn deserialize_duration_ms<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+    let ms: f64 = Deserialize::deserialize(d)?;
+    Ok(Duration::from_secs_f64(ms / 1000.0))
+}
+
+/// Structured analysis core — shared across readers via `Arc`.
+///
+/// Separates structured detection results from rendering artifacts
+/// to allow independent caching and zero-copy sharing between the
+/// inference hot path and async annotation/snapshot subsystems.
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisCore {
+    /// Source frame sequence number.
+    pub frame_seq: u64,
+    /// Object detections.
+    pub detections: Arc<[Detection]>,
+    /// Classification results.
+    pub classifications: Arc<[Classification]>,
+    /// Keypoint / pose detections.
+    pub keypoint_detections: Arc<[KeypointDetection]>,
+    /// Segmentation masks.
+    pub segmentation_masks: Arc<[SegmentationMask]>,
+    /// Anomaly maps.
+    pub anomaly_maps: Arc<[AnomalyMap]>,
+    /// Triggered alarms.
+    pub alarms: Arc<[AlarmEvent]>,
+}
+
+/// Rendering payload stored independently from structured core.
+///
+/// Kept separate from [`AnalysisCore`] so that rendering can happen
+/// asynchronously without blocking the inference hot path.
+#[derive(Debug, Clone, Default)]
+pub struct RenderArtifact {
+    /// JPEG-encoded annotated frame (if annotation is enabled).
+    pub annotated_frame: Option<Bytes>,
 }

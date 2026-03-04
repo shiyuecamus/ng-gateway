@@ -3,7 +3,7 @@
 //! Determines which frames from the video stream are submitted to the
 //! AI pipeline for processing.
 
-use ng_gateway_models::ai::pipeline::SamplingStrategy;
+use ng_gateway_models::enums::ai::SamplingStrategy;
 use std::time::Instant;
 
 /// Stateful frame sampler that implements the configured sampling strategy.

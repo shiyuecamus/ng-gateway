@@ -1,65 +1,50 @@
-//! WASM algorithm host — sandboxed execution of user-defined algorithms.
+//! WASM algorithm host — custom section based installation and execution runtime.
 //!
-//! Provides a dual-mode runtime for custom AI pipeline stages:
-//! - **FrameTransform**: pixel-level image transforms before inference
-//! - **ResultProcessor**: structured result filtering/enrichment after inference
-//!
-//! # Security Model
-//!
-//! - WASM modules run in a fully sandboxed environment (wasmtime)
-//! - Fuel-based execution limits prevent infinite loops / CPU abuse
-//! - Per-instance memory caps prevent OOM attacks
-//! - No filesystem, network, or host function access (pure computation only)
-//! - Each invocation gets a fresh `Store` — no cross-call state leakage
-//!
-//! # Performance
-//!
-//! - Modules are compiled once and cached (`Arc<wasmtime::Module>`)
-//! - Execution runs on `spawn_blocking` to avoid starving the Tokio runtime
-//! - JSON serialization uses `serde_json` for the control plane;
-//!   pixel data is passed via shared WASM linear memory (zero-copy within sandbox)
+//! This module implements a strict installation pipeline:
+//! `probe -> validate -> persist -> register`.
+//! Algorithm metadata is always sourced from the WASM custom section
+//! `ng.ai.manifest.v1`.
 
 use crate::decoded::DecodedFrame;
 use bytes::Bytes;
 use dashmap::DashMap;
 use ng_gateway_error::ai::AiEngineError;
-use ng_gateway_models::ai::{
-    algorithm::{
-        AlgorithmTestInput, AlgorithmTestResult, AlgorithmUploadMetadata, FrameTransformOutput,
-        ResultClassification, ResultDetection, ResultProcessorOutput, WasmAlgorithmInfo,
-        WasmAlgorithmSidecar, WasmExports, WasmModuleType,
+use ng_gateway_models::{
+    domain::prelude::{
+        AlgorithmInfo, AlgorithmProbeInfo, AlgorithmTestInput, AlgorithmTestResult,
+        FrameTransformOutput, ResultClassification, ResultDetection, ResultProcessorOutput,
+        WasmAlgorithmManifestV1, WasmExports, WASM_ALGORITHM_MANIFEST_SECTION,
     },
-    types::{Classification, Detection},
+    enums::{ai::AlgorithmModuleType, common::Status},
 };
+use sha2::Digest;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 use tracing::{debug, info, warn};
-use wasmtime::{Config, Engine, Module, Store, TypedFunc};
+use wasmparser::{Parser, Payload};
+use wasmtime::{Config, Engine, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 /// A compiled and registered WASM algorithm entry.
 struct WasmAlgorithmEntry {
     /// Algorithm metadata.
-    info: Arc<WasmAlgorithmInfo>,
+    info: Arc<AlgorithmInfo>,
     /// Pre-compiled WASM module (shared across invocations).
     module: Arc<Module>,
 }
 
-/// Borrowed sidecar payload used when writing `<algorithm>.json`.
-#[derive(serde::Serialize)]
-struct SidecarWriteRef<'a> {
-    /// Human-readable algorithm name.
-    name: Option<&'a str>,
-    /// Optional algorithm description.
-    description: Option<&'a str>,
-    /// Semantic version string.
-    version: Option<&'a str>,
-    /// WASM module type.
-    module_type: WasmModuleType,
-    /// Optional JSON schema for runtime config.
-    config_schema: Option<&'a serde_json::Value>,
+/// Intermediate install payload produced by probe + validation.
+struct PreparedInstallArtifact {
+    /// Parsed custom section manifest.
+    manifest: WasmAlgorithmManifestV1,
+    /// SHA-256 checksum (hex lowercase).
+    checksum: String,
+    /// Artifact size in bytes.
+    size: u64,
+    /// Compiled module.
+    module: Module,
 }
 
 /// Borrowed input payload for `FrameTransform` JSON ABI.
@@ -92,6 +77,22 @@ struct ResultProcessorInputRef<'a> {
     config: &'a serde_json::Value,
 }
 
+/// Runtime arguments for one frame transform invocation.
+struct FrameTransformRunArgs<'a> {
+    /// Raw pixel data (RGB).
+    pixel_data: &'a [u8],
+    /// Frame width in pixels.
+    width: u32,
+    /// Frame height in pixels.
+    height: u32,
+    /// User-provided configuration object.
+    config: &'a serde_json::Value,
+    /// Fuel budget for this invocation.
+    fuel_limit: u64,
+    /// Maximum linear memory for this invocation (bytes).
+    memory_limit_bytes: usize,
+}
+
 /// Runtime arguments for one result processor invocation.
 struct ResultProcessorRunArgs<'a> {
     /// Detection list.
@@ -106,40 +107,26 @@ struct ResultProcessorRunArgs<'a> {
     config: &'a serde_json::Value,
     /// Fuel budget for this invocation.
     fuel_limit: u64,
+    /// Maximum linear memory for this invocation (bytes).
+    memory_limit_bytes: usize,
+}
+
+/// Per-store resource state used by Wasmtime resource limiting.
+struct WasmStoreState {
+    limits: StoreLimits,
 }
 
 /// WASM algorithm host — manages lifecycle and execution of user-defined algorithms.
-///
-/// # Architecture
-///
-/// ```text
-/// ┌─────────────────────────────────────────────────────────┐
-/// │                  WasmAlgorithmHost                       │
-/// │                                                         │
-/// │  ┌───────────────────┐  ┌─────────────────────────────┐ │
-/// │  │  wasmtime::Engine  │  │  Compiled Module Registry   │ │
-/// │  │  (Fuel + Memory)   │  │  DashMap<id, Module+Info>   │ │
-/// │  └───────────────────┘  └─────────────────────────────┘ │
-/// │                                                         │
-/// │  Per invocation:                                        │
-/// │  ┌─────────────────────────────────────────────────────┐ │
-/// │  │  Store(fresh) → Instance → alloc/transform/process │ │
-/// │  │  → read output → drop Store (memory freed)          │ │
-/// │  └─────────────────────────────────────────────────────┘ │
-/// └─────────────────────────────────────────────────────────┘
-/// ```
 pub struct WasmAlgorithmHost {
     /// Wasmtime engine (configured with fuel metering).
     engine: Engine,
-    /// Compiled module registry: algorithm_id → entry.
+    /// Compiled module registry: algorithm_key -> entry.
     modules: DashMap<String, Arc<WasmAlgorithmEntry>>,
     /// Algorithm storage directory.
     algorithms_dir: PathBuf,
     /// Maximum fuel per invocation (prevents runaway algorithms).
     fuel_limit: u64,
     /// Maximum WASM linear memory per instance (bytes).
-    /// Reserved for Phase 3 `ResourceLimiter` integration.
-    #[allow(unused)]
     memory_limit_bytes: usize,
 }
 
@@ -165,7 +152,6 @@ impl WasmAlgorithmHost {
             memory_limit_bytes,
         };
 
-        // Scan directory for existing .wasm files
         if algorithms_dir.exists() {
             host.scan_directory().await?;
         } else {
@@ -179,11 +165,10 @@ impl WasmAlgorithmHost {
             count = host.modules.len(),
             fuel_limit, memory_limit_bytes, "WASM algorithm host initialized"
         );
-
         Ok(host)
     }
 
-    /// Scan the algorithms directory for `.wasm` files and compile them.
+    /// Scan the algorithms directory for `.wasm` files and register valid modules.
     async fn scan_directory(&self) -> Result<(), AiEngineError> {
         let mut entries = tokio::fs::read_dir(&self.algorithms_dir)
             .await
@@ -199,8 +184,8 @@ impl WasmAlgorithmHost {
                 match self.load_from_file(&path).await {
                     Ok(info) => {
                         info!(
-                            algorithm_id = %info.id,
-                            module_type = %info.module_type,
+                            algorithm_key = %info.key,
+                            module_type = ?info.module_type,
                             "discovered WASM algorithm"
                         );
                     }
@@ -214,117 +199,117 @@ impl WasmAlgorithmHost {
                 }
             }
         }
-
         Ok(())
     }
 
-    /// Load and compile a WASM module from a file path.
-    async fn load_from_file(&self, path: &Path) -> Result<Arc<WasmAlgorithmInfo>, AiEngineError> {
-        let algorithm_id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| AiEngineError::AlgorithmError("invalid wasm filename".into()))?
-            .to_string();
-
-        // Read the .wasm binary
+    /// Load and compile a WASM module from an existing file.
+    async fn load_from_file(&self, path: &Path) -> Result<Arc<AlgorithmInfo>, AiEngineError> {
         let wasm_bytes = tokio::fs::read(path)
             .await
             .map_err(|e| AiEngineError::IoError(format!("read wasm file: {e}")))?;
+        let bytes = Bytes::from(wasm_bytes);
+        let prepared = self.prepare_install_artifact(&bytes).await?;
+        self.register_prepared_artifact(prepared)
+    }
 
-        let file_size = wasm_bytes.len() as u64;
+    /// Validate custom section manifest semantic constraints.
+    fn validate_manifest(manifest: &WasmAlgorithmManifestV1) -> Result<(), AiEngineError> {
+        if manifest.manifest_version != 1 {
+            return Err(AiEngineError::AlgorithmError(format!(
+                "unsupported manifest version: {}",
+                manifest.manifest_version
+            )));
+        }
+        if manifest.algorithm_key.trim().is_empty() {
+            return Err(AiEngineError::AlgorithmError(
+                "manifest.algorithm_key must not be empty".to_string(),
+            ));
+        }
+        if manifest.name.trim().is_empty() {
+            return Err(AiEngineError::AlgorithmError(
+                "manifest.name must not be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
 
-        // Try to read sidecar metadata JSON
-        let sidecar_path = path.with_extension("json");
-        let mut sidecar = if sidecar_path.exists() {
-            let json_bytes = tokio::fs::read(&sidecar_path)
-                .await
-                .map_err(|e| AiEngineError::IoError(format!("read sidecar: {e}")))?;
-            serde_json::from_slice::<WasmAlgorithmSidecar>(&json_bytes).ok()
-        } else {
-            None
-        };
+    /// Extract and deserialize custom section manifest from a WASM binary.
+    fn extract_manifest(wasm_bytes: &[u8]) -> Result<WasmAlgorithmManifestV1, AiEngineError> {
+        let mut manifest: Option<WasmAlgorithmManifestV1> = None;
 
-        // Compile module (CPU-intensive — run on blocking thread)
+        for payload in Parser::new(0).parse_all(wasm_bytes) {
+            let payload = payload
+                .map_err(|e| AiEngineError::AlgorithmError(format!("parse wasm payload: {e}")))?;
+            if let Payload::CustomSection(section) = payload {
+                if section.name() == WASM_ALGORITHM_MANIFEST_SECTION {
+                    if manifest.is_some() {
+                        return Err(AiEngineError::AlgorithmError(format!(
+                            "duplicate custom section '{}'",
+                            WASM_ALGORITHM_MANIFEST_SECTION
+                        )));
+                    }
+                    let parsed: WasmAlgorithmManifestV1 = serde_json::from_slice(section.data())
+                        .map_err(|e| {
+                            AiEngineError::AlgorithmError(format!(
+                                "invalid wasm custom section manifest JSON: {e}"
+                            ))
+                        })?;
+                    manifest = Some(parsed);
+                }
+            }
+        }
+
+        manifest.ok_or(AiEngineError::AlgorithmError(format!(
+            "missing required custom section '{}'",
+            WASM_ALGORITHM_MANIFEST_SECTION
+        )))
+    }
+
+    /// Compile module and perform full install validation.
+    async fn prepare_install_artifact(
+        &self,
+        wasm_bytes: &Bytes,
+    ) -> Result<PreparedInstallArtifact, AiEngineError> {
+        let manifest = Self::extract_manifest(wasm_bytes)?;
+        Self::validate_manifest(&manifest)?;
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(wasm_bytes);
+        let checksum = hex::encode(hasher.finalize());
+        let size = wasm_bytes.len() as u64;
+
         let engine = self.engine.clone();
+        let bytes_for_compile = wasm_bytes.clone();
         let module = tokio::task::spawn_blocking(move || {
-            Module::new(&engine, &wasm_bytes)
+            Module::new(&engine, &bytes_for_compile)
                 .map_err(|e| AiEngineError::AlgorithmError(format!("wasm compile: {e}")))
         })
         .await
         .map_err(|e| AiEngineError::AlgorithmError(format!("compile task join: {e}")))??;
 
-        // Determine module type from sidecar or by probing exports
-        let module_type = sidecar
-            .as_ref()
-            .map(|s| s.module_type)
-            .unwrap_or_else(|| Self::detect_module_type(&module));
+        self.validate_exports(&module, manifest.module_type)?;
 
-        // Validate required exports
-        self.validate_exports(&module, module_type)?;
-
-        let name = sidecar
-            .as_mut()
-            .and_then(|s| s.name.take())
-            .unwrap_or(algorithm_id.clone());
-        let description = sidecar
-            .as_mut()
-            .and_then(|s| s.description.take())
-            .unwrap_or_default();
-        let version = sidecar
-            .as_mut()
-            .and_then(|s| s.version.take())
-            .unwrap_or_else(|| "1.0.0".to_string());
-        let config_schema = sidecar.as_mut().and_then(|s| s.config_schema.take());
-
-        let info = WasmAlgorithmInfo {
-            id: algorithm_id,
-            name,
-            description,
-            version,
-            module_type,
-            file_size,
-            config_schema,
-            created_at: chrono::Utc::now(),
-        };
-        let info = Arc::new(info);
-
-        self.modules.insert(
-            info.id.clone(),
-            Arc::new(WasmAlgorithmEntry {
-                info: Arc::clone(&info),
-                module: Arc::new(module),
-            }),
-        );
-
-        Ok(info)
-    }
-
-    /// Detect module type by inspecting WASM exports.
-    fn detect_module_type(module: &Module) -> WasmModuleType {
-        let has_transform = module.exports().any(|e| e.name() == WasmExports::TRANSFORM);
-        if has_transform {
-            WasmModuleType::FrameTransform
-        } else {
-            WasmModuleType::ResultProcessor
-        }
+        Ok(PreparedInstallArtifact {
+            manifest,
+            checksum,
+            size,
+            module,
+        })
     }
 
     /// Validate that a WASM module has all required exports for its type.
     fn validate_exports(
         &self,
         module: &Module,
-        module_type: WasmModuleType,
+        module_type: AlgorithmModuleType,
     ) -> Result<(), AiEngineError> {
         let export_names: Vec<&str> = module.exports().map(|e| e.name()).collect();
-
-        let required_common = [
+        for name in [
             WasmExports::MEMORY,
             WasmExports::ALLOC,
             WasmExports::GET_OUTPUT_LEN,
-        ];
-
-        for name in &required_common {
-            if !export_names.contains(name) {
+        ] {
+            if !export_names.contains(&name) {
                 return Err(AiEngineError::AlgorithmError(format!(
                     "WASM module missing required export: '{name}'"
                 )));
@@ -332,34 +317,75 @@ impl WasmAlgorithmHost {
         }
 
         let entry_point = match module_type {
-            WasmModuleType::FrameTransform => WasmExports::TRANSFORM,
-            WasmModuleType::ResultProcessor => WasmExports::PROCESS,
+            AlgorithmModuleType::FrameTransform => WasmExports::TRANSFORM,
+            AlgorithmModuleType::ResultProcessor => WasmExports::PROCESS,
         };
-
         if !export_names.contains(&entry_point) {
             return Err(AiEngineError::AlgorithmError(format!(
-                "WASM module of type {module_type} missing required export: '{entry_point}'"
+                "WASM module of type {:?} missing required export: '{}'",
+                module_type, entry_point
             )));
         }
-
         Ok(())
     }
 
-    // ── Public API ────────────────────────────────────────────────
+    /// Build a runtime algorithm metadata object from prepared artifact.
+    fn build_runtime_info(prepared: &PreparedInstallArtifact) -> AlgorithmInfo {
+        AlgorithmInfo {
+            id: 0,
+            key: prepared.manifest.algorithm_key.clone(),
+            name: prepared.manifest.name.clone(),
+            description: prepared.manifest.description.clone(),
+            version: prepared.manifest.version.clone(),
+            module_type: prepared.manifest.module_type,
+            path: format!("./ai/algorithms/{}.wasm", prepared.manifest.algorithm_key),
+            config_schema: prepared.manifest.config_schema.clone(),
+            size: prepared.size,
+            status: Status::Enabled,
+            checksum: prepared.checksum.clone(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Register one prepared module into runtime cache.
+    fn register_prepared_artifact(
+        &self,
+        prepared: PreparedInstallArtifact,
+    ) -> Result<Arc<AlgorithmInfo>, AiEngineError> {
+        if self.modules.contains_key(&prepared.manifest.algorithm_key) {
+            return Err(AiEngineError::AlgorithmError(format!(
+                "algorithm '{}' already exists",
+                prepared.manifest.algorithm_key
+            )));
+        }
+
+        let info = Arc::new(Self::build_runtime_info(&prepared));
+        self.modules.insert(
+            info.key.clone(),
+            Arc::new(WasmAlgorithmEntry {
+                info: Arc::clone(&info),
+                module: Arc::new(prepared.module),
+            }),
+        );
+        Ok(info)
+    }
+
+    // ── Public control-plane API ──────────────────────────────────
 
     /// List all registered algorithms.
-    pub fn list_algorithms(&self) -> Vec<Arc<WasmAlgorithmInfo>> {
+    pub fn list_algorithms(&self) -> Vec<AlgorithmInfo> {
         self.modules
             .iter()
-            .map(|e| Arc::clone(&e.value().info))
+            .map(|e| e.info.as_ref().clone())
             .collect()
     }
 
-    /// Get a single algorithm by ID.
-    pub fn get_algorithm(&self, algorithm_id: &str) -> Option<Arc<WasmAlgorithmInfo>> {
+    /// Get one algorithm by algorithm key.
+    pub fn get_algorithm(&self, algorithm_key: &str) -> Option<AlgorithmInfo> {
         self.modules
-            .get(algorithm_id)
-            .map(|e| Arc::clone(&e.value().info))
+            .get(algorithm_key)
+            .map(|e| e.info.as_ref().clone())
     }
 
     /// Get the count of registered algorithms.
@@ -367,111 +393,83 @@ impl WasmAlgorithmHost {
         self.modules.len()
     }
 
-    /// Upload and register a new WASM algorithm.
-    ///
-    /// Validates the module, saves it to the algorithms directory, and compiles it.
-    pub async fn upload_algorithm(
+    /// Probe a WASM artifact and return extracted manifest metadata.
+    pub async fn probe_algorithm(
         &self,
         wasm_bytes: Bytes,
-        metadata: AlgorithmUploadMetadata,
-    ) -> Result<Arc<WasmAlgorithmInfo>, AiEngineError> {
-        // Generate a filesystem-safe ID from the name
-        let algorithm_id = slug_from_name(&metadata.name);
-
-        if self.modules.contains_key(&algorithm_id) {
-            return Err(AiEngineError::AlgorithmError(format!(
-                "algorithm '{algorithm_id}' already exists"
-            )));
-        }
-
-        let file_size = wasm_bytes.len() as u64;
-
-        // Compile and validate
-        let engine = self.engine.clone();
-        let bytes_clone = wasm_bytes.clone();
-        let module = tokio::task::spawn_blocking(move || {
-            Module::new(&engine, &bytes_clone)
-                .map_err(|e| AiEngineError::AlgorithmError(format!("invalid WASM module: {e}")))
+    ) -> Result<AlgorithmProbeInfo, AiEngineError> {
+        let prepared = self.prepare_install_artifact(&wasm_bytes).await?;
+        Ok(AlgorithmProbeInfo {
+            manifest: prepared.manifest,
+            size: prepared.size,
+            checksum: prepared.checksum,
         })
-        .await
-        .map_err(|e| AiEngineError::AlgorithmError(format!("compile task join: {e}")))??;
-
-        self.validate_exports(&module, metadata.module_type)?;
-
-        // Save .wasm file
-        let wasm_path = self.algorithms_dir.join(format!("{algorithm_id}.wasm"));
-        tokio::fs::write(&wasm_path, &wasm_bytes)
-            .await
-            .map_err(|e| AiEngineError::IoError(format!("write wasm file: {e}")))?;
-
-        // Save sidecar metadata
-        let sidecar_path = self.algorithms_dir.join(format!("{algorithm_id}.json"));
-        let sidecar_json = serde_json::to_vec_pretty(&SidecarWriteRef {
-            name: Some(metadata.name.as_str()),
-            description: Some(metadata.description.as_str()),
-            version: Some(metadata.version.as_str()),
-            module_type: metadata.module_type,
-            config_schema: metadata.config_schema.as_ref(),
-        })
-        .map_err(|e| AiEngineError::AlgorithmError(format!("serialize sidecar: {e}")))?;
-        tokio::fs::write(&sidecar_path, &sidecar_json)
-            .await
-            .map_err(|e| AiEngineError::IoError(format!("write sidecar: {e}")))?;
-
-        let info = WasmAlgorithmInfo {
-            id: algorithm_id,
-            name: metadata.name,
-            description: metadata.description,
-            version: metadata.version,
-            module_type: metadata.module_type,
-            file_size,
-            config_schema: metadata.config_schema,
-            created_at: chrono::Utc::now(),
-        };
-        let info = Arc::new(info);
-
-        self.modules.insert(
-            info.id.clone(),
-            Arc::new(WasmAlgorithmEntry {
-                info: Arc::clone(&info),
-                module: Arc::new(module),
-            }),
-        );
-
-        info!(
-            algorithm_id = %info.id,
-            module_type = %info.module_type,
-            file_size,
-            "WASM algorithm uploaded and registered"
-        );
-
-        Ok(info)
     }
 
-    /// Delete a registered algorithm (removes files and cached module).
-    pub async fn delete_algorithm(&self, algorithm_id: &str) -> Result<(), AiEngineError> {
-        if self.modules.remove(algorithm_id).is_none() {
+    /// Install a WASM artifact using strict install transaction.
+    ///
+    /// Transaction steps:
+    /// 1) probe + validate
+    /// 2) persist `.wasm` artifact
+    /// 3) register compiled module into runtime
+    pub async fn install_algorithm(
+        &self,
+        wasm_bytes: Bytes,
+    ) -> Result<AlgorithmInfo, AiEngineError> {
+        let prepared = self.prepare_install_artifact(&wasm_bytes).await?;
+        let algorithm_key = prepared.manifest.algorithm_key.clone();
+        let wasm_path = self.algorithms_dir.join(format!("{algorithm_key}.wasm"));
+        let temp_path = self
+            .algorithms_dir
+            .join(format!("{algorithm_key}.wasm.installing"));
+
+        if self.modules.contains_key(&algorithm_key) || wasm_path.exists() {
             return Err(AiEngineError::AlgorithmError(format!(
-                "algorithm '{algorithm_id}' not found"
+                "algorithm '{}' already exists",
+                algorithm_key
             )));
         }
 
-        // Remove files
-        let wasm_path = self.algorithms_dir.join(format!("{algorithm_id}.wasm"));
-        let sidecar_path = self.algorithms_dir.join(format!("{algorithm_id}.json"));
+        tokio::fs::write(&temp_path, &wasm_bytes)
+            .await
+            .map_err(|e| AiEngineError::IoError(format!("write temp wasm file: {e}")))?;
+        tokio::fs::rename(&temp_path, &wasm_path)
+            .await
+            .map_err(|e| AiEngineError::IoError(format!("rename wasm file: {e}")))?;
 
+        let info = match self.register_prepared_artifact(prepared) {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&wasm_path).await;
+                return Err(e);
+            }
+        };
+
+        info!(
+            algorithm_key = %info.key,
+            module_type = ?info.module_type,
+            size = info.size,
+            "WASM algorithm installed and registered"
+        );
+        Ok(info.as_ref().clone())
+    }
+
+    /// Delete a registered algorithm (removes artifact and runtime entry).
+    pub async fn delete_algorithm(&self, algorithm_key: &str) -> Result<(), AiEngineError> {
+        if self.modules.remove(algorithm_key).is_none() {
+            return Err(AiEngineError::AlgorithmError(format!(
+                "algorithm '{}' not found",
+                algorithm_key
+            )));
+        }
+
+        let wasm_path = self.algorithms_dir.join(format!("{algorithm_key}.wasm"));
         if wasm_path.exists() {
             tokio::fs::remove_file(&wasm_path)
                 .await
                 .map_err(|e| AiEngineError::IoError(format!("remove wasm file: {e}")))?;
         }
-        if sidecar_path.exists() {
-            tokio::fs::remove_file(&sidecar_path)
-                .await
-                .map_err(|e| AiEngineError::IoError(format!("remove sidecar: {e}")))?;
-        }
-
-        info!(algorithm_id, "WASM algorithm deleted");
+        info!(algorithm_key, "WASM algorithm deleted");
         Ok(())
     }
 
@@ -485,13 +483,16 @@ impl WasmAlgorithmHost {
         config: Arc<serde_json::Value>,
     ) -> Result<DecodedFrame, AiEngineError> {
         let (module, module_type) = {
-            let entry = self.modules.get(module_id).ok_or_else(|| {
-                AiEngineError::AlgorithmError(format!("algorithm '{module_id}' not found"))
-            })?;
+            let entry = self
+                .modules
+                .get(module_id)
+                .ok_or(AiEngineError::AlgorithmError(format!(
+                    "algorithm '{module_id}' not found"
+                )))?;
             (Arc::clone(&entry.module), entry.info.module_type)
         };
 
-        if module_type != WasmModuleType::FrameTransform {
+        if module_type != AlgorithmModuleType::FrameTransform {
             return Err(AiEngineError::AlgorithmError(format!(
                 "algorithm '{module_id}' is {:?}, expected FrameTransform",
                 module_type
@@ -502,18 +503,19 @@ impl WasmAlgorithmHost {
         let width = frame.width;
         let height = frame.height;
         let fuel_limit = self.fuel_limit;
+        let memory_limit_bytes = self.memory_limit_bytes;
         let engine = self.engine.clone();
 
         tokio::task::spawn_blocking(move || {
-            Self::run_frame_transform(
-                &engine,
-                &module,
-                pixel_data.as_ref(),
+            let args = FrameTransformRunArgs {
+                pixel_data: pixel_data.as_ref(),
                 width,
                 height,
-                &config,
+                config: &config,
                 fuel_limit,
-            )
+                memory_limit_bytes,
+            };
+            Self::run_frame_transform(&engine, &module, &args)
         })
         .await
         .map_err(|e| AiEngineError::AlgorithmError(format!("frame transform task join: {e}")))?
@@ -523,20 +525,23 @@ impl WasmAlgorithmHost {
     pub async fn execute_result_processor(
         &self,
         module_id: &str,
-        detections: &[Detection],
-        classifications: &[Classification],
+        detections: &[ng_gateway_models::domain::prelude::Detection],
+        classifications: &[ng_gateway_models::domain::prelude::Classification],
         frame_width: u32,
         frame_height: u32,
         config: Arc<serde_json::Value>,
     ) -> Result<ResultProcessorOutput, AiEngineError> {
         let (module, module_type) = {
-            let entry = self.modules.get(module_id).ok_or_else(|| {
-                AiEngineError::AlgorithmError(format!("algorithm '{module_id}' not found"))
-            })?;
+            let entry = self
+                .modules
+                .get(module_id)
+                .ok_or(AiEngineError::AlgorithmError(format!(
+                    "algorithm '{module_id}' not found"
+                )))?;
             (Arc::clone(&entry.module), entry.info.module_type)
         };
 
-        if module_type != WasmModuleType::ResultProcessor {
+        if module_type != AlgorithmModuleType::ResultProcessor {
             return Err(AiEngineError::AlgorithmError(format!(
                 "algorithm '{module_id}' is {:?}, expected ResultProcessor",
                 module_type
@@ -547,11 +552,10 @@ impl WasmAlgorithmHost {
             detections.iter().map(ResultDetection::from).collect();
         let input_classifications: Vec<ResultClassification> = classifications
             .iter()
-            .map(|c| ResultClassification {
-                top_k: c.top_k.iter().map(|(l, s)| (l.to_string(), *s)).collect(),
-            })
+            .map(ResultClassification::from)
             .collect();
         let fuel_limit = self.fuel_limit;
+        let memory_limit_bytes = self.memory_limit_bytes;
         let engine = self.engine.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -562,6 +566,7 @@ impl WasmAlgorithmHost {
                 frame_height,
                 config: config.as_ref(),
                 fuel_limit,
+                memory_limit_bytes,
             };
             Self::run_result_processor(&engine, &module, run_args)
         })
@@ -572,67 +577,68 @@ impl WasmAlgorithmHost {
     /// Test an algorithm with mock data (for the test API endpoint).
     pub async fn test_algorithm(
         &self,
-        algorithm_id: &str,
+        algorithm_key: &str,
         test_input: AlgorithmTestInput,
     ) -> Result<AlgorithmTestResult, AiEngineError> {
         let (module, module_type) = {
-            let entry = self.modules.get(algorithm_id).ok_or_else(|| {
-                AiEngineError::AlgorithmError(format!("algorithm '{algorithm_id}' not found"))
-            })?;
+            let entry = self
+                .modules
+                .get(algorithm_key)
+                .ok_or(AiEngineError::AlgorithmError(format!(
+                    "algorithm '{algorithm_key}' not found"
+                )))?;
             (Arc::clone(&entry.module), entry.info.module_type)
         };
         let fuel_limit = self.fuel_limit;
+        let memory_limit_bytes = self.memory_limit_bytes;
         let engine = self.engine.clone();
         let start = Instant::now();
 
-        let result = tokio::task::spawn_blocking(move || {
-            match module_type {
-                WasmModuleType::FrameTransform => {
-                    // Generate a dummy frame for FrameTransform testing
-                    let pixel_count =
-                        test_input.frame_width as usize * test_input.frame_height as usize * 3;
-                    let dummy_pixels = vec![128u8; pixel_count];
-
-                    match Self::run_frame_transform(
-                        &engine,
-                        &module,
-                        &dummy_pixels,
-                        test_input.frame_width,
-                        test_input.frame_height,
-                        &test_input.config,
-                        fuel_limit,
-                    ) {
-                        Ok(frame) => {
-                            let output = ResultProcessorOutput {
-                                detections: vec![],
-                                classifications: vec![],
-                                custom_outputs: vec![(
-                                    "frame_dimensions".to_string(),
-                                    serde_json::json!({
-                                        "width": frame.width,
-                                        "height": frame.height,
-                                        "pixel_count": frame.data.len()
-                                    }),
-                                )],
-                            };
-                            (true, Some(output), None, fuel_limit)
-                        }
-                        Err(e) => (false, None, Some(e.to_string()), fuel_limit),
+        let result = tokio::task::spawn_blocking(move || match module_type {
+            AlgorithmModuleType::FrameTransform => {
+                let pixel_count =
+                    test_input.frame_width as usize * test_input.frame_height as usize * 3;
+                let dummy_pixels = vec![128u8; pixel_count];
+                let args = FrameTransformRunArgs {
+                    pixel_data: &dummy_pixels,
+                    width: test_input.frame_width,
+                    height: test_input.frame_height,
+                    config: &test_input.config,
+                    fuel_limit,
+                    memory_limit_bytes,
+                };
+                match Self::run_frame_transform(&engine, &module, &args) {
+                    Ok(frame) => {
+                        let output = ResultProcessorOutput {
+                            detections: Vec::new(),
+                            classifications: Vec::new(),
+                            custom_outputs: vec![(
+                                "frame_dimensions".to_string(),
+                                serde_json::json!({
+                                    "width": frame.width,
+                                    "height": frame.height,
+                                    "pixel_count": frame.data.len()
+                                }),
+                            )],
+                        };
+                        (true, Some(output), None)
                     }
+                    Err(e) => (false, None, Some(e.to_string())),
                 }
-                WasmModuleType::ResultProcessor => {
-                    let run_args = ResultProcessorRunArgs {
-                        detections: &test_input.detections,
-                        classifications: &test_input.classifications,
-                        frame_width: test_input.frame_width,
-                        frame_height: test_input.frame_height,
-                        config: &test_input.config,
-                        fuel_limit,
-                    };
-                    match Self::run_result_processor(&engine, &module, run_args) {
-                        Ok(output) => (true, Some(output), None, fuel_limit),
-                        Err(e) => (false, None, Some(e.to_string()), fuel_limit),
-                    }
+            }
+            AlgorithmModuleType::ResultProcessor => {
+                let run_args = ResultProcessorRunArgs {
+                    detections: &test_input.detections,
+                    classifications: &test_input.classifications,
+                    frame_width: test_input.frame_width,
+                    frame_height: test_input.frame_height,
+                    config: &test_input.config,
+                    fuel_limit,
+                    memory_limit_bytes,
+                };
+                match Self::run_result_processor(&engine, &module, run_args) {
+                    Ok(output) => (true, Some(output), None),
+                    Err(e) => (false, None, Some(e.to_string())),
                 }
             }
         })
@@ -640,12 +646,12 @@ impl WasmAlgorithmHost {
         .map_err(|e| AiEngineError::AlgorithmError(format!("test task join: {e}")))?;
 
         let elapsed = start.elapsed();
-        let (success, output, error, _initial_fuel) = result;
+        let (success, output, error) = result;
 
         Ok(AlgorithmTestResult {
             success,
             execution_time_ms: elapsed.as_secs_f64() * 1000.0,
-            fuel_consumed: fuel_limit, // approximate — exact tracking requires Store access
+            fuel_consumed: fuel_limit,
             output,
             error,
         })
@@ -657,16 +663,10 @@ impl WasmAlgorithmHost {
     fn run_frame_transform(
         engine: &Engine,
         module: &Module,
-        pixel_data: &[u8],
-        width: u32,
-        height: u32,
-        config: &serde_json::Value,
-        fuel_limit: u64,
+        args: &FrameTransformRunArgs<'_>,
     ) -> Result<DecodedFrame, AiEngineError> {
-        let mut store = Store::new(engine, ());
-        store
-            .set_fuel(fuel_limit)
-            .map_err(|e| AiEngineError::AlgorithmError(format!("set fuel: {e}")))?;
+        let mut store =
+            Self::build_limited_store(engine, args.fuel_limit, args.memory_limit_bytes)?;
 
         let instance = wasmtime::Instance::new(&mut store, module, &[])
             .map_err(|e| AiEngineError::AlgorithmError(format!("instantiate: {e}")))?;
@@ -689,26 +689,26 @@ impl WasmAlgorithmHost {
 
         // 1. Allocate space for pixel data in WASM memory and copy pixels
         let pixels_ptr = alloc
-            .call(&mut store, pixel_data.len() as i32)
+            .call(&mut store, args.pixel_data.len() as i32)
             .map_err(|e| AiEngineError::AlgorithmError(format!("alloc pixels: {e}")))?;
 
         let mem_data = memory.data_mut(&mut store);
         let pixels_start = pixels_ptr as usize;
-        let pixels_end = pixels_start + pixel_data.len();
+        let pixels_end = pixels_start + args.pixel_data.len();
         if pixels_end > mem_data.len() {
             return Err(AiEngineError::AlgorithmError(
                 "WASM memory too small for pixel data".into(),
             ));
         }
-        mem_data[pixels_start..pixels_end].copy_from_slice(pixel_data);
+        mem_data[pixels_start..pixels_end].copy_from_slice(args.pixel_data);
 
         // 2. Serialize input JSON
         let input = FrameTransformInputRef {
-            width,
-            height,
+            width: args.width,
+            height: args.height,
             pixels_ptr: pixels_ptr as u32,
-            pixels_len: pixel_data.len() as u32,
-            config,
+            pixels_len: args.pixel_data.len() as u32,
+            config: args.config,
         };
         let input_json = serde_json::to_vec(&input)
             .map_err(|e| AiEngineError::AlgorithmError(format!("serialize input: {e}")))?;
@@ -776,7 +776,7 @@ impl WasmAlgorithmHost {
 
         debug!(
             module_type = "frame_transform",
-            input_size = pixel_data.len(),
+            input_size = args.pixel_data.len(),
             output_size = out_pixels.len(),
             output_w = output.width,
             output_h = output.height,
@@ -796,10 +796,8 @@ impl WasmAlgorithmHost {
         module: &Module,
         args: ResultProcessorRunArgs<'_>,
     ) -> Result<ResultProcessorOutput, AiEngineError> {
-        let mut store = Store::new(engine, ());
-        store
-            .set_fuel(args.fuel_limit)
-            .map_err(|e| AiEngineError::AlgorithmError(format!("set fuel: {e}")))?;
+        let mut store =
+            Self::build_limited_store(engine, args.fuel_limit, args.memory_limit_bytes)?;
 
         let instance = wasmtime::Instance::new(&mut store, module, &[])
             .map_err(|e| AiEngineError::AlgorithmError(format!("instantiate: {e}")))?;
@@ -881,53 +879,23 @@ impl WasmAlgorithmHost {
 
         Ok(output)
     }
-}
 
-/// Generate a filesystem-safe slug from an algorithm name.
-///
-/// Converts to lowercase, replaces non-alphanumeric characters with underscores,
-/// and collapses consecutive underscores.
-fn slug_from_name(name: &str) -> String {
-    let slug: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    /// Build one invocation-local store with fuel and linear-memory limits.
+    fn build_limited_store(
+        engine: &Engine,
+        fuel_limit: u64,
+        memory_limit_bytes: usize,
+    ) -> Result<Store<WasmStoreState>, AiEngineError> {
+        let effective_memory_limit = memory_limit_bytes.max(64 * 1024);
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(effective_memory_limit)
+            .build();
 
-    // Collapse consecutive underscores and trim
-    let mut result = String::with_capacity(slug.len());
-    let mut prev_underscore = false;
-    for c in slug.chars() {
-        if c == '_' {
-            if !prev_underscore && !result.is_empty() {
-                result.push(c);
-            }
-            prev_underscore = true;
-        } else {
-            result.push(c);
-            prev_underscore = false;
-        }
-    }
-    result.trim_end_matches('_').to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_slug_from_name() {
-        assert_eq!(
-            slug_from_name("PPE Compliance Checker"),
-            "ppe_compliance_checker"
-        );
-        assert_eq!(slug_from_name("edge-detect-v2"), "edge_detect_v2");
-        assert_eq!(slug_from_name("  My  Algorithm  "), "my_algorithm");
-        assert_eq!(slug_from_name("simple"), "simple");
+        let mut store = Store::new(engine, WasmStoreState { limits });
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(fuel_limit)
+            .map_err(|e| AiEngineError::AlgorithmError(format!("set fuel: {e}")))?;
+        Ok(store)
     }
 }

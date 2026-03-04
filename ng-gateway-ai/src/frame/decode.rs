@@ -41,13 +41,18 @@ mod inner {
         format::Pixel,
         frame::Video as AvFrame,
         software::scaling::{self, Context as ScalerContext},
-        Packet,
+        util::error::EAGAIN,
+        Error as FfmpegError, Packet,
     };
     use ng_gateway_error::ai::AiEngineError;
-    use ng_gateway_models::ai::types::{FrameFormat, VideoFrame};
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        OnceLock,
+    use ng_gateway_models::{domain::prelude::VideoFrame, enums::ai::FrameFormat};
+    use rayon::prelude::*;
+    use std::{
+        io::Cursor,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            OnceLock,
+        },
     };
     use tokio::sync::{mpsc, oneshot};
     use tracing::info_span;
@@ -254,9 +259,9 @@ mod inner {
                 };
                 *slot = Some(open_decoder(codec_id)?);
             }
-            slot.as_mut().ok_or_else(|| {
-                AiEngineError::DecodeError("decoder context initialization failed".to_string())
-            })
+            slot.as_mut().ok_or(AiEngineError::DecodeError(
+                "decoder context initialization failed".to_string(),
+            ))
         }
 
         /// Get or create scaler for one source/destination pair.
@@ -279,48 +284,69 @@ mod inner {
                 self.scaler = Some(scaler);
                 self.scaler_spec = Some(spec);
             }
-            self.scaler.as_mut().ok_or_else(|| {
-                AiEngineError::DecodeError("scaler context initialization failed".to_string())
-            })
+            self.scaler.as_mut().ok_or(AiEngineError::DecodeError(
+                "scaler context initialization failed".to_string(),
+            ))
         }
     }
 
     /// Open one FFmpeg decoder context for the given codec.
     fn open_decoder(codec_id: codec::Id) -> Result<DecoderVideo, AiEngineError> {
-        let decoder_codec = codec::decoder::find(codec_id).ok_or_else(|| {
-            AiEngineError::DecodeError(format!("FFmpeg codec not found: {codec_id:?}"))
-        })?;
+        let decoder_codec = codec::decoder::find(codec_id).ok_or(AiEngineError::DecodeError(
+            format!("FFmpeg codec not found: {codec_id:?}"),
+        ))?;
         Context::new_with_codec(decoder_codec)
             .decoder()
             .video()
             .map_err(|e| AiEngineError::DecodeError(format!("decoder open: {e}")))
     }
 
-    /// Decode a single H.264 or H.265 NAL unit to RGB24 using FFmpeg.
+    /// Decode one H.264/H.265 packet and return the newest available frame.
     ///
     /// Uses worker-local decoder/scaler context to avoid per-frame reinitialization.
+    /// The decoder is kept "warm" across packets; we do not flush (`send_eof`)
+    /// per request because that breaks normal inter-frame decode semantics.
     fn decode_frame_ffmpeg(
         frame: &VideoFrame,
         decoder_context: &mut DecoderContext,
     ) -> Result<DecodedFrame, AiEngineError> {
-        let mut av_frame = AvFrame::empty();
-        {
+        let av_frame = {
+            let mut latest_frame: Option<AvFrame> = None;
+            let mut produced_any = false;
             let decoder = decoder_context.decoder_for(frame.format)?;
 
-            // Feed NAL data as one packet.
+            // Feed one encoded packet.
             let packet = Packet::copy(&frame.data);
             decoder
                 .send_packet(&packet)
                 .map_err(|e| AiEngineError::DecodeError(format!("send_packet: {e}")))?;
 
-            // Flush for packet-at-a-time decode to force output frame availability.
-            let _ = decoder.send_eof();
+            // Drain all currently available decoded frames and keep the newest one.
+            loop {
+                let mut candidate = AvFrame::empty();
+                match decoder.receive_frame(&mut candidate) {
+                    Ok(()) => {
+                        produced_any = true;
+                        latest_frame = Some(candidate);
+                    }
+                    Err(error) if is_non_fatal_drain_end(&error) => break,
+                    Err(error) => {
+                        return Err(AiEngineError::DecodeError(format!(
+                            "receive_frame: {error}"
+                        )));
+                    }
+                }
+            }
 
-            // Receive one decoded frame.
-            decoder
-                .receive_frame(&mut av_frame)
-                .map_err(|e| AiEngineError::DecodeError(format!("receive_frame: {e}")))?;
-        }
+            if !produced_any {
+                return Err(AiEngineError::DecodeError(
+                    "decoder produced no frame for current packet (likely needs more data)".into(),
+                ));
+            }
+            latest_frame.ok_or(AiEngineError::DecodeError(
+                "decoder internal state lost latest frame".into(),
+            ))?
+        };
 
         let src_w = av_frame.width();
         let src_h = av_frame.height();
@@ -340,19 +366,7 @@ mod inner {
             .run(&av_frame, &mut rgb_frame)
             .map_err(|e| AiEngineError::DecodeError(format!("colorspace conversion: {e}")))?;
 
-        // Extract RGB24 data from the output frame (may have stride padding).
-        let stride = rgb_frame.stride(0);
-        let expected_row_bytes = (src_w as usize) * 3;
-        let mut rgb_data = Vec::with_capacity(expected_row_bytes * src_h as usize);
-
-        let plane_data = rgb_frame.data(0);
-        for row in 0..src_h as usize {
-            let start = row * stride;
-            let end = start + expected_row_bytes;
-            if end <= plane_data.len() {
-                rgb_data.extend_from_slice(&plane_data[start..end]);
-            }
-        }
+        let rgb_data = extract_rgb24_packed(&rgb_frame, src_w, src_h)?;
 
         Ok(DecodedFrame {
             data: Bytes::from(rgb_data),
@@ -361,12 +375,59 @@ mod inner {
         })
     }
 
+    /// Whether `receive_frame` reached a normal drain boundary.
+    #[inline]
+    fn is_non_fatal_drain_end(error: &FfmpegError) -> bool {
+        matches!(
+            error,
+            FfmpegError::Other { errno } if *errno == EAGAIN
+        ) || matches!(error, FfmpegError::Eof)
+    }
+
+    /// Extract packed RGB24 payload from a potentially stride-padded frame.
+    fn extract_rgb24_packed(
+        rgb_frame: &AvFrame,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, AiEngineError> {
+        let stride = rgb_frame.stride(0);
+        let expected_row_bytes = (width as usize) * 3;
+        let plane_data = rgb_frame.data(0);
+        let total_bytes = expected_row_bytes * height as usize;
+
+        // Fast path for tightly packed RGB frames.
+        if stride == expected_row_bytes {
+            if plane_data.len() < total_bytes {
+                return Err(AiEngineError::DecodeError(format!(
+                    "RGB frame plane too short: need={total_bytes}, plane_len={}",
+                    plane_data.len()
+                )));
+            }
+            let mut rgb_data = Vec::with_capacity(total_bytes);
+            rgb_data.extend_from_slice(&plane_data[..total_bytes]);
+            return Ok(rgb_data);
+        }
+
+        let mut rgb_data = Vec::with_capacity(total_bytes);
+
+        for row in 0..height as usize {
+            let start = row * stride;
+            let end = start + expected_row_bytes;
+            if end > plane_data.len() {
+                return Err(AiEngineError::DecodeError(format!(
+                    "RGB frame plane too short: row={row}, need_end={end}, plane_len={}",
+                    plane_data.len()
+                )));
+            }
+            rgb_data.extend_from_slice(&plane_data[start..end]);
+        }
+        Ok(rgb_data)
+    }
+
     // ── JPEG decode ───────────────────────────────────────────────────
 
     /// Decode JPEG bytes to RGB24 using the `image` crate.
     fn decode_jpeg(data: &[u8]) -> Result<DecodedFrame, AiEngineError> {
-        use std::io::Cursor;
-
         let img = image::ImageReader::new(Cursor::new(data))
             .with_guessed_format()
             .map_err(|e| AiEngineError::DecodeError(format!("format guess: {e}")))?
@@ -385,10 +446,14 @@ mod inner {
 
     // ── NV12 → RGB24 conversion ───────────────────────────────────────
 
-    /// Convert NV12 frame to RGB24.
+    /// Convert NV12 frame to RGB24 using fixed-point integer arithmetic.
     ///
     /// NV12 layout: `width × height` Y plane followed by `width × height/2`
-    /// interleaved UV plane. Uses BT.601 coefficients for YUV→RGB.
+    /// interleaved UV plane. Uses BT.601 coefficients scaled to 16-bit
+    /// fixed-point (×256) to avoid per-pixel float operations.
+    ///
+    /// For frames >= 128 rows, processing is parallelized across rows
+    /// using rayon to saturate available CPU cores.
     fn decode_nv12(data: &[u8], width: u32, height: u32) -> Result<DecodedFrame, AiEngineError> {
         let w = width as usize;
         let h = height as usize;
@@ -404,26 +469,42 @@ mod inner {
 
         let y_plane = &data[..y_plane_size];
         let uv_plane = &data[y_plane_size..];
+        let rgb_size = w * h * 3;
+        let mut rgb = vec![0u8; rgb_size];
 
-        let mut rgb = Vec::with_capacity(w * h * 3);
+        // BT.601 coefficients scaled to fixed-point (×256):
+        //   R = Y + 1.402 × V           → Y + (359 × V) >> 8
+        //   G = Y - 0.344136 × U - 0.714136 × V → Y - (88 × U + 183 × V) >> 8
+        //   B = Y + 1.772 × U           → Y + (454 × U) >> 8
+        let convert_row = |row: usize, rgb_row: &mut [u8]| {
+            let y_row = &y_plane[row * w..(row + 1) * w];
+            let uv_row_base = (row / 2) * w;
+            for (col, &y) in y_row.iter().enumerate() {
+                let y = y as i32;
+                let uv_col = col & !1;
+                let u = uv_plane[uv_row_base + uv_col] as i32 - 128;
+                let v = uv_plane[uv_row_base + uv_col + 1] as i32 - 128;
 
-        for row in 0..h {
-            for col in 0..w {
-                let y_val = y_plane[row * w + col] as f32;
-                let uv_idx = (row / 2) * w + (col & !1);
-                let u_val = uv_plane[uv_idx] as f32 - 128.0;
-                let v_val = uv_plane[uv_idx + 1] as f32 - 128.0;
+                let r = (y + ((359 * v) >> 8)).clamp(0, 255) as u8;
+                let g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
+                let b = (y + ((454 * u) >> 8)).clamp(0, 255) as u8;
 
-                // BT.601 YUV → RGB
-                let r = (y_val + 1.402 * v_val).round().clamp(0.0, 255.0) as u8;
-                let g = (y_val - 0.344136 * u_val - 0.714136 * v_val)
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-                let b = (y_val + 1.772 * u_val).round().clamp(0.0, 255.0) as u8;
+                let dst = col * 3;
+                rgb_row[dst] = r;
+                rgb_row[dst + 1] = g;
+                rgb_row[dst + 2] = b;
+            }
+        };
 
-                rgb.push(r);
-                rgb.push(g);
-                rgb.push(b);
+        let row_bytes = w * 3;
+        if h >= 128 {
+            rgb.par_chunks_mut(row_bytes)
+                .enumerate()
+                .for_each(|(row, chunk)| convert_row(row, chunk));
+        } else {
+            for row in 0..h {
+                let start = row * row_bytes;
+                convert_row(row, &mut rgb[start..start + row_bytes]);
             }
         }
 

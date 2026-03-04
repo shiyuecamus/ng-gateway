@@ -5,9 +5,9 @@
 
 #[cfg(feature = "engine")]
 mod inner {
-    use ng_gateway_models::ai::{
-        pipeline::TrackerAlgorithm,
-        types::{BoundingBox, Detection, KeypointDetection},
+    use ng_gateway_models::{
+        domain::prelude::{BoundingBox, Detection, KeypointDetection},
+        enums::ai::TrackerAlgorithm,
     };
 
     /// Stateful tracker runtime bound to one channel pipeline.
@@ -19,6 +19,8 @@ mod inner {
         next_track_id: u64,
         detection_tracks: Vec<TrackState>,
         keypoint_tracks: Vec<TrackState>,
+        /// Reusable spatial index to avoid per-frame allocation.
+        spatial_grid: SpatialGrid,
     }
 
     #[derive(Debug, Clone)]
@@ -28,6 +30,66 @@ mod inner {
         bbox: BoundingBox,
         embedding: [f32; 4],
         last_seen_frame: u64,
+    }
+
+    /// Grid-based spatial index over normalized [0,1]×[0,1] bounding boxes.
+    ///
+    /// Partitions the frame into `GRID_SIZE × GRID_SIZE` cells. Each cell
+    /// stores indices of tracks whose bounding boxes overlap that cell.
+    /// This reduces IoU comparisons from O(n*m) to O(n * avg_candidates).
+    const GRID_SIZE: usize = 8;
+
+    #[derive(Debug)]
+    struct SpatialGrid {
+        cells: Vec<Vec<usize>>,
+    }
+
+    impl SpatialGrid {
+        fn new() -> Self {
+            let cells = (0..GRID_SIZE * GRID_SIZE)
+                .map(|_| Vec::with_capacity(8))
+                .collect();
+            Self { cells }
+        }
+
+        fn clear(&mut self) {
+            for cell in &mut self.cells {
+                cell.clear();
+            }
+        }
+
+        /// Insert a track index into all cells its bbox overlaps.
+        fn insert(&mut self, index: usize, bbox: &BoundingBox) {
+            let x_min = (bbox.x_min * GRID_SIZE as f32).floor().max(0.0) as usize;
+            let y_min = (bbox.y_min * GRID_SIZE as f32).floor().max(0.0) as usize;
+            let x_max = (bbox.x_max * GRID_SIZE as f32).ceil() as usize;
+            let y_max = (bbox.y_max * GRID_SIZE as f32).ceil() as usize;
+
+            for gy in y_min..y_max.min(GRID_SIZE) {
+                for gx in x_min..x_max.min(GRID_SIZE) {
+                    self.cells[gy * GRID_SIZE + gx].push(index);
+                }
+            }
+        }
+
+        /// Return candidate track indices whose cells overlap the query bbox.
+        fn query_candidates(&self, bbox: &BoundingBox, output: &mut Vec<usize>) {
+            output.clear();
+            let x_min = (bbox.x_min * GRID_SIZE as f32).floor().max(0.0) as usize;
+            let y_min = (bbox.y_min * GRID_SIZE as f32).floor().max(0.0) as usize;
+            let x_max = (bbox.x_max * GRID_SIZE as f32).ceil() as usize;
+            let y_max = (bbox.y_max * GRID_SIZE as f32).ceil() as usize;
+
+            for gy in y_min..y_max.min(GRID_SIZE) {
+                for gx in x_min..x_max.min(GRID_SIZE) {
+                    for &idx in &self.cells[gy * GRID_SIZE + gx] {
+                        if !output.contains(&idx) {
+                            output.push(idx);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     impl TrackerRuntime {
@@ -41,6 +103,7 @@ mod inner {
                 next_track_id: 1,
                 detection_tracks: Vec::with_capacity(128),
                 keypoint_tracks: Vec::with_capacity(128),
+                spatial_grid: SpatialGrid::new(),
             }
         }
 
@@ -65,13 +128,23 @@ mod inner {
         }
 
         fn update_detections(&mut self, frame_index: u64, detections: &mut [Detection]) {
+            self.spatial_grid.clear();
+            for (i, track) in self.detection_tracks.iter().enumerate() {
+                self.spatial_grid.insert(i, &track.bbox);
+            }
+
             let mut track_used = vec![false; self.detection_tracks.len()];
+            let mut candidates = Vec::with_capacity(32);
 
             for detection in detections.iter_mut() {
                 let det_embedding = embedding_from_bbox(&detection.bbox);
-                let match_idx = self.find_best_track_match(
+                self.spatial_grid
+                    .query_candidates(&detection.bbox, &mut candidates);
+
+                let match_idx = self.find_best_track_match_indexed(
                     &self.detection_tracks,
                     &track_used,
+                    &candidates,
                     detection.class_id,
                     &detection.bbox,
                     det_embedding,
@@ -104,13 +177,23 @@ mod inner {
             frame_index: u64,
             keypoint_detections: &mut [KeypointDetection],
         ) {
+            self.spatial_grid.clear();
+            for (i, track) in self.keypoint_tracks.iter().enumerate() {
+                self.spatial_grid.insert(i, &track.bbox);
+            }
+
             let mut track_used = vec![false; self.keypoint_tracks.len()];
+            let mut candidates = Vec::with_capacity(32);
 
             for detection in keypoint_detections.iter_mut() {
                 let det_embedding = embedding_from_bbox(&detection.bbox);
-                let match_idx = self.find_best_track_match(
+                self.spatial_grid
+                    .query_candidates(&detection.bbox, &mut candidates);
+
+                let match_idx = self.find_best_track_match_indexed(
                     &self.keypoint_tracks,
                     &track_used,
+                    &candidates,
                     detection.class_id,
                     &detection.bbox,
                     det_embedding,
@@ -146,10 +229,16 @@ mod inner {
                 .retain(|t| frame_index.saturating_sub(t.last_seen_frame) <= max_age);
         }
 
-        fn find_best_track_match(
+        /// Find the best matching track among spatial-grid candidates only.
+        ///
+        /// Only examines track indices present in `candidates`, which were
+        /// pre-filtered by spatial proximity via the grid index. This reduces
+        /// IoU computation from O(all_tracks) to O(nearby_tracks).
+        fn find_best_track_match_indexed(
             &self,
             tracks: &[TrackState],
             track_used: &[bool],
+            candidates: &[usize],
             class_id: u32,
             bbox: &BoundingBox,
             embedding: [f32; 4],
@@ -157,7 +246,8 @@ mod inner {
             let mut best_idx = None;
             let mut best_score = f32::MIN;
 
-            for (idx, track) in tracks.iter().enumerate() {
+            for &idx in candidates {
+                let track = &tracks[idx];
                 if track_used[idx] || track.class_id != class_id {
                     continue;
                 }
@@ -170,9 +260,6 @@ mod inner {
                 let score = match &self.algorithm {
                     TrackerAlgorithm::Sort => iou,
                     TrackerAlgorithm::DeepSort { reid_model_id: _ } => {
-                        // DeepSORT uses IoU + appearance affinity. We approximate
-                        // appearance affinity with a geometry embedding until ReID
-                        // model inference is introduced in the dedicated ReID phase.
                         let appearance = cosine_similarity(track.embedding, embedding);
                         (0.6 * iou) + (0.4 * appearance)
                     }

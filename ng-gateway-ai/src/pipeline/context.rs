@@ -3,7 +3,7 @@
 #[cfg(feature = "engine")]
 mod inner {
     use crate::decoded::DecodedFrame;
-    use ng_gateway_models::ai::types::{
+    use ng_gateway_models::domain::prelude::{
         AnomalyMap, Classification, Detection, KeypointDetection, SegmentationMask,
     };
 
@@ -30,6 +30,26 @@ mod inner {
         pub fn new(frame: DecodedFrame) -> Self {
             Self {
                 current_frame: frame,
+                detections: Vec::new(),
+                classifications: Vec::new(),
+                keypoint_detections: Vec::new(),
+                segmentation_masks: Vec::new(),
+                anomaly_maps: Vec::new(),
+                custom_outputs: Vec::new(),
+            }
+        }
+
+        /// Create a merge-only context that accumulates results from ROI sub-contexts.
+        ///
+        /// Uses a zero-sized placeholder frame since the merge context never
+        /// feeds pixel data into any stage — it only collects results.
+        pub fn new_merge_only() -> Self {
+            Self {
+                current_frame: DecodedFrame {
+                    data: bytes::Bytes::new(),
+                    width: 0,
+                    height: 0,
+                },
                 detections: Vec::new(),
                 classifications: Vec::new(),
                 keypoint_detections: Vec::new(),

@@ -18,4 +18,9 @@
 pub mod host;
 
 #[cfg(feature = "engine")]
+pub mod registry;
+
+#[cfg(feature = "engine")]
 pub use host::WasmAlgorithmHost;
+#[cfg(feature = "engine")]
+pub use registry::AlgorithmRegistry;

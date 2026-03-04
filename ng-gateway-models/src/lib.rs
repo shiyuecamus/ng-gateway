@@ -1,4 +1,3 @@
-pub mod ai;
 pub mod cache;
 pub mod casbin;
 pub mod constants;
@@ -14,13 +13,16 @@ pub mod settings;
 pub mod web;
 
 use crate::{
-    ai::api::AiEngineApi,
     cache::NGBaseCache,
     casbin::{CasbinCmd, CasbinResult},
     core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
-        Claims, NewAction, NewApp, NewAppSub, NewChannel, NewDevice, NewPoint, RuntimeSettingKey,
-        UpdateAction, UpdateApp, UpdateAppSub, UpdateChannel, UpdateDevice, UpdatePoint,
+        AlgorithmInfo, AlgorithmPageParams, AlgorithmProbeInfo, AlgorithmTestInput,
+        AlgorithmTestResult, AnalysisResult, Claims, EngineStatus, FrameAnalysisRequest, ModelInfo,
+        ModelInstallRequest, ModelPageParams, ModelProbeInfo, NewAction, NewApp, NewAppSub,
+        NewChannel, NewDevice, NewPipeline, NewPoint, PageResult, PipelineInfo, PipelinePageParams,
+        ProcessorInfo, RuntimeSettingKey, UpdateAction, UpdateApp, UpdateAppSub, UpdateChannel,
+        UpdateDevice, UpdateModel, UpdatePipeline, UpdatePoint,
     },
     entities::prelude::{AppModel, ChannelModel, DeviceModel},
     enums::common::Status,
@@ -31,8 +33,10 @@ use crate::{
 use ::casbin::Error as CasbinError;
 use actix_web::http::Method;
 use async_trait::async_trait;
+use bytes::Bytes;
 use downcast_rs::{impl_downcast, DowncastSync};
 use ng_gateway_error::{
+    ai::AiEngineError,
     init::InitContextError,
     rbac::RBACError,
     storage::{CacheError, StorageError},
@@ -62,6 +66,11 @@ impl_downcast!(sync DriverRuntimeCmd);
 impl_downcast!(sync PluginRuntimeCmd);
 impl_downcast!(sync AppRuntimeCmd);
 impl_downcast!(sync AppSubRuntimeCmd);
+impl_downcast!(sync AiEngineApi);
+impl_downcast!(sync AiModelRegistry);
+impl_downcast!(sync AiPipelineRegistry);
+impl_downcast!(sync AiAlgorithmRegistry);
+impl_downcast!(sync AiInferenceRuntime);
 
 pub const DEFAULT_ROOT_TREE_ID: i32 = 0;
 
@@ -354,6 +363,243 @@ pub trait Gateway:
         changed: &[RuntimeSettingKey],
         queue_capacity: usize,
     ) -> NGResult<()>;
+}
+
+// ── AI Sub-Trait: Model Registry ──────────────────────────────────
+//
+// Manages model lifecycle: probe, install, load/unload, update, query.
+// Implementations own an in-memory cache backed by the DB as source of truth.
+
+/// Model lifecycle and registry API.
+///
+/// Responsible for the full model lifecycle: probe (metadata extraction),
+/// install (DB + file + cache), load/unload (inference backend), update,
+/// and uninstall. Query methods serve both cached and paginated DB reads.
+///
+/// # Write-Through Cache
+///
+/// All mutations go to DB first, then update the in-memory cache.
+/// On startup, the cache is hydrated from DB and validated against disk.
+#[async_trait::async_trait]
+pub trait AiModelRegistry: DowncastSync + Send + Sync + 'static {
+    /// Probe a model artifact and extract all available metadata via runtime session.
+    ///
+    /// Creates a temporary inference session to extract precise tensor
+    /// information (shapes, dtypes, names), then destroys the session.
+    /// Does NOT persist the model or register it in the runtime.
+    async fn probe_model(
+        &self,
+        file_path: &std::path::Path,
+    ) -> Result<ModelProbeInfo, AiEngineError>;
+
+    /// Install a model: probe, persist to DB, move file, cache in registry.
+    ///
+    /// Follows the strict transaction pipeline: probe → validate → DB insert
+    /// → atomic file move → cache update. On failure, DB row is rolled back
+    /// and the temp file is left for caller cleanup.
+    async fn install_model(
+        &self,
+        file_path: &std::path::Path,
+        user_meta: ModelInstallRequest,
+    ) -> Result<ModelInfo, AiEngineError>;
+
+    /// Uninstall a model: unload from backend, remove files, delete DB row, evict cache.
+    async fn uninstall_model(&self, model_id: i32) -> Result<(), AiEngineError>;
+
+    /// Update mutable model metadata (name, labels, preprocess/postprocess overrides).
+    async fn update_model(&self, model: UpdateModel) -> Result<ModelInfo, AiEngineError>;
+
+    /// Explicitly load a model into the inference backend.
+    async fn load_model(&self, model_id: i32) -> Result<(), AiEngineError>;
+
+    /// Explicitly unload a model from the inference backend (free memory).
+    async fn unload_model(&self, model_id: i32) -> Result<(), AiEngineError>;
+
+    /// List all registered models (from cache).
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, AiEngineError>;
+
+    /// Get model info by identifier (from cache).
+    async fn get_model(&self, model_id: i32) -> Result<Option<ModelInfo>, AiEngineError>;
+
+    /// Paginated model query with filters (from DB).
+    async fn page_models(
+        &self,
+        params: ModelPageParams,
+    ) -> Result<PageResult<ModelInfo>, AiEngineError>;
+}
+
+// ── AI Sub-Trait: Pipeline Registry ──────────────────────────────
+//
+// Three-layer pipeline management:
+//   1. Pipeline Definition (DB: pipeline + stages + alarm_rules)
+//   2. Pipeline Binding (DB: pipeline_binding — channel ↔ pipeline)
+//   3. Pipeline Runtime (in-memory: compiled pipeline + tracker + sampler)
+
+/// Pipeline definition, binding, and runtime management API.
+///
+/// A pipeline has three lifecycle layers:
+/// - **Definition**: the blueprint with stages and alarm rules (persisted in DB).
+/// - **Binding**: which channel uses which pipeline (persisted in DB).
+/// - **Runtime**: the compiled, optimized form running in-memory for inference.
+///
+/// Mutation flow: DB write → cache update → re-compile affected runtime bindings.
+#[async_trait::async_trait]
+pub trait AiPipelineRegistry: DowncastSync + Send + Sync + 'static {
+    /// Create a new pipeline definition (stages + alarm rules).
+    async fn create_pipeline(&self, pipeline: NewPipeline) -> Result<PipelineInfo, AiEngineError>;
+
+    /// Update an existing pipeline definition.
+    ///
+    /// All channels bound to this pipeline will be re-compiled automatically.
+    async fn update_pipeline(
+        &self,
+        pipeline: UpdatePipeline,
+    ) -> Result<PipelineInfo, AiEngineError>;
+
+    /// Delete a pipeline definition and all associated bindings.
+    async fn delete_pipeline(&self, pipeline_id: i32) -> Result<(), AiEngineError>;
+
+    /// Get a pipeline definition by ID.
+    async fn get_pipeline(&self, pipeline_id: i32) -> Result<Option<PipelineInfo>, AiEngineError>;
+
+    /// List all pipeline definitions (from cache).
+    async fn list_pipelines(&self) -> Result<Vec<PipelineInfo>, AiEngineError>;
+
+    /// Paginated pipeline query with filters (from DB).
+    async fn page_pipelines(
+        &self,
+        params: PipelinePageParams,
+    ) -> Result<PageResult<PipelineInfo>, AiEngineError>;
+
+    /// Bind a pipeline to a channel. Compiles and activates at runtime.
+    ///
+    /// If the channel already has a binding, the old one is replaced.
+    async fn bind_pipeline(&self, channel_id: i32, pipeline_id: i32) -> Result<(), AiEngineError>;
+
+    /// Unbind and deactivate the pipeline for a channel.
+    async fn unbind_pipeline(&self, channel_id: i32) -> Result<(), AiEngineError>;
+
+    /// Get the active pipeline info for a channel (from runtime cache).
+    fn get_channel_pipeline(&self, channel_id: i32) -> Option<PipelineInfo>;
+}
+
+// ── AI Sub-Trait: Algorithm Registry ─────────────────────────────
+//
+// Manages WASM algorithm lifecycle: probe, install, uninstall, test, query.
+
+/// WASM algorithm lifecycle and registry API.
+///
+/// Algorithms are custom WASM modules that extend pipeline processing with
+/// frame transforms or result processors. Metadata is always sourced from
+/// the WASM custom section `ng.ai.manifest.v1`.
+///
+/// Installation flow: probe → validate → persist → compile → register.
+#[async_trait::async_trait]
+pub trait AiAlgorithmRegistry: DowncastSync + Send + Sync + 'static {
+    /// Probe a WASM algorithm artifact and extract metadata from custom section.
+    async fn probe_algorithm(&self, wasm_bytes: Bytes)
+        -> Result<AlgorithmProbeInfo, AiEngineError>;
+
+    /// Install and register a WASM algorithm artifact.
+    ///
+    /// Installation MUST use metadata extracted from WASM custom section and
+    /// MUST NOT trust caller-provided metadata payloads.
+    async fn install_algorithm(&self, wasm_bytes: Bytes) -> Result<AlgorithmInfo, AiEngineError>;
+
+    /// Uninstall a registered algorithm and remove its files.
+    async fn uninstall_algorithm(&self, algorithm_id: i32) -> Result<(), AiEngineError>;
+
+    /// List all registered WASM algorithms (from cache).
+    async fn list_algorithms(&self) -> Result<Vec<AlgorithmInfo>, AiEngineError>;
+
+    /// Get a single algorithm by identifier (from cache).
+    async fn get_algorithm(
+        &self,
+        algorithm_id: i32,
+    ) -> Result<Option<AlgorithmInfo>, AiEngineError>;
+
+    /// Paginated algorithm query with filters (from DB).
+    async fn page_algorithms(
+        &self,
+        params: AlgorithmPageParams,
+    ) -> Result<PageResult<AlgorithmInfo>, AiEngineError>;
+
+    /// Test an algorithm with mock data.
+    async fn test_algorithm(
+        &self,
+        algorithm_id: i32,
+        test_input: AlgorithmTestInput,
+    ) -> Result<AlgorithmTestResult, AiEngineError>;
+}
+
+// ── AI Sub-Trait: Inference Runtime ──────────────────────────────
+//
+// Owns the inference hot path: frame analysis, backpressure, status.
+
+/// Inference runtime API — the real-time analysis hot path.
+///
+/// Manages frame submission, backpressure, latest-result cache,
+/// engine status, and built-in processor discovery.
+///
+/// # Backpressure
+///
+/// When the engine cannot accept more frames, [`analyze_frame`] returns
+/// [`AiEngineError::Backpressure`]. Callers should drop the frame and
+/// continue (best-effort semantics for real-time video).
+#[async_trait::async_trait]
+pub trait AiInferenceRuntime: DowncastSync + Send + Sync + 'static {
+    /// Submit a video frame for AI analysis.
+    async fn analyze_frame(
+        &self,
+        request: FrameAnalysisRequest,
+    ) -> Result<AnalysisResult, AiEngineError>;
+
+    /// Check if the engine has capacity to accept a new frame (non-blocking).
+    fn has_capacity(&self, channel_id: &i32) -> bool;
+
+    /// Get the latest analysis result for a channel (for snapshot API).
+    async fn get_latest_result(
+        &self,
+        channel_id: i32,
+    ) -> Result<Option<AnalysisResult>, AiEngineError>;
+
+    /// Get an aggregated engine status snapshot for monitoring/API.
+    async fn get_engine_status(&self) -> Result<EngineStatus, AiEngineError>;
+
+    /// List built-in preprocessors with their metadata and parameters.
+    fn list_preprocessors(&self) -> Vec<ProcessorInfo>;
+
+    /// List built-in postprocessors with their metadata and parameters.
+    fn list_postprocessors(&self) -> Vec<ProcessorInfo>;
+}
+
+// ── AI Facade Trait ──────────────────────────────────────────────
+//
+// The unified entry point that composes all sub-traits.
+// Gateway and web API layers interact with this single trait.
+
+/// The unified AI Processing Engine API — gateway-wide entry point.
+///
+/// This is a composition trait that provides access to all AI subsystem
+/// capabilities through a single `Arc<dyn AiEngineApi>`. Implementations
+/// delegate to the specialized registries and runtime.
+///
+/// # Thread Safety
+///
+/// All methods are `&self` and internally synchronized. Implementations must be
+/// safe to call from multiple driver instances concurrently.
+pub trait AiEngineApi: DowncastSync + Send + Sync + 'static {
+    /// Access the model registry sub-API.
+    fn models(&self) -> &dyn AiModelRegistry;
+
+    /// Access the pipeline registry sub-API.
+    fn pipelines(&self) -> &dyn AiPipelineRegistry;
+
+    /// Access the algorithm registry sub-API.
+    fn algorithms(&self) -> &dyn AiAlgorithmRegistry;
+
+    /// Access the inference runtime sub-API.
+    fn runtime(&self) -> &dyn AiInferenceRuntime;
 }
 
 /// Trait for accessing southward channel connection states

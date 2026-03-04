@@ -62,11 +62,9 @@ impl EthernetIpCodec {
                     chrono::DateTime::parse_from_rfc3339(s.trim())
                         .ok()
                         .map(|dt| NGValue::Timestamp(dt.timestamp_millis()))
-                        .or_else(|| {
-                            s.trim().parse::<f64>().ok().and_then(|n| {
-                                ValueCodec::coerce_f64_to_value(n, DataType::Timestamp, t)
-                            })
-                        })
+                        .or(s.trim().parse::<f64>().ok().and_then(|n| {
+                            ValueCodec::coerce_f64_to_value(n, DataType::Timestamp, t)
+                        }))
                 }
                 DataType::Boolean => {
                     // Reuse SDK cast policy (same accepted tokens as `TryFrom<&NGValue> for bool`).
