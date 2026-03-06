@@ -166,8 +166,9 @@ gateway:
       # Collector configuration
       collector:
         # milliseconds
-        collectionTimeout: 30000
+        collectionTimeoutMs: 30000
         maxConcurrentCollections: 200
+        outboundQueueCapacity: 10000
         retryPolicy:
           maxAttempts: 3
           initialIntervalMs: 1000
@@ -175,7 +176,6 @@ gateway:
           randomizationFactor: 0.2
           multiplier: 2.0
           maxElapsedTimeMs: 5000
-        outboundQueueCapacity: 10000
     
     # Logging configuration (top-level)
     logging:
@@ -254,6 +254,31 @@ gateway:
         expire: 3600000
         issuer: "ng-gateway"
     
+    # Network management configuration
+    network:
+      # Enable network management module (interface enumeration, Wi-Fi, AP hotspot).
+      enabled: true
+      # AP hotspot configuration
+      ap:
+        # Enable AP hotspot on startup.
+        enabled: true
+        # Default SSID. {MAC4} is replaced with last 4 hex digits of Wi-Fi MAC address.
+        ssid: "NG-Gateway-{MAC4}"
+        # WPA2 password (8-63 characters).
+        password: "ng-gateway"
+        # 2.4GHz channel (1-13). 0 = auto selection.
+        channel: 0
+        # AP interface IP address.
+        ip: "10.47.0.1"
+        # Subnet prefix length.
+        prefixLength: 24
+        # DHCP range start for connected clients.
+        dhcpRangeStart: "10.47.0.10"
+        # DHCP range end for connected clients.
+        dhcpRangeEnd: "10.47.0.200"
+        # DHCP lease time.
+        dhcpLeaseTime: "12h"
+
     # Cache configuration
     cache:
       # only moka is supported

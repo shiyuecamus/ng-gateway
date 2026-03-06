@@ -16,7 +16,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use zbus::{
     proxy,
-    zvariant::{ObjectPath, OwnedObjectPath},
+    zvariant::OwnedObjectPath,
     Connection,
 };
 
@@ -125,7 +125,8 @@ impl ApServiceManager {
             .map_err(|e| NetworkError::ApError(format!("Unit {unit_name} not found: {e}")))?;
 
         let props_proxy = SystemdPropertiesProxy::builder(&self.dbus_conn)
-            .path(unit_path.as_ref())?
+            .path(unit_path.as_ref())
+            .map_err(|e| NetworkError::DBusError(format!("Invalid unit path: {e}")))?
             .build()
             .await
             .map_err(|e| NetworkError::DBusError(format!("Props proxy failed: {e}")))?;
@@ -135,9 +136,9 @@ impl ApServiceManager {
             .await
             .map_err(|e| NetworkError::ApError(format!("Failed to read ActiveState: {e}")))?;
 
-        val.downcast_ref::<str>()
+        val.downcast_ref::<&str>()
             .map(|s| s.to_string())
-            .ok_or_else(|| NetworkError::ApError("ActiveState is not a string".to_string()).into())
+            .map_err(|_| NetworkError::ApError("ActiveState is not a string".to_string()).into())
     }
 
     /// Check combined status of all AP units.

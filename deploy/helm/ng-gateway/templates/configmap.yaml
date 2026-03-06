@@ -55,11 +55,14 @@ data:
   {{- end }}
   {{- if $config.general.collector }}
   {{- if $runtimeEnvEnabled }}
-  {{- if $config.general.collector.collectionTimeout }}
-  NG__GENERAL__COLLECTOR__COLLECTION_TIMEOUT_MS: {{ $config.general.collector.collectionTimeout | quote }}
+  {{- if $config.general.collector.collectionTimeoutMs }}
+  NG__GENERAL__COLLECTOR__COLLECTION_TIMEOUT_MS: {{ $config.general.collector.collectionTimeoutMs | quote }}
   {{- end }}
   {{- if $config.general.collector.maxConcurrentCollections }}
   NG__GENERAL__COLLECTOR__MAX_CONCURRENT_COLLECTIONS: {{ $config.general.collector.maxConcurrentCollections | quote }}
+  {{- end }}
+  {{- if $config.general.collector.outboundQueueCapacity }}
+  NG__GENERAL__COLLECTOR__OUTBOUND_QUEUE_CAPACITY: {{ $config.general.collector.outboundQueueCapacity | quote }}
   {{- end }}
   {{- if $config.general.collector.retryPolicy }}
   {{- if hasKey $config.general.collector.retryPolicy "maxAttempts" }}
@@ -80,9 +83,6 @@ data:
   {{- if hasKey $config.general.collector.retryPolicy "maxElapsedTimeMs" }}
   NG__GENERAL__COLLECTOR__RETRY_POLICY__MAX_ELAPSED_TIME_MS: {{ $config.general.collector.retryPolicy.maxElapsedTimeMs | quote }}
   {{- end }}
-  {{- end }}
-  {{- if $config.general.collector.outboundQueueCapacity }}
-  NG__GENERAL__COLLECTOR__OUTBOUND_QUEUE_CAPACITY: {{ $config.general.collector.outboundQueueCapacity | quote }}
   {{- end }}
   {{- end }}
   {{- end }}
@@ -202,6 +202,40 @@ data:
   {{- end }}
   {{- if $config.web.jwt.issuer }}
   NG__WEB__JWT__ISSUER: {{ $config.web.jwt.issuer | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $config.network }}
+  {{- if hasKey $config.network "enabled" }}
+  NG__NETWORK__ENABLED: {{ $config.network.enabled | quote }}
+  {{- end }}
+  {{- if $config.network.ap }}
+  {{- if hasKey $config.network.ap "enabled" }}
+  NG__NETWORK__AP__ENABLED: {{ $config.network.ap.enabled | quote }}
+  {{- end }}
+  {{- if $config.network.ap.ssid }}
+  NG__NETWORK__AP__SSID: {{ $config.network.ap.ssid | quote }}
+  {{- end }}
+  {{- if $config.network.ap.password }}
+  NG__NETWORK__AP__PASSWORD: {{ $config.network.ap.password | quote }}
+  {{- end }}
+  {{- if hasKey $config.network.ap "channel" }}
+  NG__NETWORK__AP__CHANNEL: {{ $config.network.ap.channel | quote }}
+  {{- end }}
+  {{- if $config.network.ap.ip }}
+  NG__NETWORK__AP__IP: {{ $config.network.ap.ip | quote }}
+  {{- end }}
+  {{- if hasKey $config.network.ap "prefixLength" }}
+  NG__NETWORK__AP__PREFIX_LENGTH: {{ $config.network.ap.prefixLength | quote }}
+  {{- end }}
+  {{- if $config.network.ap.dhcpRangeStart }}
+  NG__NETWORK__AP__DHCP_RANGE_START: {{ $config.network.ap.dhcpRangeStart | quote }}
+  {{- end }}
+  {{- if $config.network.ap.dhcpRangeEnd }}
+  NG__NETWORK__AP__DHCP_RANGE_END: {{ $config.network.ap.dhcpRangeEnd | quote }}
+  {{- end }}
+  {{- if $config.network.ap.dhcpLeaseTime }}
+  NG__NETWORK__AP__DHCP_LEASE_TIME: {{ $config.network.ap.dhcpLeaseTime | quote }}
   {{- end }}
   {{- end }}
   {{- end }}

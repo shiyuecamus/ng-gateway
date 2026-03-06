@@ -117,7 +117,8 @@ impl LinuxNetworkManager {
     /// Create a properties proxy for a given object path.
     async fn props_proxy(&self, path: &ObjectPath<'_>) -> NGResult<NMPropertiesProxy<'_>> {
         NMPropertiesProxy::builder(&self.dbus_conn)
-            .path(path.to_owned())?
+            .path(path.to_owned())
+            .map_err(|e| NetworkError::DBusError(format!("Invalid object path: {e}")))?
             .build()
             .await
             .map_err(|e| {
@@ -178,8 +179,8 @@ impl LinuxNetworkManager {
         let mac_address = prop_str(&dev_props, "HwAddress");
         let speed_mbps =
             prop_u32(&dev_props, "Speed").and_then(|s| if s > 0 { Some(s) } else { None });
-        let mtu = prop_u32(&dev_props, "Mtu");
-        let driver = prop_str(&dev_props, "Driver");
+        let _mtu = prop_u32(&dev_props, "Mtu");
+        let _driver = prop_str(&dev_props, "Driver");
 
         // IPv4 config
         let ipv4 = if state == NM_DEVICE_STATE_ACTIVATED {
@@ -576,6 +577,15 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         connection.insert("autoconnect", Value::from(true));
         conn_settings.insert("connection", connection);
 
+        // Pre-compute owned strings so they outlive the Value borrows.
+        let addr_str = config.ip_address.as_ref().map(|ip| ip.to_string());
+        let gw_str = config.gateway.as_ref().map(|gw| gw.to_string());
+        let dns_strings: Vec<String> = config
+            .dns
+            .as_ref()
+            .map(|list| list.iter().map(|d| d.to_string()).collect())
+            .unwrap_or_default();
+
         // ipv4 section
         let mut ipv4: HashMap<&str, Value<'_>> = HashMap::new();
         match config.method {
@@ -585,24 +595,22 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             IpMethod::Static => {
                 ipv4.insert("method", Value::from("manual"));
 
-                if let (Some(ip), Some(prefix)) = (&config.ip_address, config.prefix_length) {
-                    let addr_str = ip.to_string();
+                if let (Some(ip_s), Some(prefix)) = (addr_str.as_deref(), config.prefix_length) {
                     let prefix_u32 = prefix as u32;
 
                     // NM AddressData format: aa{sv} with "address" and "prefix" keys
                     let mut addr_dict: HashMap<&str, Value<'_>> = HashMap::new();
-                    addr_dict.insert("address", Value::from(addr_str.as_str()));
+                    addr_dict.insert("address", Value::from(ip_s));
                     addr_dict.insert("prefix", Value::from(prefix_u32));
 
                     ipv4.insert("address-data", Value::from(vec![addr_dict]));
                 }
 
-                if let Some(gw) = &config.gateway {
-                    ipv4.insert("gateway", Value::from(gw.to_string()));
+                if let Some(gw) = gw_str.as_deref() {
+                    ipv4.insert("gateway", Value::from(gw));
                 }
 
-                if let Some(dns_list) = &config.dns {
-                    let dns_strings: Vec<String> = dns_list.iter().map(|d| d.to_string()).collect();
+                if !dns_strings.is_empty() {
                     let dns_strs: Vec<&str> = dns_strings.iter().map(|s| s.as_str()).collect();
                     // NM dns format for manual: use dns-data (aa{sv})
                     let dns_data: Vec<HashMap<&str, Value<'_>>> = dns_strs
@@ -613,9 +621,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                             m
                         })
                         .collect();
-                    if !dns_data.is_empty() {
-                        ipv4.insert("dns-data", Value::from(dns_data));
-                    }
+                    ipv4.insert("dns-data", Value::from(dns_data));
                 }
             }
             IpMethod::Disabled => {
@@ -850,7 +856,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 )
                 .await
                 .ok()
-                .and_then(|v| v.downcast_ref::<u32>().copied())
+                .and_then(|v| v.downcast_ref::<u32>().ok().copied())
                 .unwrap_or(0);
 
             match state {
@@ -1189,7 +1195,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let nm = self.nm_proxy().await?;
         let devices = nm.get_devices().await.unwrap_or_default();
         let mut all_dns: Vec<IpAddr> = Vec::new();
-        let mut all_domains: Vec<String> = Vec::new();
+        let all_domains: Vec<String> = Vec::new();
         let mut method = IpMethod::Dhcp;
 
         for dev_path in &devices {
@@ -1385,26 +1391,28 @@ fn quality_to_rssi(quality: u8) -> i32 {
 fn prop_str(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     props
         .get(key)
-        .and_then(|v| v.downcast_ref::<str>().map(|s| s.to_string()))
+        .and_then(|v| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
 }
 
 fn prop_u32(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
     props
         .get(key)
-        .and_then(|v| v.downcast_ref::<u32>().copied())
+        .and_then(|v| v.downcast_ref::<u32>().ok().copied())
 }
 
 fn prop_u8(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u8> {
-    props.get(key).and_then(|v| v.downcast_ref::<u8>().copied())
+    props
+        .get(key)
+        .and_then(|v| v.downcast_ref::<u8>().ok().copied())
 }
 
 fn prop_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec<u8>> {
     props.get(key).and_then(|v| {
         // NM Ssid is `ay` (array of bytes).
-        if let Some(arr) = v.downcast_ref::<zbus::zvariant::Array>() {
+        if let Ok(arr) = v.downcast_ref::<&zbus::zvariant::Array>() {
             let bytes: Vec<u8> = arr
                 .iter()
-                .filter_map(|item| item.downcast_ref::<u8>().copied())
+                .filter_map(|item| item.downcast_ref::<u8>().ok().copied())
                 .collect();
             if bytes.is_empty() {
                 None
@@ -1418,9 +1426,11 @@ fn prop_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec
 }
 
 fn prop_object_path(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    props
-        .get(key)
-        .and_then(|v| v.downcast_ref::<ObjectPath>().map(|p| p.to_string()))
+    props.get(key).and_then(|v| {
+        v.downcast_ref::<&ObjectPath<'_>>()
+            .ok()
+            .map(|p| p.to_string())
+    })
 }
 
 /// Parse NM IP4Config AddressData property.
@@ -1430,22 +1440,23 @@ fn parse_nm_ip4_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv4Addres
     let mut result = Vec::new();
 
     if let Some(addr_data) = props.get("AddressData") {
-        if let Some(arr) = addr_data.downcast_ref::<zbus::zvariant::Array>() {
+        if let Ok(arr) = addr_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
-                if let Some(dict) = item.downcast_ref::<zbus::zvariant::Dict>() {
+                if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
                     let address = dict
                         .get::<str, Value>("address")
                         .ok()
                         .flatten()
                         .and_then(|v| {
-                            v.downcast_ref::<str>()
+                            v.downcast_ref::<&str>()
+                                .ok()
                                 .and_then(|s| s.parse::<IpAddr>().ok())
                         });
                     let prefix = dict
                         .get::<str, Value>("prefix")
                         .ok()
                         .flatten()
-                        .and_then(|v| v.downcast_ref::<u32>().copied())
+                        .and_then(|v| v.downcast_ref::<u32>().ok().copied())
                         .unwrap_or(24) as u8;
 
                     if let Some(addr) = address {
@@ -1467,15 +1478,16 @@ fn parse_nm_ip4_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> 
     let mut result = Vec::new();
 
     if let Some(ns_data) = props.get("NameserverData") {
-        if let Some(arr) = ns_data.downcast_ref::<zbus::zvariant::Array>() {
+        if let Ok(arr) = ns_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
-                if let Some(dict) = item.downcast_ref::<zbus::zvariant::Dict>() {
+                if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
                     if let Some(addr) =
                         dict.get::<str, Value>("address")
                             .ok()
                             .flatten()
                             .and_then(|v| {
-                                v.downcast_ref::<str>()
+                                v.downcast_ref::<&str>()
+                                    .ok()
                                     .and_then(|s| s.parse::<IpAddr>().ok())
                             })
                     {
@@ -1494,22 +1506,23 @@ fn parse_nm_ip6_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv6Addres
     let mut result = Vec::new();
 
     if let Some(addr_data) = props.get("AddressData") {
-        if let Some(arr) = addr_data.downcast_ref::<zbus::zvariant::Array>() {
+        if let Ok(arr) = addr_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
-                if let Some(dict) = item.downcast_ref::<zbus::zvariant::Dict>() {
+                if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
                     let address = dict
                         .get::<str, Value>("address")
                         .ok()
                         .flatten()
                         .and_then(|v| {
-                            v.downcast_ref::<str>()
+                            v.downcast_ref::<&str>()
+                                .ok()
                                 .and_then(|s| s.parse::<IpAddr>().ok())
                         });
                     let prefix = dict
                         .get::<str, Value>("prefix")
                         .ok()
                         .flatten()
-                        .and_then(|v| v.downcast_ref::<u32>().copied())
+                        .and_then(|v| v.downcast_ref::<u32>().ok().copied())
                         .unwrap_or(64) as u8;
 
                     if let Some(addr) = address {

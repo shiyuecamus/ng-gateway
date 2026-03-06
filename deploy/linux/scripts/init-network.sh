@@ -34,6 +34,55 @@ DEFAULT_AP_DHCP_LEASE="12h"
 
 log() { echo "[init-network] $*"; }
 
+# Detect the available package manager for runtime dependency installation.
+detect_package_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "apt"
+    return 0
+  fi
+  if command -v dnf >/dev/null 2>&1; then
+    echo "dnf"
+    return 0
+  fi
+  if command -v yum >/dev/null 2>&1; then
+    echo "yum"
+    return 0
+  fi
+  if command -v zypper >/dev/null 2>&1; then
+    echo "zypper"
+    return 0
+  fi
+  return 1
+}
+
+# Best-effort package installation across major Linux distributions.
+install_packages() {
+  local manager="$1"
+  shift
+  local packages=("$@")
+
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+
+  case "$manager" in
+    apt)
+      apt-get update -qq &&
+      apt-get install -y -qq "${packages[@]}"
+      ;;
+    dnf)
+      dnf install -y "${packages[@]}"
+      ;;
+    yum)
+      yum install -y "${packages[@]}"
+      ;;
+    zypper)
+      zypper --non-interactive install --no-confirm "${packages[@]}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # Find the primary Wi-Fi interface (first wlan* or wl* interface).
 find_wifi_interface() {
   for iface in /sys/class/net/wl*; do
@@ -82,9 +131,14 @@ main() {
 
   # 0. Check prerequisites.
   if ! command -v iw >/dev/null 2>&1; then
-    log "WARN: 'iw' not installed. Installing..."
-    apt-get update -qq && apt-get install -y -qq iw >/dev/null 2>&1 || {
-      log "ERROR: Failed to install 'iw'. Skipping AP setup."
+    local pkg_manager
+    pkg_manager=$(detect_package_manager) || {
+      log "WARN: 'iw' missing and no supported package manager detected. Skipping AP setup."
+      exit 0
+    }
+    log "WARN: 'iw' not installed. Installing via ${pkg_manager}..."
+    install_packages "$pkg_manager" iw >/dev/null 2>&1 || {
+      log "ERROR: Failed to install 'iw' with ${pkg_manager}. Skipping AP setup."
       exit 0
     }
   fi
@@ -193,17 +247,31 @@ DNSMASQ
   fi
 
   # 6. Ensure hostapd and dnsmasq packages are installed.
+  local pkg_manager
   local missing_pkgs=()
   command -v hostapd >/dev/null 2>&1 || missing_pkgs+=(hostapd)
-  command -v dnsmasq >/dev/null 2>&1 || missing_pkgs+=(dnsmasq-base)
+  command -v dnsmasq >/dev/null 2>&1 || {
+    if command -v apt-get >/dev/null 2>&1; then
+      missing_pkgs+=(dnsmasq-base)
+    else
+      missing_pkgs+=(dnsmasq)
+    fi
+  }
   # iptables for NAT rules
   command -v iptables >/dev/null 2>&1 || missing_pkgs+=(iptables)
 
   if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
-    log "Installing missing packages: ${missing_pkgs[*]}"
-    apt-get update -qq && apt-get install -y -qq "${missing_pkgs[@]}" >/dev/null 2>&1 || {
-      log "WARN: Failed to install ${missing_pkgs[*]}. AP hotspot may not work."
+    pkg_manager=$(detect_package_manager) || {
+      log "WARN: Missing AP packages (${missing_pkgs[*]}) and no supported package manager detected."
+      log "WARN: Please install required packages manually. AP hotspot may not work."
+      pkg_manager=""
     }
+    if [[ -n "$pkg_manager" ]]; then
+      log "Installing missing packages via ${pkg_manager}: ${missing_pkgs[*]}"
+      install_packages "$pkg_manager" "${missing_pkgs[@]}" >/dev/null 2>&1 || {
+        log "WARN: Failed to install ${missing_pkgs[*]} via ${pkg_manager}. AP hotspot may not work."
+      }
+    fi
   fi
 
   # Disable system-wide dnsmasq/hostapd if enabled (we use our own units).

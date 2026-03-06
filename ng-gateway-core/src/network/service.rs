@@ -62,7 +62,7 @@ impl NetworkService {
 
         // Verify AP service status on Linux.
         #[cfg(target_os = "linux")]
-        if settings.ap.enabled {
+        if service.settings.ap.enabled {
             service.verify_ap_services().await;
         }
 

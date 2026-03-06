@@ -25,7 +25,7 @@
 │       │   ├── 生成 /etc/ng-gateway/ap-env                               │
 │       │   ├── 生成 /etc/ng-gateway/hostapd.conf                         │
 │       │   ├── 生成 /etc/ng-gateway/dnsmasq-ap.conf                      │
-│       │   ├── apt install hostapd dnsmasq-base iw iptables (如缺失)      │
+│       │   ├── 按发行版包管理器安装 hostapd/dnsmasq/iw/iptables (如缺失)   │
 │       │   ├── 部署 3 个 systemd unit → /lib/systemd/system/             │
 │       │   ├── systemctl enable + start AP 服务                           │
 │       │   └── AP 热点开始广播 ✅                                         │
@@ -127,7 +127,7 @@
 | `package-deb.sh` | CI 打包时 | 调用 stage-rootfs → 渲染 nfpm 模板 → 生成 `.deb` |
 | `package-rpm.sh` | CI 打包时 | 同上，生成 `.rpm` |
 | `render-nfpm-config.sh` | CI 打包时 | 模板变量替换 |
-| `postinstall.sh` | `dpkg -i` 后 | 创建目录 + 复制配置 + 调用 `init-network.sh` |
+| `postinstall.sh` | `deb/rpm` 安装后 | 创建目录 + 复制配置 + 调用 `init-network.sh` |
 | `preremove.sh` | `dpkg -r` 前 | stop + disable 所有服务 + 清理 AP unit 文件 |
 | `init-network.sh` | 首次安装时 | 探测硬件 → 生成 AP 配置 → 安装依赖 → 部署 unit → enable+start AP |
 
@@ -187,14 +187,14 @@ sudo rm -rf /etc/ng-gateway /var/lib/ng-gateway
 |------|------|---------|
 | `cross` | CI 多架构编译 | `cargo install cross` |
 | `nfpm` | 生成 deb/rpm | `go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest` |
-| `hostapd` | AP 热点 | `apt install hostapd`（`init-network.sh` 自动安装） |
-| `dnsmasq-base` | DHCP/DNS | `apt install dnsmasq-base`（`init-network.sh` 自动安装） |
-| `iw` | 无线能力检测 | `apt install iw`（`init-network.sh` 自动安装） |
-| `iptables` | NAT 规则 | `apt install iptables`（`init-network.sh` 自动安装） |
+| `hostapd` | AP 热点 | `init-network.sh` 自动安装（apt/dnf/yum/zypper） |
+| `dnsmasq(-base)` | DHCP/DNS | Debian 用 `dnsmasq-base`，RPM 系常见为 `dnsmasq` |
+| `iw` | 无线能力检测 | `init-network.sh` 自动安装（apt/dnf/yum/zypper） |
+| `iptables` | NAT 规则 | `init-network.sh` 自动安装（apt/dnf/yum/zypper） |
 
 ## 已知约束
 
 - AP 固定 2.4GHz（`hw_mode=g`），不支持 5GHz AP
 - 首次安装时需要网络连接以安装 hostapd/dnsmasq（如离线部署需预装）
-- `init-network.sh` 使用 `apt-get`，仅支持 Debian/Ubuntu 系发行版
+- `init-network.sh` 会自动识别包管理器（apt/dnf/yum/zypper）；若都不存在则跳过自动安装并给出告警
 - STA+AP 共存是否可用取决于具体 Wi-Fi 芯片（RTL8852BE 可能有驱动问题）
