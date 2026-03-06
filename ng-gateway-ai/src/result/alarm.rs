@@ -136,6 +136,14 @@ mod inner {
                 (triggered, Vec::new())
             }
 
+            AlarmCondition::ZoneDwell { .. } => {
+                // ZoneDwell requires trajectory state (TrajectoryCache).
+                // Without trajectory context, this condition cannot be
+                // evaluated — it will be handled by the trajectory-aware
+                // evaluator in the engine layer.
+                (false, Vec::new())
+            }
+
             AlarmCondition::CustomWasm { .. } => {
                 // Phase 2: WASM-based alarm evaluation
                 (false, Vec::new())
@@ -152,6 +160,7 @@ mod inner {
             severity: rule.severity,
             related_detections: related,
             snapshot: None,
+            trajectory: None,
         })
     }
 
@@ -299,6 +308,7 @@ mod inner {
             severity: rule.severity,
             related_detections: related,
             snapshot: None,
+            trajectory: None,
         })
     }
 
@@ -316,6 +326,247 @@ mod inner {
             j = i;
         }
         inside
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::pipeline::context::PipelineContext;
+        use crate::test_utils::*;
+        use ng_gateway_models::domain::prelude::AlarmRuleInfo;
+        use ng_gateway_models::entities::ai::alarm_rule::AlarmCondition;
+        use ng_gateway_models::enums::ai::{AlarmSeverity, CrossingDirection};
+
+        /// Build a minimal `AlarmRuleInfo` for testing.
+        fn make_rule(condition: AlarmCondition) -> AlarmRuleInfo {
+            AlarmRuleInfo {
+                id: 1,
+                name: "test_rule".to_string(),
+                pipeline_id: 1,
+                rule_order: 0,
+                severity: AlarmSeverity::Warning,
+                condition,
+                cooldown_secs: 0,
+                min_duration_secs: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        /// Build a `PipelineContext` with pre-populated detections.
+        fn context_with_detections(
+            detections: Vec<ng_gateway_models::domain::prelude::Detection>,
+        ) -> PipelineContext {
+            let frame = make_solid_frame(640, 480, 0, 0, 0);
+            let mut ctx = PipelineContext::new(frame);
+            ctx.detections = detections;
+            ctx
+        }
+
+        // ── ClassDetected ────────────────────────────────────────────
+
+        #[test]
+        fn class_detected_triggers_when_present() {
+            let rule = make_rule(AlarmCondition::ClassDetected {
+                class: "person".into(),
+                min_confidence: 0.5,
+            });
+            let ctx =
+                context_with_detections(vec![make_detection("person", 0, 0.1, 0.1, 0.5, 0.5, 0.8)]);
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert_eq!(alarms.len(), 1);
+        }
+
+        #[test]
+        fn class_detected_below_confidence_no_alarm() {
+            let rule = make_rule(AlarmCondition::ClassDetected {
+                class: "person".into(),
+                min_confidence: 0.5,
+            });
+            let ctx =
+                context_with_detections(vec![make_detection("person", 0, 0.1, 0.1, 0.5, 0.5, 0.3)]);
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert!(alarms.is_empty(), "low confidence should not trigger");
+        }
+
+        #[test]
+        fn class_detected_wrong_class_no_alarm() {
+            let rule = make_rule(AlarmCondition::ClassDetected {
+                class: "person".into(),
+                min_confidence: 0.5,
+            });
+            let ctx =
+                context_with_detections(vec![make_detection("car", 1, 0.1, 0.1, 0.5, 0.5, 0.9)]);
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert!(alarms.is_empty(), "wrong class should not trigger");
+        }
+
+        // ── CountExceeds ─────────────────────────────────────────────
+
+        #[test]
+        fn count_exceeds_triggers() {
+            let rule = make_rule(AlarmCondition::CountExceeds {
+                class: Some("person".into()),
+                threshold: 3,
+            });
+            let dets: Vec<_> = (0..5)
+                .map(|i| {
+                    make_detection(
+                        "person",
+                        0,
+                        i as f32 * 0.1,
+                        0.1,
+                        i as f32 * 0.1 + 0.08,
+                        0.5,
+                        0.9,
+                    )
+                })
+                .collect();
+            let ctx = context_with_detections(dets);
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert_eq!(alarms.len(), 1, "5 > 3 should trigger");
+        }
+
+        #[test]
+        fn count_exceeds_at_boundary_no_alarm() {
+            let rule = make_rule(AlarmCondition::CountExceeds {
+                class: Some("person".into()),
+                threshold: 3,
+            });
+            let dets: Vec<_> = (0..3)
+                .map(|i| {
+                    make_detection(
+                        "person",
+                        0,
+                        i as f32 * 0.1,
+                        0.1,
+                        i as f32 * 0.1 + 0.08,
+                        0.5,
+                        0.9,
+                    )
+                })
+                .collect();
+            let ctx = context_with_detections(dets);
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert!(
+                alarms.is_empty(),
+                "count == threshold (3) should NOT trigger (strictly >)"
+            );
+        }
+
+        // ── ZoneIntrusion ────────────────────────────────────────────
+
+        #[test]
+        fn zone_intrusion_inside_triggers() {
+            // Square zone covering (0.2, 0.2) → (0.8, 0.8).
+            let zone = vec![(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)];
+            let rule = make_rule(AlarmCondition::ZoneIntrusion {
+                zone,
+                class: Some("person".into()),
+            });
+            // Detection centered at (0.3, 0.3) — inside the zone.
+            let ctx =
+                context_with_detections(vec![make_detection("person", 0, 0.2, 0.2, 0.4, 0.4, 0.9)]);
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert_eq!(alarms.len(), 1, "detection inside zone should trigger");
+        }
+
+        #[test]
+        fn zone_intrusion_outside_no_alarm() {
+            let zone = vec![(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)];
+            let rule = make_rule(AlarmCondition::ZoneIntrusion {
+                zone,
+                class: Some("person".into()),
+            });
+            // Detection centered at (0.05, 0.05) — outside the zone.
+            let ctx =
+                context_with_detections(vec![make_detection("person", 0, 0.0, 0.0, 0.1, 0.1, 0.9)]);
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert!(
+                alarms.is_empty(),
+                "detection outside zone should not trigger"
+            );
+        }
+
+        // ── LineCrossing (with history) ──────────────────────────────
+
+        #[test]
+        fn line_crossing_with_history_triggers() {
+            // Vertical line at x = 0.5 (from top to bottom).
+            let rule = make_rule(AlarmCondition::LineCrossing {
+                line: [(0.5, 0.0), (0.5, 1.0)],
+                class: None,
+                direction: Some(CrossingDirection::Any),
+            });
+
+            // Frame 1: track #1 at center (0.3, 0.5) — left of the line.
+            let prev_det = with_track_id(make_detection("person", 0, 0.2, 0.4, 0.4, 0.6, 0.9), 1);
+            let prev_ctx = context_with_detections(vec![prev_det]);
+
+            let mut history = TrackHistory::default();
+            history.update_from_context(&prev_ctx);
+
+            // Frame 2: track #1 moved to center (0.7, 0.5) — right of the line.
+            let curr_det = with_track_id(make_detection("person", 0, 0.6, 0.4, 0.8, 0.6, 0.9), 1);
+            let curr_ctx = context_with_detections(vec![curr_det]);
+
+            let alarms = evaluate_alarm_rules_with_history(&[rule], &curr_ctx, &history);
+            assert_eq!(alarms.len(), 1, "track crossing the line should trigger");
+        }
+
+        // ── AnomalyDetected ─────────────────────────────────────────
+
+        #[test]
+        fn anomaly_detected_above_threshold() {
+            use ng_gateway_models::domain::prelude::AnomalyMap;
+
+            let rule = make_rule(AlarmCondition::AnomalyDetected { min_score: 0.5 });
+            let frame = make_solid_frame(640, 480, 0, 0, 0);
+            let mut ctx = PipelineContext::new(frame);
+            ctx.anomaly_maps.push(AnomalyMap {
+                score: 0.8,
+                heatmap: None,
+                heatmap_width: 0,
+                heatmap_height: 0,
+                is_anomalous: true,
+                threshold: 0.5,
+            });
+
+            let alarms = evaluate_alarm_rules(&[rule], &ctx);
+            assert_eq!(alarms.len(), 1, "anomaly above threshold should trigger");
+        }
+
+        // ── TrackHistory ─────────────────────────────────────────────
+
+        #[test]
+        fn track_history_records_and_retrieves() {
+            let det = with_track_id(make_detection("person", 0, 0.2, 0.3, 0.4, 0.5, 0.9), 42);
+            let ctx = context_with_detections(vec![det]);
+
+            let mut history = TrackHistory::default();
+            history.update_from_context(&ctx);
+
+            let center = history.prev_center(42).expect("track 42 should exist");
+            // Center = ((0.2 + 0.4) / 2, (0.3 + 0.5) / 2) = (0.3, 0.4).
+            assert!(
+                (center.0 - 0.3).abs() < 1e-5 && (center.1 - 0.4).abs() < 1e-5,
+                "expected center (0.3, 0.4), got ({}, {})",
+                center.0,
+                center.1,
+            );
+
+            assert!(
+                history.prev_center(999).is_none(),
+                "unknown track should return None",
+            );
+        }
     }
 }
 

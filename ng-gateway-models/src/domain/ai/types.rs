@@ -190,10 +190,33 @@ pub struct AlarmEvent {
     /// Optional snapshot (JPEG) of the alarm moment.
     #[serde(skip)]
     pub snapshot: Option<Bytes>,
+    /// Trajectory context for trajectory-based alarms (line-crossing, zone-dwell).
+    /// `None` for non-trajectory alarm types.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trajectory: Option<TrajectoryContext>,
+}
+
+/// Trajectory context attached to trajectory-based alarm events.
+///
+/// Provides the track's recent path, velocity, and direction at the
+/// moment the alarm was triggered, enabling front-end trajectory replay
+/// and forensic analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrajectoryContext {
+    /// Track identifier.
+    pub track_id: u64,
+    /// Recent trajectory polyline: `(timestamp_ms, center_x, center_y)`.
+    pub polyline: Vec<(i64, f32, f32)>,
+    /// Velocity vector at the moment of trigger (normalized pixels/second).
+    pub velocity_at_trigger: (f32, f32),
+    /// Direction in degrees `[0, 360)` at the moment of trigger.
+    pub direction_at_trigger: f32,
 }
 
 /// AI engine global status snapshot (returned by `GET /api/ai/engine/status`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     /// Whether the AI engine is enabled.
     pub enabled: bool,
@@ -215,6 +238,7 @@ pub struct EngineStatus {
 
 /// Model subsystem status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineModelStatus {
     /// Total models registered (discovered on disk).
     pub registered: usize,
@@ -226,6 +250,7 @@ pub struct EngineModelStatus {
 
 /// Inference subsystem status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineInferenceStatus {
     /// Currently running inferences.
     pub active_count: i64,
@@ -241,6 +266,7 @@ pub struct EngineInferenceStatus {
 
 /// Pipeline subsystem status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EnginePipelineStatus {
     /// Total pipeline configurations registered.
     pub registered: usize,
@@ -250,6 +276,7 @@ pub struct EnginePipelineStatus {
 
 /// Algorithm subsystem status (Phase 2 — WASM modules).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineAlgorithmStatus {
     /// Total registered algorithms.
     pub registered: usize,
@@ -386,4 +413,61 @@ pub struct AnalysisCore {
 pub struct RenderArtifact {
     /// JPEG-encoded annotated frame (if annotation is enabled).
     pub annotated_frame: Option<Bytes>,
+}
+
+// ── Channel registration (GStreamer-driven frame acquisition) ────
+
+/// Request to register a camera channel for AI analysis.
+///
+/// The AI engine creates a GStreamer pipeline internally for the given
+/// stream URL, performing hardware-accelerated decoding and zero-copy
+/// frame delivery to the inference pipeline.
+///
+/// # Frame sampling
+///
+/// Sampling strategy is owned by the **Pipeline** (not the channel).
+/// When the engine processes this registration, it resolves the pipeline's
+/// [`SamplingStrategy`](crate::enums::ai::SamplingStrategy) and applies
+/// two-level sampling:
+/// - **Level 1 (GStreamer)**: a `videorate` element caps the decoded
+///   frame rate when a finite target FPS is configured.
+/// - **Level 2 (application)**: a `FrameSampler` in the channel frame
+///   loop provides fine-grained, adaptive sampling with inference
+///   latency and backpressure feedback.
+#[derive(Debug, Clone)]
+pub struct ChannelRegistration {
+    /// Channel identifier (must be unique across all registered channels).
+    pub channel_id: i32,
+    /// Source device identifier.
+    pub device_id: i32,
+    /// Video stream URI (rtsp://, http://, v4l2://, file://).
+    pub stream_url: String,
+    /// Pipeline configuration to use for this channel.
+    pub pipeline_id: i32,
+    /// RTSP transport preference.
+    pub transport: StreamTransport,
+    /// Connection timeout for the stream source.
+    pub connect_timeout: Duration,
+    /// Sender for latest analysis results produced by the internal frame loop.
+    ///
+    /// The engine publishes latest-value snapshots through this watch channel.
+    /// `None` if the caller does not need per-frame results (e.g. alarm-only mode).
+    pub result_tx: Option<tokio::sync::watch::Sender<Option<Arc<AnalysisResult>>>>,
+    /// Optional error notification channel from the frame loop.
+    ///
+    /// When present, fatal stream/runtime failures are reported to trigger
+    /// reconnect handling on the caller side.
+    pub error_tx: Option<tokio::sync::mpsc::Sender<String>>,
+}
+
+/// RTSP / stream transport protocol preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamTransport {
+    /// Prefer TCP interleaved, fall back to UDP on failure (default).
+    TcpFallback,
+    /// TCP interleaved only (reliable, slightly higher latency).
+    Tcp,
+    /// Prefer UDP, fall back to TCP interleaved on failure.
+    UdpFallback,
 }

@@ -40,6 +40,8 @@ mod inner {
         pub default_input_shape: Arc<[i64]>,
         /// Default model input dtype cached at compile time.
         pub default_input_dtype: TensorDType,
+        /// Prebuilt class labels cache for hot postprocess path.
+        pub class_labels: Arc<[Arc<str>]>,
     }
 
     /// Compiled inference stage with pre-bound processors.
@@ -226,12 +228,24 @@ mod inner {
             .and_then(|inputs| inputs.0.first())
             .map(|input| input.dtype)
             .unwrap_or(TensorDType::Float32);
+        let class_labels_vec: Vec<Arc<str>> = info
+            .labels
+            .as_ref()
+            .map(|labels| {
+                labels
+                    .0
+                    .iter()
+                    .map(|label| Arc::<str>::from(label.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let handle = ModelHandle(models.len());
         models.push(CompiledModel {
             handle,
             info,
             default_input_shape,
             default_input_dtype,
+            class_labels: Arc::from(class_labels_vec),
         });
         handle
     }

@@ -59,7 +59,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             coord_transform: &CoordinateTransform,
-            labels: &[String],
+            labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError>;
     }
 
@@ -99,7 +99,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             coord_transform: &CoordinateTransform,
-            labels: &[String],
+            labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError> {
             let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
@@ -122,7 +122,6 @@ mod inner {
                 return Ok(PostprocessOutput::default());
             }
             let num_classes = num_features - 4;
-            let label_cache = build_label_cache(labels, num_classes);
 
             let mut raw: Vec<(Detection, f32)> = Vec::with_capacity(512);
             if let Some(data) = tensor.as_slice_memory_order() {
@@ -162,7 +161,7 @@ mod inner {
                             Some((
                                 Detection {
                                     bbox,
-                                    class: Arc::clone(&label_cache[best_class]),
+                                    class: resolve_class_label(labels, best_class),
                                     class_id: best_class as u32,
                                     confidence: best_score,
                                     track_id: None,
@@ -207,7 +206,7 @@ mod inner {
                         raw.push((
                             Detection {
                                 bbox,
-                                class: Arc::clone(&label_cache[best_class]),
+                                class: resolve_class_label(labels, best_class),
                                 class_id: best_class as u32,
                                 confidence: best_score,
                                 track_id: None,
@@ -252,7 +251,7 @@ mod inner {
                     raw.push((
                         Detection {
                             bbox,
-                            class: Arc::clone(&label_cache[best_class]),
+                            class: resolve_class_label(labels, best_class),
                             class_id: best_class as u32,
                             confidence: best_score,
                             track_id: None,
@@ -313,7 +312,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             coord_transform: &CoordinateTransform,
-            labels: &[String],
+            labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError> {
             let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
@@ -335,7 +334,6 @@ mod inner {
                 return Ok(PostprocessOutput::default());
             }
             let num_classes = shape[2] - 5;
-            let label_cache = build_label_cache(labels, num_classes);
 
             let mut raw: Vec<(Detection, f32)> = Vec::with_capacity(512);
             if let Some(data) = tensor.as_slice_memory_order() {
@@ -388,7 +386,7 @@ mod inner {
                                 local.push((
                                     Detection {
                                         bbox,
-                                        class: Arc::clone(&label_cache[best_class]),
+                                        class: resolve_class_label(labels, best_class),
                                         class_id: best_class as u32,
                                         confidence: best_score,
                                         track_id: None,
@@ -443,7 +441,7 @@ mod inner {
                         raw.push((
                             Detection {
                                 bbox,
-                                class: Arc::clone(&label_cache[best_class]),
+                                class: resolve_class_label(labels, best_class),
                                 class_id: best_class as u32,
                                 confidence: best_score,
                                 track_id: None,
@@ -492,7 +490,7 @@ mod inner {
                     raw.push((
                         Detection {
                             bbox,
-                            class: Arc::clone(&label_cache[best_class]),
+                            class: resolve_class_label(labels, best_class),
                             class_id: best_class as u32,
                             confidence: best_score,
                             track_id: None,
@@ -548,7 +546,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             _coord_transform: &CoordinateTransform,
-            labels: &[String],
+            labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError> {
             let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
@@ -605,10 +603,7 @@ mod inner {
                 .into_iter()
                 .filter(|(_, score)| *score >= self.min_confidence)
                 .map(|(idx, score)| {
-                    let label = labels
-                        .get(idx)
-                        .map(|s| Arc::<str>::from(s.as_str()))
-                        .unwrap_or(Arc::from(format!("class_{idx}")));
+                    let label = resolve_class_label(labels, idx);
                     (label, score)
                 })
                 .collect();
@@ -637,7 +632,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             _coord_transform: &CoordinateTransform,
-            _labels: &[String],
+            _labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError> {
             let custom: Vec<(String, serde_json::Value)> = output
                 .tensors
@@ -689,7 +684,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             _coord_transform: &CoordinateTransform,
-            labels: &[String],
+            labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError> {
             let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
@@ -761,17 +756,12 @@ mod inner {
                 }
             }
 
-            let label_arcs: Vec<Arc<str>> = labels
-                .iter()
-                .map(|s| Arc::<str>::from(s.as_str()))
-                .collect();
-
             Ok(PostprocessOutput {
                 segmentation_masks: vec![SegmentationMask {
                     mask,
                     width: w as u32,
                     height: h as u32,
-                    labels: label_arcs,
+                    labels: labels.to_vec(),
                 }],
                 ..Default::default()
             })
@@ -819,7 +809,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             coord_transform: &CoordinateTransform,
-            labels: &[String],
+            labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError> {
             let tensor = first_output_tensor(output, self.name())?;
             let shape = tensor.shape();
@@ -847,7 +837,7 @@ mod inner {
 
             let class_label = labels
                 .first()
-                .map(|s| Arc::<str>::from(s.as_str()))
+                .map(Arc::clone)
                 .unwrap_or(Arc::from("person"));
 
             let iw = coord_transform.input_width as f32;
@@ -1030,7 +1020,7 @@ mod inner {
             &self,
             output: &RawInferenceOutput,
             _coord_transform: &CoordinateTransform,
-            _labels: &[String],
+            _labels: &[Arc<str>],
         ) -> Result<PostprocessOutput, AiEngineError> {
             if output.tensors.is_empty() {
                 return Err(AiEngineError::PostprocessError(
@@ -1095,18 +1085,13 @@ mod inner {
             })
     }
 
-    /// Build a class-id indexed label cache to avoid string lookups/allocation
-    /// in hot detection loops.
-    fn build_label_cache(labels: &[String], num_classes: usize) -> Vec<Arc<str>> {
-        let mut cache = Vec::with_capacity(num_classes);
-        for class_id in 0..num_classes {
-            let label = labels
-                .get(class_id)
-                .map(|s| Arc::<str>::from(s.as_str()))
-                .unwrap_or(Arc::from(format!("class_{class_id}")));
-            cache.push(label);
-        }
-        cache
+    /// Resolve class label by index from precompiled Arc cache.
+    #[inline]
+    fn resolve_class_label(labels: &[Arc<str>], class_id: usize) -> Arc<str> {
+        labels
+            .get(class_id)
+            .map(Arc::clone)
+            .unwrap_or(Arc::from(format!("class_{class_id}")))
     }
 
     // ── NMS variants ────────────────────────────────────────────
@@ -1347,6 +1332,431 @@ mod inner {
             iou
         } else {
             iou - center_dist_sq / diag_sq
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::test_utils::*;
+        use approx::assert_abs_diff_eq;
+        use ndarray::ArrayD;
+        use std::sync::Arc;
+
+        fn labels(n: usize) -> Vec<Arc<str>> {
+            (0..n)
+                .map(|i| Arc::<str>::from(format!("class_{i}")))
+                .collect()
+        }
+
+        // ── YOLOv8 detection tests ──────────────────────────────────
+
+        #[test]
+        fn yolov8_single_detection_produces_correct_bbox() {
+            // Place one high-confidence detection at the center of a 640×640 input.
+            // cx=320, cy=320, w=100, h=100 → expected normalised bbox ≈ [0.42, 0.42, 0.58, 0.58].
+            let output = make_yolov8_output(&[(320.0, 320.0, 100.0, 100.0, vec![0.95])], 1);
+            let transform = identity_transform(640, 640);
+            let proc = YoloV8PostProcessor::default();
+
+            let result = proc
+                .process(&output, &transform, &labels(1))
+                .expect("process should succeed");
+
+            assert_eq!(result.detections.len(), 1);
+            let det = &result.detections[0];
+            assert_abs_diff_eq!(det.bbox.x_min, 0.421875, epsilon = 0.01);
+            assert_abs_diff_eq!(det.bbox.y_min, 0.421875, epsilon = 0.01);
+            assert_abs_diff_eq!(det.bbox.x_max, 0.578125, epsilon = 0.01);
+            assert_abs_diff_eq!(det.bbox.y_max, 0.578125, epsilon = 0.01);
+            assert_abs_diff_eq!(det.confidence, 0.95, epsilon = 1e-5);
+        }
+
+        #[test]
+        fn yolov8_nms_suppresses_overlapping() {
+            // Two nearly identical detections for the same class — NMS should keep only 1.
+            let output = make_yolov8_output(
+                &[
+                    (320.0, 320.0, 100.0, 100.0, vec![0.9]),
+                    (325.0, 325.0, 100.0, 100.0, vec![0.85]),
+                ],
+                1,
+            );
+            let transform = identity_transform(640, 640);
+            let proc = YoloV8PostProcessor {
+                nms_iou_threshold: 0.5,
+                ..YoloV8PostProcessor::default()
+            };
+
+            let result = proc
+                .process(&output, &transform, &labels(1))
+                .expect("process should succeed");
+
+            assert_eq!(
+                result.detections.len(),
+                1,
+                "NMS should suppress the lower-confidence duplicate"
+            );
+            assert_abs_diff_eq!(result.detections[0].confidence, 0.9, epsilon = 1e-5);
+        }
+
+        #[test]
+        fn yolov8_confidence_threshold_filters() {
+            // One detection above threshold, one below — only 1 should survive.
+            let output = make_yolov8_output(
+                &[
+                    (320.0, 320.0, 100.0, 100.0, vec![0.8]),
+                    (100.0, 100.0, 50.0, 50.0, vec![0.1]),
+                ],
+                1,
+            );
+            let transform = identity_transform(640, 640);
+            let proc = YoloV8PostProcessor {
+                confidence_threshold: 0.5,
+                ..YoloV8PostProcessor::default()
+            };
+
+            let result = proc
+                .process(&output, &transform, &labels(1))
+                .expect("process should succeed");
+
+            assert_eq!(
+                result.detections.len(),
+                1,
+                "sub-threshold detection must be discarded"
+            );
+            assert_abs_diff_eq!(result.detections[0].confidence, 0.8, epsilon = 1e-5);
+        }
+
+        #[test]
+        fn yolov8_max_detections_limit() {
+            // 10 well-separated detections with max_detections=3 → only 3 kept.
+            let dets: Vec<(f32, f32, f32, f32, Vec<f32>)> = (0..10)
+                .map(|i| {
+                    let cx = 50.0 + i as f32 * 60.0;
+                    let score = 0.9 - i as f32 * 0.02;
+                    (cx, 320.0, 40.0, 40.0, vec![score])
+                })
+                .collect();
+            let output = make_yolov8_output(&dets, 1);
+            let transform = identity_transform(640, 640);
+            let proc = YoloV8PostProcessor {
+                max_detections: 3,
+                ..YoloV8PostProcessor::default()
+            };
+
+            let result = proc
+                .process(&output, &transform, &labels(1))
+                .expect("process should succeed");
+
+            assert!(
+                result.detections.len() <= 3,
+                "max_detections=3 must cap output, got {}",
+                result.detections.len()
+            );
+        }
+
+        // ── YOLOv5 detection tests ──────────────────────────────────
+
+        #[test]
+        fn yolov5_single_detection_correct() {
+            // Single YOLOv5-format prediction: objectness=0.9, class_score=0.85.
+            // Effective score = 0.9 * 0.85 = 0.765, which exceeds default threshold.
+            let output = make_yolov5_output(&[(320.0, 320.0, 100.0, 100.0, 0.9, vec![0.85])], 1);
+            let transform = identity_transform(640, 640);
+            let proc = YoloV5PostProcessor::default();
+
+            let result = proc
+                .process(&output, &transform, &labels(1))
+                .expect("process should succeed");
+
+            assert_eq!(result.detections.len(), 1);
+            let det = &result.detections[0];
+            assert_abs_diff_eq!(det.confidence, 0.9 * 0.85, epsilon = 1e-5);
+            assert!(det.bbox.x_min < det.bbox.x_max);
+            assert!(det.bbox.y_min < det.bbox.y_max);
+        }
+
+        #[test]
+        fn yolov5_objectness_gates_class_scores() {
+            // Low objectness (0.1) × high class score (0.95) = 0.095 < threshold → filtered.
+            let output = make_yolov5_output(&[(320.0, 320.0, 100.0, 100.0, 0.1, vec![0.95])], 1);
+            let transform = identity_transform(640, 640);
+            let proc = YoloV5PostProcessor {
+                confidence_threshold: 0.5,
+                ..YoloV5PostProcessor::default()
+            };
+
+            let result = proc
+                .process(&output, &transform, &labels(1))
+                .expect("process should succeed");
+
+            assert!(
+                result.detections.is_empty(),
+                "low objectness should gate out high class scores"
+            );
+        }
+
+        // ── Classification tests ────────────────────────────────────
+
+        #[test]
+        fn classification_softmax_sums_to_one() {
+            // Raw logits; after softmax the probabilities must sum to 1.0.
+            let raw_logits: Vec<f32> = vec![2.0, 1.0, 0.5, -1.0, 3.0];
+            let output = make_classification_output(&raw_logits);
+            let transform = identity_transform(640, 640);
+            let proc = ClassificationPostProcessor {
+                top_k: 5,
+                apply_softmax: true,
+                min_confidence: 0.0,
+                ..ClassificationPostProcessor::default()
+            };
+
+            let result = proc
+                .process(&output, &transform, &labels(5))
+                .expect("process should succeed");
+
+            assert_eq!(result.classifications.len(), 1);
+            let sum: f32 = result.classifications[0].top_k.iter().map(|(_, s)| s).sum();
+            assert_abs_diff_eq!(sum, 1.0, epsilon = 1e-4);
+        }
+
+        #[test]
+        fn classification_topk_returns_correct_count() {
+            // 1000-class model with top_k=5 → exactly 5 results.
+            let scores: Vec<f32> = (0..1000).map(|i| (i as f32) / 1000.0).collect();
+            let output = make_classification_output(&scores);
+            let transform = identity_transform(640, 640);
+            let proc = ClassificationPostProcessor {
+                top_k: 5,
+                apply_softmax: false,
+                min_confidence: 0.0,
+                ..ClassificationPostProcessor::default()
+            };
+
+            let result = proc
+                .process(&output, &transform, &labels(1000))
+                .expect("process should succeed");
+
+            assert_eq!(result.classifications.len(), 1);
+            assert_eq!(
+                result.classifications[0].top_k.len(),
+                5,
+                "top_k=5 must return exactly 5 entries"
+            );
+        }
+
+        #[test]
+        fn classification_single_class() {
+            // Edge case: 1-class model → single classification entry.
+            let output = make_classification_output(&[0.99]);
+            let transform = identity_transform(640, 640);
+            let proc = ClassificationPostProcessor {
+                top_k: 5,
+                apply_softmax: false,
+                min_confidence: 0.0,
+                ..ClassificationPostProcessor::default()
+            };
+
+            let result = proc
+                .process(&output, &transform, &labels(1))
+                .expect("process should succeed");
+
+            assert_eq!(result.classifications.len(), 1);
+            assert_eq!(result.classifications[0].top_k.len(), 1);
+            assert_abs_diff_eq!(result.classifications[0].top_k[0].1, 0.99, epsilon = 1e-5);
+        }
+
+        // ── Segmentation tests ──────────────────────────────────────
+
+        #[test]
+        fn segmentation_argmax_correctness() {
+            // 3-class 2×2 segmentation tensor. Manually craft per-pixel winners.
+            // Pixel layout (row-major): [0]=class2, [1]=class0, [2]=class1, [3]=class2
+            #[rustfmt::skip]
+            let data = vec![
+                // class 0 logits (C=0, H=2, W=2)
+                0.1, 0.9, 0.2, 0.1,
+                // class 1 logits (C=1, H=2, W=2)
+                0.2, 0.1, 0.8, 0.3,
+                // class 2 logits (C=2, H=2, W=2)
+                0.9, 0.1, 0.1, 0.7,
+            ];
+            let output = make_segmentation_output(data, 3, 2, 2);
+            let transform = identity_transform(640, 640);
+            let proc = SegmentationPostProcessor::default();
+
+            let result = proc
+                .process(&output, &transform, &labels(3))
+                .expect("process should succeed");
+
+            assert_eq!(result.segmentation_masks.len(), 1);
+            let mask = &result.segmentation_masks[0];
+            assert_eq!(mask.width, 2);
+            assert_eq!(mask.height, 2);
+            assert_eq!(mask.mask, vec![2, 0, 1, 2]);
+        }
+
+        // ── Anomaly detection tests ─────────────────────────────────
+
+        #[test]
+        fn anomaly_score_above_threshold_is_anomalous() {
+            // score=0.8 with threshold=0.5 → is_anomalous=true.
+            let tensor = ArrayD::from_shape_vec(vec![1, 1], vec![0.8]).expect("valid shape");
+            let output = RawInferenceOutput {
+                tensors: vec![("anomaly_score".into(), tensor)],
+            };
+            let transform = identity_transform(640, 640);
+            let proc = AnomalyPostProcessor {
+                anomaly_threshold: 0.5,
+            };
+
+            let result = proc
+                .process(&output, &transform, &[])
+                .expect("process should succeed");
+
+            assert_eq!(result.anomaly_maps.len(), 1);
+            assert!(result.anomaly_maps[0].is_anomalous);
+            assert_abs_diff_eq!(result.anomaly_maps[0].score, 0.8, epsilon = 1e-5);
+        }
+
+        #[test]
+        fn anomaly_score_below_threshold_not_anomalous() {
+            // score=0.3 with threshold=0.5 → is_anomalous=false.
+            let tensor = ArrayD::from_shape_vec(vec![1, 1], vec![0.3]).expect("valid shape");
+            let output = RawInferenceOutput {
+                tensors: vec![("anomaly_score".into(), tensor)],
+            };
+            let transform = identity_transform(640, 640);
+            let proc = AnomalyPostProcessor {
+                anomaly_threshold: 0.5,
+            };
+
+            let result = proc
+                .process(&output, &transform, &[])
+                .expect("process should succeed");
+
+            assert_eq!(result.anomaly_maps.len(), 1);
+            assert!(!result.anomaly_maps[0].is_anomalous);
+            assert_abs_diff_eq!(result.anomaly_maps[0].score, 0.3, epsilon = 1e-5);
+        }
+
+        // ── NMS variant comparison ──────────────────────────────────
+
+        #[test]
+        fn nms_classic_vs_soft_vs_diou_behavior() {
+            // Three highly-overlapping same-class detections. Classic NMS should
+            // suppress more aggressively than Soft-NMS (Gaussian decay preserves
+            // partially overlapping boxes).
+            let make_raw = || -> Vec<(Detection, f32)> {
+                vec![
+                    (
+                        Detection {
+                            bbox: BoundingBox {
+                                x_min: 0.0,
+                                y_min: 0.0,
+                                x_max: 0.5,
+                                y_max: 0.5,
+                            },
+                            class: Arc::from("a"),
+                            class_id: 0,
+                            confidence: 0.9,
+                            track_id: None,
+                        },
+                        0.9,
+                    ),
+                    (
+                        Detection {
+                            bbox: BoundingBox {
+                                x_min: 0.02,
+                                y_min: 0.02,
+                                x_max: 0.52,
+                                y_max: 0.52,
+                            },
+                            class: Arc::from("a"),
+                            class_id: 0,
+                            confidence: 0.85,
+                            track_id: None,
+                        },
+                        0.85,
+                    ),
+                    (
+                        Detection {
+                            bbox: BoundingBox {
+                                x_min: 0.04,
+                                y_min: 0.04,
+                                x_max: 0.54,
+                                y_max: 0.54,
+                            },
+                            class: Arc::from("a"),
+                            class_id: 0,
+                            confidence: 0.8,
+                            track_id: None,
+                        },
+                        0.8,
+                    ),
+                ]
+            };
+
+            let classic = nms_per_class_with_variant(make_raw(), 0.5, 10, NmsVariant::Classic, 8);
+            let soft =
+                nms_per_class_with_variant(make_raw(), 0.5, 10, NmsVariant::Soft { sigma: 0.5 }, 8);
+            let diou = nms_per_class_with_variant(make_raw(), 0.5, 10, NmsVariant::DIoU, 8);
+
+            // Classic should be the most aggressive (fewest survivors).
+            assert!(
+                classic.len() <= soft.len(),
+                "Classic NMS ({}) should suppress at least as many as Soft-NMS ({})",
+                classic.len(),
+                soft.len()
+            );
+            // DIoU considers center distance — for boxes with similar centers the
+            // result should be comparable to Classic.
+            assert!(
+                diou.len() <= soft.len(),
+                "DIoU-NMS ({}) should suppress at least as aggressively as Soft-NMS ({})",
+                diou.len(),
+                soft.len()
+            );
+        }
+
+        // ── Edge cases ──────────────────────────────────────────────
+
+        #[test]
+        fn postprocess_empty_tensor_returns_default() {
+            // YOLOv8 tensor with 0 predictions → empty PostprocessOutput.
+            let output = make_yolov8_output(&[], 3);
+            let transform = identity_transform(640, 640);
+            let proc = YoloV8PostProcessor::default();
+
+            let result = proc
+                .process(&output, &transform, &labels(3))
+                .expect("process should succeed");
+
+            assert!(result.detections.is_empty());
+            assert!(result.classifications.is_empty());
+            assert!(result.segmentation_masks.is_empty());
+            assert!(result.anomaly_maps.is_empty());
+        }
+
+        #[test]
+        fn postprocess_invalid_shape_returns_error() {
+            // Feed a 2D tensor to YOLOv8 — must produce PostprocessError.
+            let tensor = ArrayD::from_shape_vec(vec![1, 8], vec![0.0; 8]).expect("valid shape");
+            let output = RawInferenceOutput {
+                tensors: vec![("output0".into(), tensor)],
+            };
+            let transform = identity_transform(640, 640);
+            let proc = YoloV8PostProcessor::default();
+
+            let result = proc.process(&output, &transform, &labels(3));
+
+            assert!(result.is_err(), "2D tensor should trigger PostprocessError");
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, AiEngineError::PostprocessError(_)),
+                "expected PostprocessError, got: {err:?}"
+            );
         }
     }
 }

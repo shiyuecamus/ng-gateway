@@ -18,11 +18,12 @@ use crate::{
     core::metrics::GatewayStatusSnapshot,
     domain::prelude::{
         AlgorithmInfo, AlgorithmPageParams, AlgorithmProbeInfo, AlgorithmTestInput,
-        AlgorithmTestResult, AnalysisResult, Claims, EngineStatus, FrameAnalysisRequest, ModelInfo,
-        ModelInstallRequest, ModelPageParams, ModelProbeInfo, NewAction, NewApp, NewAppSub,
-        NewChannel, NewDevice, NewPipeline, NewPoint, PageResult, PipelineInfo, PipelinePageParams,
-        ProcessorInfo, RuntimeSettingKey, UpdateAction, UpdateApp, UpdateAppSub, UpdateChannel,
-        UpdateDevice, UpdateModel, UpdatePipeline, UpdatePoint,
+        AlgorithmTestResult, AnalysisResult, ChannelRegistration, Claims, EngineStatus,
+        FrameAnalysisRequest, ModelInfo, ModelInstallRequest, ModelPageParams, ModelProbeInfo,
+        NewAction, NewApp, NewAppSub, NewChannel, NewDevice, NewPipeline, NewPoint, PageResult,
+        PipelineInfo, PipelinePageParams, ProcessorInfo, RuntimeSettingKey, UpdateAction,
+        UpdateApp, UpdateAppSub, UpdateChannel, UpdateDevice, UpdateModel, UpdatePipeline,
+        UpdatePoint, WebRtcSignaling,
     },
     entities::prelude::{AppModel, ChannelModel, DeviceModel},
     enums::common::Status,
@@ -46,7 +47,7 @@ use ng_gateway_sdk::{ConnectionState, NorthwardData};
 use sea_orm::DatabaseConnection;
 use settings::Settings;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::broadcast;
+use tokio::sync::broadcast::{self, Receiver};
 
 // Implement downcast for core system traits
 impl_downcast!(sync WebServer);
@@ -548,11 +549,33 @@ pub trait AiAlgorithmRegistry: DowncastSync + Send + Sync + 'static {
 /// continue (best-effort semantics for real-time video).
 #[async_trait::async_trait]
 pub trait AiInferenceRuntime: DowncastSync + Send + Sync + 'static {
-    /// Submit a video frame for AI analysis.
+    /// Submit a video frame for AI analysis (legacy push-based API).
+    ///
+    /// Retained for backward compatibility and single-frame analysis use cases
+    /// (e.g. HTTP API image upload). For continuous video streams, prefer
+    /// [`register_channel`](Self::register_channel) which uses an internal
+    /// GStreamer pipeline for hardware-accelerated zero-copy frame acquisition.
     async fn analyze_frame(
         &self,
         request: FrameAnalysisRequest,
     ) -> Result<AnalysisResult, AiEngineError>;
+
+    /// Register a camera channel for continuous AI analysis.
+    ///
+    /// The engine creates a GStreamer pipeline internally for the given stream
+    /// URL, performing hardware-accelerated decoding and delivering decoded
+    /// frames directly to the inference pipeline without any CPU copy.
+    ///
+    /// Analysis results are sent through `request.result_tx` (if provided).
+    /// The channel runs autonomously until [`unregister_channel`] is called.
+    async fn register_channel(&self, request: ChannelRegistration) -> Result<(), AiEngineError>;
+
+    /// Unregister a camera channel, stopping its frame acquisition pipeline.
+    ///
+    /// Gracefully shuts down the GStreamer pipeline, cancels the frame
+    /// processing task, and releases all associated resources (DMA-buf fds,
+    /// buffer pools, etc.).
+    async fn unregister_channel(&self, channel_id: i32) -> Result<(), AiEngineError>;
 
     /// Check if the engine has capacity to accept a new frame (non-blocking).
     fn has_capacity(&self, channel_id: &i32) -> bool;
@@ -571,6 +594,40 @@ pub trait AiInferenceRuntime: DowncastSync + Send + Sync + 'static {
 
     /// List built-in postprocessors with their metadata and parameters.
     fn list_postprocessors(&self) -> Vec<ProcessorInfo>;
+
+    /// Handle a WebRTC signaling message for live preview.
+    ///
+    /// Returns the response signaling message to send back to the client,
+    /// or `None` if no response is needed (e.g., for ICE candidates).
+    async fn handle_webrtc_signaling(
+        &self,
+        channel_id: i32,
+        msg: WebRtcSignaling,
+    ) -> Result<Option<WebRtcSignaling>, AiEngineError>;
+
+    /// Check if WebRTC live preview is enabled and available.
+    fn is_webrtc_enabled(&self) -> bool;
+
+    /// Subscribe to server-generated ICE candidates for a channel.
+    ///
+    /// Returns a broadcast receiver; the caller should forward received
+    /// candidates to the WebSocket client for `addIceCandidate`. Candidates
+    /// received here must NOT be passed to the gateway's webrtcbin (those
+    /// are for client-originated candidates). Returns `None` if the publisher
+    /// could not be created or WebRTC is disabled.
+    fn subscribe_webrtc_server_ice(&self, channel_id: i32) -> Option<Receiver<WebRtcSignaling>>;
+
+    /// Register a WebRTC peer connection (call when WebSocket client connects).
+    ///
+    /// Ensures the publisher exists and increments the peer count. Must be
+    /// paired with [`webrtc_remove_peer`](Self::webrtc_remove_peer) on disconnect.
+    fn webrtc_add_peer(&self, channel_id: i32) -> Option<()>;
+
+    /// Unregister a WebRTC peer (call when WebSocket client disconnects).
+    ///
+    /// Decrements the peer count. When the last peer disconnects, the publisher
+    /// is torn down to free encoder resources.
+    fn webrtc_remove_peer(&self, channel_id: i32);
 }
 
 // ── AI Facade Trait ──────────────────────────────────────────────

@@ -1624,6 +1624,9 @@ pub struct AiEngineConfig {
     /// WASM runtime configuration.
     #[serde(default)]
     pub wasm: WasmConfig,
+    /// WebRTC live preview configuration.
+    #[serde(default)]
+    pub webrtc: WebRtcConfig,
 }
 
 impl Default for AiEngineConfig {
@@ -1637,6 +1640,7 @@ impl Default for AiEngineConfig {
             annotate_queue_capacity: Self::default_annotate_queue_capacity(),
             inference: InferenceConfig::default(),
             wasm: WasmConfig::default(),
+            webrtc: WebRtcConfig::default(),
         }
     }
 }
@@ -1683,6 +1687,84 @@ pub struct InferenceConfig {
     /// Queue capacity per inference session worker.
     #[serde(default = "InferenceConfig::default_request_queue_capacity")]
     pub request_queue_capacity: usize,
+    /// RKNN NPU core mask for multi-core scheduling on Rockchip SoCs.
+    ///
+    /// Controls which NPU cores the RKNN backend uses for inference:
+    /// - `0` — auto (let the runtime decide, default)
+    /// - `1` — NPU core 0 only
+    /// - `2` — NPU core 1 only
+    /// - `4` — NPU core 2 only
+    /// - `7` — all three cores (RK3588 has 3 NPU cores)
+    ///
+    /// On RK3588, using all 3 cores (`7`) maximizes throughput for batch
+    /// inference, while single-core is better for low-latency single-frame.
+    #[serde(default)]
+    pub rknn_core_mask: u32,
+    /// Dynamic batching configuration.
+    ///
+    /// When enabled, inference requests from multiple channels sharing the
+    /// same model are aggregated into batches before being submitted to
+    /// the backend, improving GPU/NPU throughput at the cost of slightly
+    /// higher per-frame latency.
+    ///
+    /// Maps to `[general.ai.inference.batching]` in `gateway.toml`.
+    #[serde(default)]
+    pub batching: BatchingConfig,
+}
+
+/// Dynamic batching configuration for multi-channel inference aggregation.
+///
+/// The batch collector accumulates preprocessed tensors from concurrent
+/// inference requests and flushes them as a single batched inference call
+/// when either the batch is full or the timeout expires, whichever comes first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchingConfig {
+    /// Whether dynamic batching is enabled.
+    /// When `false`, each inference request is dispatched individually.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum batch size. When the queue accumulates this many items,
+    /// a batch is flushed immediately regardless of timeout.
+    /// Typical: 4 (edge NPU), 8-16 (GPU), 1 (effectively disabled).
+    #[serde(default = "BatchingConfig::default_max_batch_size")]
+    pub max_batch_size: usize,
+    /// Maximum time to wait for a full batch before flushing a partial one (ms).
+    /// Lower = lower latency, higher = better throughput.
+    /// Typical: 5-20 ms.
+    #[serde(default = "BatchingConfig::default_collect_timeout_ms")]
+    pub collect_timeout_ms: u64,
+    /// Maximum queue depth. When exceeded, new items receive
+    /// `AiEngineError::Backpressure` immediately.
+    #[serde(default = "BatchingConfig::default_max_queue_depth")]
+    pub max_queue_depth: usize,
+    /// Enable adaptive timeout/batch-size tuning based on queue load
+    /// and inference latency.
+    #[serde(default)]
+    pub adaptive: bool,
+}
+
+impl Default for BatchingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_batch_size: Self::default_max_batch_size(),
+            collect_timeout_ms: Self::default_collect_timeout_ms(),
+            max_queue_depth: Self::default_max_queue_depth(),
+            adaptive: false,
+        }
+    }
+}
+
+impl BatchingConfig {
+    fn default_max_batch_size() -> usize {
+        4
+    }
+    fn default_collect_timeout_ms() -> u64 {
+        10
+    }
+    fn default_max_queue_depth() -> usize {
+        32
+    }
 }
 
 impl Default for InferenceConfig {
@@ -1694,6 +1776,8 @@ impl Default for InferenceConfig {
             enable_mem_pattern: true,
             sessions_per_model: Self::default_sessions_per_model(),
             request_queue_capacity: Self::default_request_queue_capacity(),
+            rknn_core_mask: 0,
+            batching: BatchingConfig::default(),
         }
     }
 }
@@ -1739,5 +1823,88 @@ impl WasmConfig {
     }
     fn default_memory_limit() -> usize {
         16 * 1024 * 1024
+    }
+}
+
+/// WebRTC live preview configuration.
+///
+/// Controls the GStreamer-based WebRTC publish pipeline for real-time
+/// AI-annotated video streaming to browser clients.
+///
+/// Maps to `[general.ai.webrtc]` in `gateway.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebRtcConfig {
+    /// Enable WebRTC live preview (default: true).
+    #[serde(default = "WebRtcConfig::default_enabled")]
+    pub enabled: bool,
+    /// Target bitrate in kbps (default: 2000 for 1080p).
+    #[serde(default = "WebRtcConfig::default_bitrate_kbps")]
+    pub bitrate_kbps: u32,
+    /// Maximum output width (source is downscaled if larger).
+    #[serde(default = "WebRtcConfig::default_max_width")]
+    pub max_width: u32,
+    /// Maximum output height (source is downscaled if larger).
+    #[serde(default = "WebRtcConfig::default_max_height")]
+    pub max_height: u32,
+    /// Maximum output frame rate.
+    #[serde(default = "WebRtcConfig::default_max_fps")]
+    pub max_fps: u32,
+    /// Keyframe interval in frames (default: 30 = ~1 keyframe/sec at 30fps).
+    #[serde(default = "WebRtcConfig::default_key_int_max")]
+    pub key_int_max: u32,
+    /// STUN server URL for ICE connectivity.
+    #[serde(default = "WebRtcConfig::default_stun_server")]
+    pub stun_server: String,
+    /// Optional TURN server URL for NAT traversal.
+    ///
+    /// Format: `turn://username:password@host:port`
+    #[serde(default)]
+    pub turn_server: Option<String>,
+    /// TURN server username (if TURN requires separate credentials).
+    #[serde(default)]
+    pub turn_username: Option<String>,
+    /// TURN server password.
+    #[serde(default)]
+    pub turn_password: Option<String>,
+}
+
+impl Default for WebRtcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            bitrate_kbps: Self::default_bitrate_kbps(),
+            max_width: Self::default_max_width(),
+            max_height: Self::default_max_height(),
+            max_fps: Self::default_max_fps(),
+            key_int_max: Self::default_key_int_max(),
+            stun_server: Self::default_stun_server(),
+            turn_server: None,
+            turn_username: None,
+            turn_password: None,
+        }
+    }
+}
+
+impl WebRtcConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_bitrate_kbps() -> u32 {
+        2000
+    }
+    fn default_max_width() -> u32 {
+        1280
+    }
+    fn default_max_height() -> u32 {
+        720
+    }
+    fn default_max_fps() -> u32 {
+        30
+    }
+    fn default_key_int_max() -> u32 {
+        30
+    }
+    fn default_stun_server() -> String {
+        "stun://stun.l.google.com:19302".to_string()
     }
 }

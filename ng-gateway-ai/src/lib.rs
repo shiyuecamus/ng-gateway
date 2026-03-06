@@ -22,6 +22,11 @@
 //!   model registry, pre/post processors, frame decoder, and metrics. Only the
 //!   host process (`ng-gateway-core`) should enable this feature.
 
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 // ── Driver-facing API re-exports ────────────────────────────────────
 //
 // Drivers MUST NOT directly depend on ng-gateway-models or ng-gateway-error.
@@ -36,7 +41,8 @@ pub mod api {
     pub use ng_gateway_error::ai::{AiEngineError, AiResult};
     pub use ng_gateway_models::{
         domain::prelude::{
-            AlarmEvent, AnalysisResult, FrameAnalysisRequest, NewPipeline, PipelineInfo, VideoFrame,
+            AlarmEvent, AnalysisResult, ChannelRegistration, FrameAnalysisRequest, NewPipeline,
+            PipelineInfo, StreamTransport, VideoFrame,
         },
         entities::ai::pipeline::RoiRegions,
         enums::ai::{AlarmSeverity, FrameFormat, SamplingStrategy},
@@ -62,6 +68,9 @@ pub mod engine;
 
 mod decoded;
 pub use decoded::DecodedFrame;
+
+#[cfg(test)]
+mod test_utils;
 
 // Engine-only re-exports
 #[cfg(feature = "engine")]

@@ -7,14 +7,42 @@
 
 #[cfg(feature = "engine")]
 mod inner {
-    use crate::decoded::DecodedFrame;
+    use crate::{decoded::DecodedFrame, frame::pool::CpuBufferPool};
     use bytes::Bytes;
+    use gstreamer::prelude::*;
     use ng_gateway_error::ai::AiEngineError;
     use ng_gateway_models::{
         domain::prelude::{AnalysisCore, Detection, KeypointDetection, SegmentationMask},
         entities::ai::pipeline::AnnotationConfig,
     };
     use rayon::prelude::*;
+    use std::sync::OnceLock;
+
+    /// Default max annotation pool width.
+    const ANNOTATION_POOL_MAX_WIDTH: u32 = 3840;
+    /// Default max annotation pool height.
+    const ANNOTATION_POOL_MAX_HEIGHT: u32 = 2160;
+    /// Default annotation RGB buffer pool depth.
+    const ANNOTATION_POOL_SIZE: usize = 8;
+
+    static ANNOTATION_RGB_POOL: OnceLock<CpuBufferPool> = OnceLock::new();
+
+    /// Get the global RGB buffer pool used by annotation rendering.
+    fn annotation_rgb_pool() -> &'static CpuBufferPool {
+        ANNOTATION_RGB_POOL.get_or_init(|| {
+            CpuBufferPool::for_resolution(
+                ANNOTATION_POOL_SIZE,
+                ANNOTATION_POOL_MAX_WIDTH,
+                ANNOTATION_POOL_MAX_HEIGHT,
+                3,
+            )
+        })
+    }
+
+    /// Return an RGB image backing buffer to the global annotation pool.
+    fn recycle_annotation_buffer(buf: Vec<u8>) {
+        annotation_rgb_pool().put_back(buf);
+    }
 
     /// Frame annotator trait — draws analysis results onto frames.
     pub trait FrameAnnotator: Send + Sync + 'static {
@@ -42,9 +70,16 @@ mod inner {
             result: &AnalysisCore,
             config: &AnnotationConfig,
         ) -> Result<Bytes, AiEngineError> {
-            let mut img =
-                image::RgbImage::from_raw(frame.width, frame.height, frame.data.as_ref().to_vec())
-                    .ok_or(AiEngineError::InternalError("invalid frame data".into()))?;
+            // Lazy CPU materialization: only copy from DMA when we actually
+            // need to draw. For CPU-resident frames this is a ref-count bump;
+            // for DMA-buf frames this is a single mmap + copy.
+            let cpu_bytes = frame.memory.to_cpu()?;
+            let mut pooled_rgb = annotation_rgb_pool().checkout();
+            let pooled_vec = pooled_rgb.as_mut_vec();
+            pooled_vec.clear();
+            pooled_vec.extend_from_slice(cpu_bytes.as_ref());
+            let mut img = image::RgbImage::from_raw(frame.width, frame.height, pooled_rgb.take())
+                .ok_or(AiEngineError::InternalError("invalid frame data".into()))?;
             let compiled_palette = compile_palette(&config.color_palette);
 
             // Draw segmentation mask overlay (semi-transparent)
@@ -120,13 +155,14 @@ mod inner {
                     let scale = max_dim as f32 / frame.width.max(frame.height) as f32;
                     let nw = (frame.width as f32 * scale) as u32;
                     let nh = (frame.height as f32 * scale) as u32;
-                    image::DynamicImage::ImageRgb8(image::imageops::resize(
+                    let resized = image::imageops::resize(
                         &img,
                         nw,
                         nh,
                         image::imageops::FilterType::Triangle,
-                    ))
-                    .to_rgb8()
+                    );
+                    recycle_annotation_buffer(img.into_raw());
+                    resized
                 } else {
                     img
                 }
@@ -134,18 +170,188 @@ mod inner {
                 img
             };
 
-            // Encode to JPEG
-            let mut jpeg_buf = Vec::with_capacity(frame.width as usize * frame.height as usize / 4);
-            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                &mut jpeg_buf,
+            // Encode to JPEG (hardware-accelerated when available).
+            let jpeg_bytes = encode_jpeg_adaptive(
+                final_img.as_raw(),
+                final_img.width(),
+                final_img.height(),
                 config.jpeg_quality,
-            );
-            image::DynamicImage::ImageRgb8(final_img)
-                .write_with_encoder(encoder)
-                .map_err(|e| AiEngineError::InternalError(e.to_string()))?;
+            )?;
+            recycle_annotation_buffer(final_img.into_raw());
 
-            Ok(Bytes::from(jpeg_buf))
+            Ok(jpeg_bytes)
         }
+    }
+
+    // ── JPEG encoding (adaptive: hardware → software fallback) ──────
+
+    /// Cached hardware JPEG encoder element name (probed once).
+    static HW_JPEG_ENCODER: OnceLock<Option<String>> = OnceLock::new();
+
+    /// Initialize the hardware JPEG encoder probe.
+    ///
+    /// Called during engine startup. When a platform-specific JPEG encoder
+    /// element (vaapijpegenc, nvjpegenc, mppjpegenc) is available, it is
+    /// stored for use by `encode_jpeg_adaptive`.
+    pub fn init_hw_jpeg_encoder(encoder_name: Option<&str>) {
+        HW_JPEG_ENCODER.get_or_init(|| {
+            if let Some(name) = encoder_name {
+                tracing::info!(
+                    encoder = name,
+                    "hardware JPEG encoder available for annotation"
+                );
+                Some(name.to_string())
+            } else {
+                tracing::debug!("no hardware JPEG encoder, using software fallback");
+                None
+            }
+        });
+    }
+
+    /// Encode RGB data to JPEG, using hardware acceleration when available.
+    ///
+    /// Falls back to software `image::codecs::jpeg::JpegEncoder` when
+    /// hardware encoding is unavailable or fails.
+    fn encode_jpeg_adaptive(
+        rgb_data: &[u8],
+        width: u32,
+        height: u32,
+        quality: u8,
+    ) -> Result<Bytes, AiEngineError> {
+        // Try hardware path if probed and available.
+        if let Some(Some(hw_encoder)) = HW_JPEG_ENCODER.get() {
+            match encode_jpeg_gstreamer(rgb_data, width, height, quality, hw_encoder) {
+                Ok(jpeg) => return Ok(jpeg),
+                Err(e) => {
+                    tracing::warn!(
+                        encoder = hw_encoder.as_str(),
+                        error = %e,
+                        "hardware JPEG encoding failed, falling back to software"
+                    );
+                }
+            }
+        }
+
+        // Software fallback.
+        encode_jpeg_software(rgb_data, width, height, quality)
+    }
+
+    /// Software JPEG encoding via the `image` crate.
+    fn encode_jpeg_software(
+        rgb_data: &[u8],
+        width: u32,
+        height: u32,
+        quality: u8,
+    ) -> Result<Bytes, AiEngineError> {
+        let mut jpeg_buf = Vec::with_capacity(width as usize * height as usize / 4);
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
+        encoder
+            .encode(rgb_data, width, height, image::ExtendedColorType::Rgb8)
+            .map_err(|e| AiEngineError::InternalError(e.to_string()))?;
+        Ok(Bytes::from(jpeg_buf))
+    }
+
+    /// Hardware JPEG encoding via a GStreamer mini-pipeline.
+    ///
+    /// Constructs: `appsrc → videoconvert → <hw_encoder> → appsink`
+    /// Pushes one RGB frame, pulls one JPEG buffer.
+    fn encode_jpeg_gstreamer(
+        rgb_data: &[u8],
+        width: u32,
+        height: u32,
+        quality: u8,
+        encoder_element: &str,
+    ) -> Result<Bytes, AiEngineError> {
+        let pipeline = gstreamer::Pipeline::default();
+
+        let appsrc = gstreamer_app::AppSrc::builder()
+            .name("jpeg_src")
+            .caps(
+                &gstreamer::Caps::builder("video/x-raw")
+                    .field("format", "RGB")
+                    .field("width", width as i32)
+                    .field("height", height as i32)
+                    .field("framerate", gstreamer::Fraction::new(1, 1))
+                    .build(),
+            )
+            .format(gstreamer::Format::Time)
+            .is_live(false)
+            .build();
+
+        let convert = gstreamer::ElementFactory::make("videoconvert")
+            .name("jpeg_convert")
+            .build()
+            .map_err(|e| {
+                AiEngineError::InternalError(format!("failed to create videoconvert: {e}"))
+            })?;
+
+        let mut encoder_builder = gstreamer::ElementFactory::make(encoder_element).name("jpeg_enc");
+        // Set quality where supported (vaapijpegenc uses "quality",
+        // mppjpegenc uses "quality", nvjpegenc uses "quality").
+        if encoder_element.contains("jpeg") {
+            encoder_builder = encoder_builder.property("quality", quality as u32);
+        }
+        let encoder = encoder_builder.build().map_err(|e| {
+            AiEngineError::InternalError(format!(
+                "failed to create HW JPEG encoder '{encoder_element}': {e}"
+            ))
+        })?;
+
+        let appsink = gstreamer_app::AppSink::builder()
+            .name("jpeg_sink")
+            .sync(false)
+            .build();
+
+        let appsrc_el = appsrc.clone().upcast::<gstreamer::Element>();
+        let appsink_el = appsink.clone().upcast::<gstreamer::Element>();
+        pipeline
+            .add_many([&appsrc_el, &convert, &encoder, &appsink_el])
+            .map_err(|e| {
+                AiEngineError::InternalError(format!("failed to add JPEG pipeline elements: {e}"))
+            })?;
+        gstreamer::Element::link_many([&appsrc_el, &convert, &encoder, &appsink_el]).map_err(
+            |e| AiEngineError::InternalError(format!("failed to link JPEG pipeline: {e}")),
+        )?;
+
+        pipeline.set_state(gstreamer::State::Playing).map_err(|e| {
+            AiEngineError::InternalError(format!("failed to start JPEG pipeline: {e}"))
+        })?;
+
+        // Push one frame.
+        let mut buffer = gstreamer::Buffer::from_slice(rgb_data.to_vec());
+        {
+            let buf_ref = buffer.get_mut().ok_or_else(|| {
+                AiEngineError::InternalError("failed to get mutable buffer ref".into())
+            })?;
+            buf_ref.set_pts(gstreamer::ClockTime::ZERO);
+            buf_ref.set_duration(gstreamer::ClockTime::SECOND);
+        }
+        appsrc
+            .push_buffer(buffer)
+            .map_err(|e| AiEngineError::InternalError(format!("appsrc push failed: {e}")))?;
+        appsrc
+            .end_of_stream()
+            .map_err(|e| AiEngineError::InternalError(format!("appsrc EOS failed: {e}")))?;
+
+        // Pull the encoded JPEG.
+        let sample = appsink
+            .pull_sample()
+            .map_err(|e| AiEngineError::InternalError(format!("appsink pull failed: {e}")))?;
+        let buf = sample
+            .buffer()
+            .ok_or_else(|| AiEngineError::InternalError("no buffer in JPEG sample".into()))?;
+        let map = buf
+            .map_readable()
+            .map_err(|e| AiEngineError::InternalError(format!("failed to map JPEG buffer: {e}")))?;
+
+        let result = Bytes::copy_from_slice(map.as_slice());
+
+        pipeline.set_state(gstreamer::State::Null).map_err(|e| {
+            AiEngineError::InternalError(format!("failed to stop JPEG pipeline: {e}"))
+        })?;
+
+        Ok(result)
     }
 
     /// Build the annotation label from detection metadata according to config.
@@ -779,11 +985,7 @@ mod inner {
         use ng_gateway_models::domain::prelude::{BoundingBox, Detection, SegmentationMask};
 
         fn make_test_frame(w: u32, h: u32) -> DecodedFrame {
-            DecodedFrame {
-                data: Bytes::from(vec![128u8; (w * h * 3) as usize]),
-                width: w,
-                height: h,
-            }
+            DecodedFrame::from_rgb24(Bytes::from(vec![128u8; (w * h * 3) as usize]), w, h)
         }
 
         #[test]

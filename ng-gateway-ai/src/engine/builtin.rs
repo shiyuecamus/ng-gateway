@@ -59,6 +59,26 @@ pub(super) fn builtin_preprocessors() -> Vec<ProcessorInfo> {
                 required: false,
             }],
         },
+        ProcessorInfo {
+            id: "rknn_letterbox".into(),
+            name: "RKNN Letterbox (uint8 NHWC)".into(),
+            description: "Letterbox resize outputting uint8 NHWC for RKNN quantized models. \
+                Skips float normalization and NCHW transpose for maximum NPU throughput. \
+                Auto-selected for RKNN format models."
+                .into(),
+            applicable_tasks: vec![
+                "object_detection".into(),
+                "classification".into(),
+                "segmentation".into(),
+            ],
+            parameters: vec![ProcessorParameter {
+                name: "pad_value".into(),
+                description: "Fill value for letterbox padding pixels (0-255).".into(),
+                param_type: ParamType::U8,
+                default: Some(serde_json::json!(114)),
+                required: false,
+            }],
+        },
     ]
 }
 
@@ -218,4 +238,56 @@ pub(super) fn builtin_postprocessors() -> Vec<ProcessorInfo> {
             parameters: vec![],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn builtin_preprocessors_has_four_entries() {
+        assert_eq!(builtin_preprocessors().len(), 4);
+    }
+
+    #[test]
+    fn builtin_postprocessors_has_seven_entries() {
+        assert_eq!(builtin_postprocessors().len(), 7);
+    }
+
+    #[test]
+    fn preprocessor_ids_are_unique() {
+        let procs = builtin_preprocessors();
+        let ids: HashSet<&str> = procs.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            procs.len(),
+            "duplicate preprocessor IDs detected"
+        );
+    }
+
+    #[test]
+    fn postprocessor_ids_are_unique() {
+        let procs = builtin_postprocessors();
+        let ids: HashSet<&str> = procs.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            procs.len(),
+            "duplicate postprocessor IDs detected"
+        );
+    }
+
+    #[test]
+    fn all_processors_have_nonempty_description() {
+        for p in builtin_preprocessors()
+            .iter()
+            .chain(builtin_postprocessors().iter())
+        {
+            assert!(
+                !p.description.is_empty(),
+                "processor '{}' has empty description",
+                p.id
+            );
+        }
+    }
 }

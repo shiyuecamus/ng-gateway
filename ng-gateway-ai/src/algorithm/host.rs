@@ -499,7 +499,9 @@ impl WasmAlgorithmHost {
             )));
         }
 
-        let pixel_data = frame.data.clone();
+        let pixel_data = frame.memory.to_cpu().map_err(|e| {
+            AiEngineError::AlgorithmError(format!("failed to materialize frame for WASM: {e}"))
+        })?;
         let width = frame.width;
         let height = frame.height;
         let fuel_limit = self.fuel_limit;
@@ -617,7 +619,7 @@ impl WasmAlgorithmHost {
                                 serde_json::json!({
                                     "width": frame.width,
                                     "height": frame.height,
-                                    "pixel_count": frame.data.len()
+                                    "pixel_count": frame.pixel_data_size()
                                 }),
                             )],
                         };
@@ -783,11 +785,11 @@ impl WasmAlgorithmHost {
             "WASM frame transform complete"
         );
 
-        Ok(DecodedFrame {
-            data: Bytes::from(out_pixels),
-            width: output.width,
-            height: output.height,
-        })
+        Ok(DecodedFrame::from_rgb24(
+            Bytes::from(out_pixels),
+            output.width,
+            output.height,
+        ))
     }
 
     /// Run a ResultProcessor module synchronously (called from blocking thread).

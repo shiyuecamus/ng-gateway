@@ -45,11 +45,7 @@ mod inner {
         /// feeds pixel data into any stage — it only collects results.
         pub fn new_merge_only() -> Self {
             Self {
-                current_frame: DecodedFrame {
-                    data: bytes::Bytes::new(),
-                    width: 0,
-                    height: 0,
-                },
+                current_frame: DecodedFrame::empty(),
                 detections: Vec::new(),
                 classifications: Vec::new(),
                 keypoint_detections: Vec::new(),
@@ -82,6 +78,78 @@ mod inner {
         /// Extend anomaly maps from an anomaly detection inference stage.
         pub fn add_anomaly_maps(&mut self, maps: Vec<AnomalyMap>) {
             self.anomaly_maps.extend(maps);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::test_utils::make_solid_frame;
+        use ng_gateway_models::domain::prelude::*;
+        use std::sync::Arc;
+
+        #[test]
+        fn context_new_all_fields_empty() {
+            let frame = make_solid_frame(64, 48, 0, 0, 0);
+            let ctx = PipelineContext::new(frame);
+
+            assert!(ctx.detections.is_empty());
+            assert!(ctx.classifications.is_empty());
+            assert!(ctx.keypoint_detections.is_empty());
+            assert!(ctx.segmentation_masks.is_empty());
+            assert!(ctx.anomaly_maps.is_empty());
+            assert!(ctx.custom_outputs.is_empty());
+        }
+
+        #[test]
+        fn add_detections_accumulates() {
+            let frame = make_solid_frame(32, 32, 128, 128, 128);
+            let mut ctx = PipelineContext::new(frame);
+
+            let batch_a: Vec<Detection> = (0..2)
+                .map(|i| Detection {
+                    bbox: BoundingBox {
+                        x_min: 0.0,
+                        y_min: 0.0,
+                        x_max: 0.5,
+                        y_max: 0.5,
+                    },
+                    class: Arc::from("obj"),
+                    class_id: i,
+                    confidence: 0.9,
+                    track_id: None,
+                })
+                .collect();
+
+            let batch_b: Vec<Detection> = (0..3)
+                .map(|i| Detection {
+                    bbox: BoundingBox {
+                        x_min: 0.1,
+                        y_min: 0.1,
+                        x_max: 0.6,
+                        y_max: 0.6,
+                    },
+                    class: Arc::from("car"),
+                    class_id: 10 + i,
+                    confidence: 0.8,
+                    track_id: None,
+                })
+                .collect();
+
+            ctx.add_detections(batch_a);
+            ctx.add_detections(batch_b);
+
+            assert_eq!(ctx.detections.len(), 5);
+        }
+
+        #[test]
+        fn merge_only_has_empty_frame() {
+            let ctx = PipelineContext::new_merge_only();
+
+            assert_eq!(ctx.current_frame.width, 0);
+            assert_eq!(ctx.current_frame.height, 0);
+            assert!(ctx.detections.is_empty());
+            assert!(ctx.classifications.is_empty());
         }
     }
 }

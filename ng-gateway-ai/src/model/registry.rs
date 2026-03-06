@@ -14,13 +14,13 @@
 #[cfg(feature = "engine")]
 mod inner {
     use crate::{
-        decoded::DecodedFrame,
-        inference::backend::{InferTiming, ModelBackend},
-        model::prober::ProberRegistry,
-        pipeline::{
-            postprocess::RawInferenceOutput,
-            preprocess::{CoordinateTransform, PreProcessor},
+        inference::{
+            backend::{InferTiming, ModelBackend},
+            batch::BatchRouter,
+            RawInferenceOutput,
         },
+        model::prober::ProberRegistry,
+        pipeline::preprocess::PreprocessOutput,
     };
     use dashmap::DashMap;
     use ng_gateway_error::ai::AiEngineError;
@@ -29,11 +29,12 @@ mod inner {
             ModelInfo, ModelInstallRequest, ModelPageParams, ModelProbeInfo, NewModel, PageResult,
             UpdateModel,
         },
-        enums::ai::{ModelFormat, TensorDType},
+        enums::ai::ModelFormat,
+        settings::BatchingConfig,
         AiModelRegistry,
     };
     use ng_gateway_repository::ModelRepository;
-    use sea_orm::IntoActiveModel;
+    use sea_orm::{DatabaseConnection, IntoActiveModel};
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -56,6 +57,10 @@ mod inner {
         prober_registry: Arc<ProberRegistry>,
         /// Inference backends keyed by model format.
         backends: Vec<Arc<dyn ModelBackend>>,
+        /// Optional dynamic batching router.
+        /// When present and enabled, `infer_by_key()` routes CPU tensor
+        /// requests through the batch collector for aggregation.
+        batch_router: Option<Arc<BatchRouter>>,
     }
 
     impl ModelRegistry {
@@ -63,10 +68,17 @@ mod inner {
         ///
         /// Loads all model records and validates that artifact files exist.
         /// Models whose files are missing are logged as warnings and skipped.
+        ///
+        /// `db_conn` provides an externally-owned database connection for use
+        /// during gateway startup before `NGAppContext` is initialized. When
+        /// `None`, the repository falls back to `NGAppContext` (which must
+        /// already be set).
         pub async fn new(
             models_dir: PathBuf,
             prober_registry: Arc<ProberRegistry>,
             backends: Vec<Arc<dyn ModelBackend>>,
+            batching_config: Option<BatchingConfig>,
+            db_conn: Option<&DatabaseConnection>,
         ) -> Result<Self, AiEngineError> {
             if !models_dir.exists() {
                 info!(dir = %models_dir.display(), "models directory does not exist, creating");
@@ -75,17 +87,35 @@ mod inner {
                     .map_err(|e| AiEngineError::IoError(e.to_string()))?;
             }
 
+            let batch_router = batching_config.filter(|c| c.enabled).map(|c| {
+                info!(
+                    max_batch_size = c.max_batch_size,
+                    collect_timeout_ms = c.collect_timeout_ms,
+                    max_queue_depth = c.max_queue_depth,
+                    adaptive = c.adaptive,
+                    "dynamic batching enabled"
+                );
+                Arc::new(BatchRouter::new(c))
+            });
+
             let registry = Self {
                 cache: DashMap::new(),
                 key_index: DashMap::new(),
                 models_dir,
                 prober_registry,
                 backends,
+                batch_router,
             };
 
-            let db_models = ModelRepository::list_all()
-                .await
-                .map_err(|e| AiEngineError::IoError(e.to_string()))?;
+            let db_models = if let Some(conn) = db_conn {
+                ModelRepository::list_all_with(conn)
+                    .await
+                    .map_err(|e| AiEngineError::IoError(e.to_string()))?
+            } else {
+                ModelRepository::list_all()
+                    .await
+                    .map_err(|e| AiEngineError::IoError(e.to_string()))?
+            };
 
             for entity in db_models {
                 let info = ModelInfo::from(entity);
@@ -142,12 +172,17 @@ mod inner {
             &self.models_dir
         }
 
-        /// Find the appropriate backend for a model format.
+        /// Find the appropriate backend for a model format (borrowed ref).
         fn backend_for(&self, format: ModelFormat) -> Option<&dyn ModelBackend> {
             self.backends
                 .iter()
                 .find(|b| b.format() == format)
                 .map(|b| b.as_ref())
+        }
+
+        /// Find the appropriate backend Arc for a model format.
+        fn backend_arc_for(&self, format: ModelFormat) -> Option<Arc<dyn ModelBackend>> {
+            self.backends.iter().find(|b| b.format() == format).cloned()
         }
 
         /// Total loaded model count across all backends.
@@ -163,19 +198,19 @@ mod inner {
                 .sum()
         }
 
-        /// Run preprocessing + inference on a decoded frame, routing to the
+        /// Run inference on already-preprocessed input, routing to the
         /// correct backend based on model format.
         ///
-        /// This is the primary inference entry point for the engine hot path,
-        /// replacing the legacy `InferencePool::infer_compiled`.
+        /// The caller (Engine layer) is responsible for running the
+        /// appropriate preprocessor and producing the `PreprocessOutput`.
+        /// This separation enables backend-specific input formats:
+        /// ONNX receives `CpuTensor(f32 NCHW)`, RKNN receives
+        /// `DeviceMemory(DMA-buf uint8 NHWC)`.
         pub async fn infer_by_key(
             &self,
             model_key: &str,
-            frame: &DecodedFrame,
-            preprocessor: &dyn PreProcessor,
-            input_shape: &[i64],
-            input_dtype: TensorDType,
-        ) -> Result<(RawInferenceOutput, CoordinateTransform, InferTiming), AiEngineError> {
+            input: PreprocessOutput,
+        ) -> Result<(RawInferenceOutput, InferTiming), AiEngineError> {
             let info = self
                 .get_by_key(model_key)
                 .ok_or(AiEngineError::ModelNotFound(model_key.to_string()))?;
@@ -191,9 +226,35 @@ mod inner {
                 backend.load(info.id, Path::new(&info.path)).await?;
             }
 
-            backend
-                .infer(info.id, frame, preprocessor, input_shape, input_dtype)
-                .await
+            // Route through batch collector when enabled and the input
+            // is a CPU tensor (GPU/DMA inputs bypass batching).
+            if let Some(ref router) = self.batch_router {
+                if router.is_enabled() && matches!(&input, PreprocessOutput::CpuTensor { .. }) {
+                    let backend_arc =
+                        self.backend_arc_for(info.format)
+                            .ok_or(AiEngineError::ModelLoadError(format!(
+                                "no backend for format {:?}",
+                                info.format
+                            )))?;
+                    return router
+                        .submit(
+                            model_key,
+                            info.id,
+                            input,
+                            backend_arc,
+                            Path::new(&info.path),
+                        )
+                        .await;
+                }
+            }
+
+            backend.infer(info.id, input).await
+        }
+
+        /// Look up the backend for a given model format (public for Engine
+        /// to query `supports_dma_input()` during preprocessing dispatch).
+        pub fn backend_for_format(&self, format: ModelFormat) -> Option<&dyn ModelBackend> {
+            self.backend_for(format)
         }
     }
 

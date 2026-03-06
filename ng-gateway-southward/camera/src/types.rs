@@ -1,12 +1,11 @@
 //! Camera driver runtime types.
 //!
 //! Domain models for the Camera southward driver:
-//! - [`CameraChannel`]: channel-level config (protocol, pipeline, sampling)
+//! - [`CameraChannel`]: channel-level config (protocol, pipeline)
 //! - [`CameraDevice`]: lightweight device (just identity + status)
 //! - [`CameraPoint`]: AI output mapping point (detection_count, person_count, …)
 //! - [`CameraAction`]: camera-specific actions (PTZ, snapshot, restart pipeline)
 
-use ng_gateway_ai::api::SamplingStrategy;
 use ng_gateway_sdk::{
     AccessMode, CollectionType, ConnectionPolicy, DataPointType, DataType, DriverConfig,
     DriverError, ReportType, RuntimeAction, RuntimeChannel, RuntimeDevice, RuntimeParameter,
@@ -34,6 +33,12 @@ pub struct CameraChannel {
 }
 
 /// Camera channel configuration (deserialized from `driver_config` JSON).
+///
+/// Frame sampling is configured at the **Pipeline** level
+/// ([`Pipeline.sampling`](ng_gateway_models::entities::ai::pipeline::Model))
+/// rather than per-channel — the pipeline is the single authority for
+/// sampling strategy, keeping it co-located with model, ROI, and
+/// post-processing settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraChannelConfig {
@@ -41,9 +46,6 @@ pub struct CameraChannelConfig {
     pub protocol: CameraProtocol,
     /// AI pipeline identifier for this camera channel.
     pub pipeline_id: i32,
-    /// Frame sampling strategy.
-    #[serde(default)]
-    pub sampling: SamplingStrategy,
 }
 
 impl DriverConfig for CameraChannelConfig {}

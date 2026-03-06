@@ -16,10 +16,10 @@ pub struct AuthRequest {
 pub struct PageParams {
     #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
     #[validate(required(message = "page is required"))]
-    pub page: Option<u32>,
+    pub page: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
     #[validate(required(message = "pageSize is required"))]
-    pub page_size: Option<u32>,
+    pub page_size: Option<u64>,
 }
 
 #[allow(unused)]
@@ -62,9 +62,9 @@ pub struct ClearByChannelPayload {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PageResult<T> {
-    pub pages: u32,
+    pub pages: u64,
     pub records: Vec<T>,
     pub total: u64,
-    pub page: u32,
-    pub page_size: u32,
+    pub page: u64,
+    pub page_size: u64,
 }

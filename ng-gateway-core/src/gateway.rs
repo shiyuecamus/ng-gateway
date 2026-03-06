@@ -384,7 +384,13 @@ impl Gateway for NGGateway {
 
         // Initialize AI Processing Engine (if enabled in configuration).
         let ai_engine: Option<Arc<dyn AiEngineApi>> = if settings.general.ai.enabled {
-            match AiEngine::new(settings.general.ai.clone(), Arc::clone(&metrics_hub)).await {
+            match AiEngine::new(
+                settings.general.ai.clone(),
+                Arc::clone(&metrics_hub),
+                Some(&conn),
+            )
+            .await
+            {
                 Ok(engine) => {
                     info!("AI Processing Engine initialized successfully");
                     Some(Arc::new(engine))

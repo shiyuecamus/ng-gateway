@@ -78,10 +78,11 @@ pub use supervision::{
 };
 pub use transform::Transform;
 pub use ui_schema::{
-    DriverEntityTemplate, DriverSchemas, EnumItem, Field, FieldError, FlattenColumn, FlattenEntity,
-    FromValidatedRow, Group, ImportValidationPreview, Node, Operator, PluginConfigSchemas,
-    RowMappingContext, RuleValue, Rules, TemplateMetadata, UiDataType, UiProps, UiText, Union,
-    UnionCase, ValidatedRow, ValidationCode, ValidationSummary, When, WhenEffect,
+    ApiDatasource, DriverEntityTemplate, DriverSchemas, EnumItem, Field, FieldError, FlattenColumn,
+    FlattenEntity, FromValidatedRow, Group, ImportValidationPreview, Node, Operator,
+    PluginConfigSchemas, RowMappingContext, RuleValue, Rules, TemplateMetadata, UiDataType,
+    UiProps, UiText, Union, UnionCase, ValidatedRow, ValidationCode, ValidationSummary, When,
+    WhenEffect,
 };
 pub use value::{
     BinaryJsonEncoding, NGValue, NGValueCastError, NGValueJsonOptions, PointValue,

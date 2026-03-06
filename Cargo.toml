@@ -255,8 +255,6 @@ default-features = false
 version = "6"
 [workspace.dependencies.rayon]
 version = "1"
-[workspace.dependencies.ffmpeg-next]
-version = "8"
 [workspace.dependencies.wasmtime]
 version = "42"
 [workspace.dependencies.wasmparser]
@@ -265,6 +263,35 @@ version = "0.245"
 version = "0.8.2"
 [workspace.dependencies.ort]
 version = "2.0.0-rc.11"
+
+# GStreamer bindings for video frame source, hardware decoding, and WebRTC
+[workspace.dependencies.gstreamer]
+version = "0.25"
+[workspace.dependencies.gstreamer-app]
+version = "0.25"
+[workspace.dependencies.gstreamer-video]
+version = "0.25"
+[workspace.dependencies.gstreamer-allocators]
+version = "0.25"
+[workspace.dependencies.gstreamer-webrtc]
+version = "0.25"
+[workspace.dependencies.gstreamer-sdp]
+version = "0.25"
+
+# CPU buffer pool for zero-copy fallback path
+[workspace.dependencies.crossbeam-queue]
+version = "0.3"
+
+# RKNN NPU inference for Rockchip SoCs (RK3588/RK3576/RK356x).
+# `libloading` enables runtime dlopen of librknnrt.so (no hard link-time dep).
+# `rk3576` enables set_inputs/get_outputs/set_core_mask for RK3588/RK3576.
+[workspace.dependencies.rknpu2]
+version = "0.0.8"
+features = ["libloading", "rk3576"]
+
+# IEEE 754 half-precision float (f16) for RKNN float16 output dequantization
+[workspace.dependencies.half]
+version = "2"
 
 # Tls
 [workspace.dependencies.rustls]

@@ -78,6 +78,7 @@ workspace = true
 workspace = true
 [dependencies.tokio-stream]
 workspace = true
+features = ["sync"]
 [dependencies.futures]
 workspace = true
 

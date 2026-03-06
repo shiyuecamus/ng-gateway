@@ -55,6 +55,13 @@ pub struct AiMetricsHub {
     alloc_estimate_total: IntCounter,
     lock_wait_ns_total: IntCounter,
 
+    /// Dynamic batching: batch size distribution histogram.
+    batch_size_histogram: Histogram,
+    /// Dynamic batching: current queue depth gauge.
+    batch_queue_depth: IntGauge,
+    /// Dynamic batching: flush reason counter.
+    batch_flush_reason: IntCounterVec,
+
     /// Cumulative inference count (lock-free, for status API).
     total_inference_count: AtomicU64,
     /// Cumulative latency sum in microseconds (lock-free, for status API).
@@ -219,6 +226,42 @@ impl AiMetricsHub {
             "ai_lock_wait_ns_total",
         );
 
+        let batch_size_histogram = Histogram::with_opts(
+            HistogramOpts::new(
+                "ai_batch_size",
+                "Distribution of inference batch sizes (dynamic batching)",
+            )
+            .buckets(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0]),
+        )
+        .map_err(|e| NGError::from(format!("ai_batch_size: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(batch_size_histogram.clone()),
+            "ai_batch_size",
+        );
+
+        let batch_queue_depth = IntGauge::new(
+            "ai_batch_queue_depth",
+            "Current batch collector queue depth",
+        )
+        .map_err(|e| NGError::from(format!("ai_batch_queue_depth: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(batch_queue_depth.clone()),
+            "ai_batch_queue_depth",
+        );
+
+        let batch_flush_reason = IntCounterVec::new(
+            opts!("ai_batch_flushes_total", "Total batch flushes by reason"),
+            &["reason"],
+        )
+        .map_err(|e| NGError::from(format!("ai_batch_flushes_total: {e}")))?;
+        register_collector_into(
+            registry,
+            Box::new(batch_flush_reason.clone()),
+            "ai_batch_flushes_total",
+        );
+
         Ok(Self {
             frames_submitted,
             frames_dropped,
@@ -233,6 +276,9 @@ impl AiMetricsHub {
             copy_bytes_total,
             alloc_estimate_total,
             lock_wait_ns_total,
+            batch_size_histogram,
+            batch_queue_depth,
+            batch_flush_reason,
             total_inference_count: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
         })
@@ -362,5 +408,25 @@ impl AiMetricsHub {
     #[inline]
     pub fn add_lock_wait_ns(&self, ns: u64) {
         self.lock_wait_ns_total.inc_by(ns);
+    }
+
+    // ── Dynamic batching ─────────────────────────────────────────────
+
+    /// Observe a batch size sample (histogram).
+    #[inline]
+    pub fn observe_batch_size(&self, size: f64) {
+        self.batch_size_histogram.observe(size);
+    }
+
+    /// Set the current batch queue depth gauge.
+    #[inline]
+    pub fn set_batch_queue_depth(&self, depth: i64) {
+        self.batch_queue_depth.set(depth);
+    }
+
+    /// Increment batch flush counter for the given reason.
+    #[inline]
+    pub fn inc_batch_flush(&self, reason: &str) {
+        self.batch_flush_reason.with_label_values(&[reason]).inc();
     }
 }

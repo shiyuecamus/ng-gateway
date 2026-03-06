@@ -20,18 +20,17 @@ fn make_frame(width: u32, height: u32) -> DecodedFrame {
     for i in 0..len {
         data.push(((i * 37 + 17) % 256) as u8);
     }
-    DecodedFrame {
-        data: Bytes::from(data),
-        width,
-        height,
-    }
+    DecodedFrame::from_rgb24(Bytes::from(data), width, height)
 }
 
 fn resize_rgb(frame: &DecodedFrame, new_w: u32, new_h: u32) -> Vec<u8> {
     let src = Image::from_vec_u8(
         frame.width,
         frame.height,
-        frame.data.as_ref().to_vec(),
+        frame
+            .try_cpu_data()
+            .expect("benchmark frame should be CPU-resident")
+            .to_vec(),
         PixelType::U8x3,
     )
     .expect("create source image");
@@ -95,7 +94,7 @@ fn bench_preprocess_stage_breakdown(c: &mut Criterion) {
     let mut output = vec![0.0f32; target_w * target_h * 3];
     let lut = build_lut();
 
-    group.throughput(Throughput::Bytes(frame.data.len() as u64));
+    group.throughput(Throughput::Bytes(frame.pixel_data_size() as u64));
     group.bench_function("resize_only_1920x1080_to_640", |b| {
         b.iter_batched(
             || (),
@@ -130,7 +129,7 @@ fn bench_letterbox(c: &mut Criterion) {
     let frame = make_frame(1920, 1080);
     let processor = LetterboxPreProcessor::default();
     let shape = [1_i64, 3, 640, 640];
-    group.throughput(Throughput::Bytes(frame.data.len() as u64));
+    group.throughput(Throughput::Bytes(frame.pixel_data_size() as u64));
     group.bench_function("rgb_1920x1080_to_640x640", |b| {
         b.iter_batched(
             || (),
@@ -142,7 +141,13 @@ fn bench_letterbox(c: &mut Criterion) {
                         model_input_dtype: TensorDType::Float32,
                     })
                     .expect("letterbox preprocess should succeed");
-                black_box(output.tensor.shape());
+                black_box(
+                    output
+                        .into_cpu_tensor()
+                        .expect("should be CpuTensor")
+                        .shape()
+                        .to_vec(),
+                );
             },
             BatchSize::SmallInput,
         )
@@ -163,7 +168,7 @@ fn bench_direct_resize(c: &mut Criterion) {
         ("rgb_1280x720_to_640x640", &frame_fhd, &shape_rgb_640),
         ("gray_1280x720_to_640x640", &frame_fhd, &shape_gray_640),
     ] {
-        group.throughput(Throughput::Bytes(frame.data.len() as u64));
+        group.throughput(Throughput::Bytes(frame.pixel_data_size() as u64));
         group.bench_with_input(BenchmarkId::new("path", name), shape, |b, model_shape| {
             b.iter_batched(
                 || (),
@@ -175,7 +180,13 @@ fn bench_direct_resize(c: &mut Criterion) {
                             model_input_dtype: TensorDType::Float32,
                         })
                         .expect("direct_resize preprocess should succeed");
-                    black_box(output.tensor.shape());
+                    black_box(
+                        output
+                            .into_cpu_tensor()
+                            .expect("should be CpuTensor")
+                            .shape()
+                            .to_vec(),
+                    );
                 },
                 BatchSize::SmallInput,
             )
@@ -190,7 +201,7 @@ fn bench_center_crop(c: &mut Criterion) {
     let frame = make_frame(1920, 1080);
     let processor = CenterCropPreProcessor::default();
     let shape = [1_i64, 3, 224, 224];
-    group.throughput(Throughput::Bytes(frame.data.len() as u64));
+    group.throughput(Throughput::Bytes(frame.pixel_data_size() as u64));
     group.bench_function("rgb_1920x1080_to_224x224", |b| {
         b.iter_batched(
             || (),
@@ -202,7 +213,13 @@ fn bench_center_crop(c: &mut Criterion) {
                         model_input_dtype: TensorDType::Float32,
                     })
                     .expect("center_crop preprocess should succeed");
-                black_box(output.tensor.shape());
+                black_box(
+                    output
+                        .into_cpu_tensor()
+                        .expect("should be CpuTensor")
+                        .shape()
+                        .to_vec(),
+                );
             },
             BatchSize::SmallInput,
         )

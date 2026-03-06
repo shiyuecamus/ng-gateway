@@ -5,6 +5,7 @@ pub use crate::{
     domain::{
         action::{ActionInfo, ActionPageParams, NewAction, UpdateAction},
         ai::{
+            alarm_event::{AlarmEventInfo, AlarmEventPageParams, ChangeAlarmEventStatus},
             alarm_rule::{AlarmRuleInfo, NewAlarmRule, UpdateAlarmRule},
             algorithm::{
                 AlgorithmInfo, AlgorithmPageParams, AlgorithmProbeInfo, AlgorithmTestInput,
@@ -23,12 +24,14 @@ pub use crate::{
             },
             pipeline_stage::{NewPipelineStage, PipelineStageInfo, UpdatePipelineStage},
             types::{
-                AlarmEvent, AnalysisCore, AnalysisResult, AnomalyMap, BoundingBox, Classification,
-                Detection, EngineAlgorithmStatus, EngineDecoderStatus, EngineInferenceStatus,
-                EngineModelStatus, EnginePipelineStatus, EngineStatus, FrameAnalysisRequest,
-                Keypoint, KeypointDetection, ParamType, ProcessorInfo, ProcessorParameter,
-                RenderArtifact, SegmentationMask, VideoFrame,
+                AlarmEvent, AnalysisCore, AnalysisResult, AnomalyMap, BoundingBox,
+                ChannelRegistration, Classification, Detection, EngineAlgorithmStatus,
+                EngineDecoderStatus, EngineInferenceStatus, EngineModelStatus,
+                EnginePipelineStatus, EngineStatus, FrameAnalysisRequest, Keypoint,
+                KeypointDetection, ParamType, ProcessorInfo, ProcessorParameter, RenderArtifact,
+                SegmentationMask, StreamTransport, TrajectoryContext, VideoFrame,
             },
+            webrtc::{WebRtcClientConfig, WebRtcSignaling},
         },
         app::{AppInfo, AppPageParams, ChangeAppStatus, NewApp, UpdateApp},
         app_sub::{

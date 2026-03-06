@@ -9,33 +9,65 @@ description = "AI Processing Engine for ng-gateway — model management, inferen
 
 [features]
 default = []
-# Full engine implementation: ONNX Runtime, inference pool, pre/post processors, frame decoder, metrics.
-# Camera driver (cdylib) should NOT enable this — only the host process (ng-gateway-core) needs it.
+
+# GStreamer-based frame source (hardware-accelerated decoding + DMA zero-copy).
+# Requires system GStreamer 1.20+ with appropriate plugins.
+gstreamer = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+
+# DMA-buf support for zero-copy hardware pipelines.
+# Requires Linux with DMA-buf capable drivers.
+dmabuf = ["gstreamer", "dep:gstreamer-allocators", "dep:libc"]
+
+# ONNX Runtime inference backend.
+onnx = ["dep:ort", "dep:ndarray"]
+
+# ONNX Runtime GPU execution providers.
+# These features gate compile-time EP API access; the actual ONNX Runtime
+# library (with EP support compiled in) must be present at runtime.
+# Use `load-dynamic` to load the library at runtime without link-time dependency.
+cuda-ep = ["onnx", "ort/cuda"]
+tensorrt-ep = ["onnx", "ort/tensorrt"]
+openvino-ep = ["onnx", "ort/openvino"]
+
+# RKNN NPU inference backend for Rockchip SoCs (RK3588, RK3576, RK356x).
+# Requires librknnrt.so on the target system (loaded at runtime via libloading).
+# The rknpu2 crate is target-gated to Linux aarch64 only (the crate has a
+# c_char signedness bug preventing macOS compilation).
+rknn = ["dmabuf", "dep:rknpu2", "dep:ndarray", "dep:parking_lot", "dep:dashmap"]
+
+# NVIDIA CUDA support for Jetson zero-copy inference.
+# Uses cudarc with dynamic-loading — no CUDA SDK required at compile time.
+# Runtime requires libcuda.so / libnvbuf_utils.so on the target system.
+cuda = ["dep:cudarc", "dep:libloading"]
+
+# Full engine implementation: inference, pre/post processors, frame source, metrics.
+# Camera drivers (cdylib) should NOT enable this — only the host process needs it.
 engine = [
-  "dep:ort",
-  "dep:ndarray",
+  "gstreamer",
+  "onnx",
+  "dep:gstreamer-webrtc",
+  "dep:gstreamer-sdp",
   "dep:image",
   "dep:fast_image_resize",
   "dep:rayon",
   "dep:dashmap",
   "dep:parking_lot",
   "dep:scopeguard",
-  "dep:ffmpeg-next",
   "dep:wasmtime",
   "dep:wasmparser",
   "dep:ng-gateway-common",
   "dep:ng-gateway-repository",
   "dep:sea-orm",
+  "dep:crossbeam-queue",
 ]
 
 [dependencies]
 # ── Domain types (always available) ─────────────────────────────────
-# All public API types, traits, config, and error types live here.
 ng-gateway-models.workspace = true
 ng-gateway-error.workspace = true
 ng-gateway-repository = { workspace = true, optional = true }
 
-# ── Always available (engine internals layer) ───────────────────────
+# ── Always available ────────────────────────────────────────────────
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 bytes.workspace = true
@@ -50,11 +82,37 @@ hex.workspace = true
 sha2.workspace = true
 prost.workspace = true
 
-# ── Engine feature dependencies ─────────────────────────────────────
-# Only compiled when the `engine` feature is enabled.
-scopeguard = { workspace = true, optional = true }
+# ── GStreamer frame source ──────────────────────────────────────────
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
+gstreamer-video = { workspace = true, optional = true }
+gstreamer-allocators = { workspace = true, optional = true }
+gstreamer-webrtc = { workspace = true, optional = true, features = ["v1_22"] }
+gstreamer-sdp = { workspace = true, optional = true }
+
+# ── DMA-buf support ────────────────────────────────────────────────
+libc = { workspace = true, optional = true }
+
+# ── ONNX inference ──────────────────────────────────────────────────
 ort = { workspace = true, features = ["load-dynamic"], optional = true }
 ndarray = { workspace = true, optional = true }
+
+# ── CUDA support (Jetson zero-copy) ─────────────────────────────────
+# `cuda-version-from-build-system` + `fallback-latest`: detect CUDA version
+# from nvcc if present, otherwise fall back to latest API bindings.
+# `driver`: we only need the CUDA driver API (no cublas/curand/etc.).
+# No CUDA SDK required at compile time — libraries loaded at runtime.
+cudarc = { version = "0.19", default-features = false, features = [
+  "std",
+  "driver",
+  "cuda-version-from-build-system",
+  "fallback-latest",
+  "fallback-dynamic-loading",
+], optional = true }
+libloading = { workspace = true, optional = true }
+
+# ── Engine feature dependencies ─────────────────────────────────────
+scopeguard = { workspace = true, optional = true }
 image = { workspace = true, default-features = false, features = [
   "jpeg",
   "png",
@@ -63,15 +121,22 @@ fast_image_resize = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
-ffmpeg-next = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true, optional = true }
+
+# ── RKNN NPU inference (ARM Linux only) ─────────────────────────────
+# Target-gated: rknpu2 has a c_char signedness bug on macOS/aarch64.
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+rknpu2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 ng-gateway-common.workspace = true
 criterion.workspace = true
+approx = "0.5"
+proptest = "1"
 
 [[bench]]
 name = "preprocess_kernel"
@@ -79,4 +144,12 @@ harness = false
 
 [[bench]]
 name = "postprocess_kernel"
+harness = false
+
+[[bench]]
+name = "pipeline_kernel"
+harness = false
+
+[[bench]]
+name = "annotation_kernel"
 harness = false

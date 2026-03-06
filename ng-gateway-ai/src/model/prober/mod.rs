@@ -49,6 +49,7 @@ pub trait ModelProber: Send + Sync {
 // ── Shared utilities ─────────────────────────────────────────────────
 
 /// Compute SHA-256 checksum of a file using 64 KiB buffered reads.
+#[cfg(feature = "engine")]
 pub(crate) fn compute_sha256(path: &Path) -> Result<String, AiEngineError> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -76,7 +77,7 @@ pub(crate) fn compute_sha256(path: &Path) -> Result<String, AiEngineError> {
 /// Layout parameter controls 4-D interpretation:
 /// - `nchw = true`:  `[1, C, H, W]` (ONNX default)
 /// - `nchw = false`: `[1, H, W, C]` (RKNN default)
-pub(crate) fn infer_task_and_variant(
+pub fn infer_task_and_variant(
     outputs: &[TensorDesc],
     nchw: bool,
 ) -> (
@@ -188,5 +189,136 @@ impl ProberRegistry {
             .iter()
             .flat_map(|p| p.extensions().iter().copied())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ng_gateway_models::enums::ai::TensorDType;
+
+    fn tensor_desc(name: &str, shape: Vec<i64>) -> TensorDesc {
+        TensorDesc {
+            name: name.to_string(),
+            shape,
+            dtype: TensorDType::Float32,
+        }
+    }
+
+    #[test]
+    fn infer_yolov8_detection_shape() {
+        let outputs = vec![tensor_desc("output0", vec![1, 84, 8400])];
+        let (task, variant, post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, Some(ModelTask::ObjectDetection));
+        assert_eq!(variant, Some(ModelVariant::YoloV8));
+        assert_eq!(post, Some(PostProcessorType::YoloV8Detection));
+    }
+
+    #[test]
+    fn infer_yolov5_detection_shape() {
+        let outputs = vec![tensor_desc("output0", vec![1, 25200, 85])];
+        let (task, variant, post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, Some(ModelTask::ObjectDetection));
+        assert_eq!(variant, Some(ModelVariant::YoloV5));
+        assert_eq!(post, Some(PostProcessorType::YoloV5Detection));
+    }
+
+    #[test]
+    fn infer_classification_shape() {
+        let outputs = vec![tensor_desc("output0", vec![1, 1000])];
+        let (task, variant, post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, Some(ModelTask::Classification));
+        assert_eq!(variant, Some(ModelVariant::Generic));
+        assert_eq!(post, Some(PostProcessorType::Classification));
+    }
+
+    #[test]
+    fn infer_segmentation_nchw_shape() {
+        let outputs = vec![tensor_desc("output0", vec![1, 21, 512, 512])];
+        let (task, _variant, post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, Some(ModelTask::Segmentation));
+        assert_eq!(post, Some(PostProcessorType::Segmentation));
+    }
+
+    #[test]
+    fn infer_segmentation_nhwc_shape() {
+        let outputs = vec![tensor_desc("output0", vec![1, 512, 512, 21])];
+        let (task, _variant, post) = infer_task_and_variant(&outputs, false);
+        assert_eq!(task, Some(ModelTask::Segmentation));
+        assert_eq!(post, Some(PostProcessorType::Segmentation));
+    }
+
+    #[test]
+    fn infer_anomaly_detection_single_channel() {
+        let outputs = vec![tensor_desc("output0", vec![1, 1, 256, 256])];
+        let (task, _variant, post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, Some(ModelTask::AnomalyDetection));
+        assert_eq!(post, Some(PostProcessorType::AnomalyDetection));
+    }
+
+    #[test]
+    fn infer_yolov8_pose_shape() {
+        // 5 + 17*3 = 56 features → pose model
+        let outputs = vec![tensor_desc("output0", vec![1, 56, 8400])];
+        let (task, variant, post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, Some(ModelTask::ObjectDetection));
+        assert_eq!(variant, Some(ModelVariant::YoloV8Pose));
+        assert_eq!(post, Some(PostProcessorType::YoloV8Pose));
+    }
+
+    #[test]
+    fn infer_empty_outputs_returns_none() {
+        let outputs: Vec<TensorDesc> = vec![];
+        let (task, variant, post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, None);
+        assert_eq!(variant, None);
+        assert_eq!(post, None);
+    }
+
+    #[test]
+    fn infer_unknown_5d_shape_returns_generic() {
+        let outputs = vec![tensor_desc("output0", vec![1, 2, 3, 4, 5])];
+        let (task, variant, _post) = infer_task_and_variant(&outputs, true);
+        assert_eq!(task, None);
+        assert_eq!(variant, Some(ModelVariant::Generic));
+    }
+
+    #[test]
+    fn compute_sha256_on_temp_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let file_path = dir.path().join("test.bin");
+        let mut f = std::fs::File::create(&file_path).expect("create file");
+        f.write_all(b"hello world").expect("write");
+        drop(f);
+
+        let hash = compute_sha256(&file_path).expect("compute sha256");
+        // SHA-256 of "hello world"
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn prober_registry_find_by_extension() {
+        struct DummyProber;
+        impl ModelProber for DummyProber {
+            fn format(&self) -> ModelFormat {
+                ModelFormat::Onnx
+            }
+            fn extensions(&self) -> &[&str] {
+                &["onnx"]
+            }
+            fn probe(&self, _path: &Path) -> Result<ModelProbeInfo, AiEngineError> {
+                Err(AiEngineError::InternalError("not implemented".into()))
+            }
+        }
+
+        let registry = ProberRegistry::new(vec![Box::new(DummyProber)]);
+        assert!(registry.find_by_extension("onnx").is_some());
+        assert!(registry.find_by_extension("ONNX").is_some());
+        assert!(registry.find_by_extension("rknn").is_none());
+        assert_eq!(registry.supported_extensions(), vec!["onnx"]);
     }
 }

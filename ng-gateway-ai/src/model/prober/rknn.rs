@@ -2,12 +2,9 @@
 //!
 //! Creates a temporary RKNN context to query precise input/output tensor
 //! attributes (shape, dtype, layout, quantization), then immediately
-//! releases it. Only available on ARM Linux with RKNN NPU hardware.
-//!
-//! # Build Requirements
-//!
-//! Requires the `rknn` feature flag and `librknnrt.so` on the library path.
-//! The RKNN Toolkit Lite2 shared library is loaded at runtime via `dlopen`.
+//! releases it. When the `rknn` feature is enabled and `librknnrt.so` is
+//! available, this prober uses the actual RKNN runtime SDK for precise
+//! tensor extraction. Otherwise it falls back to header-only parsing.
 
 use super::ModelProber;
 use ng_gateway_error::ai::AiEngineError;
@@ -21,14 +18,9 @@ use std::{collections::HashMap, path::Path};
 use tracing::{debug, warn};
 
 /// RKNN model prober using the RKNN Toolkit Lite2 SDK.
-///
-/// This prober loads the `.rknn` model into a temporary RKNN context,
-/// queries tensor attributes, and immediately destroys the context.
-/// It does NOT run any inference.
 pub struct RknnModelProber;
 
 impl RknnModelProber {
-    /// Create a new RKNN model prober.
     pub fn new() -> Self {
         Self
     }
@@ -55,18 +47,12 @@ impl ModelProber for RknnModelProber {
         let file_size = file_meta.len();
         let checksum = compute_sha256(path)?;
 
-        // Read the RKNN model file into memory (required by rknn_init).
         let model_data = std::fs::read(path)
             .map_err(|e| AiEngineError::IoError(format!("read RKNN model: {e}")))?;
 
-        // Parse RKNN file header for SDK version and target platform.
         let (target_platform, sdk_version) = parse_rknn_header(&model_data);
 
-        // For now, without the actual RKNN runtime SDK linked, we extract
-        // what we can from the file header and return a partial probe result.
-        // When the rknn-lite crate is available, this will use:
-        //   rknn_init() → rknn_query(IN_OUT_NUM) → rknn_query(INPUT/OUTPUT_ATTR) → rknn_destroy()
-        let (inputs, outputs) = probe_rknn_tensors(&model_data).unwrap_or_else(|e| {
+        let (inputs, outputs) = probe_rknn_tensors(model_data).unwrap_or_else(|e| {
             warn!(
                 path = %path.display(),
                 error = %e,
@@ -81,7 +67,6 @@ impl ModelProber for RknnModelProber {
             (None, None, None)
         };
 
-        // RKNN models are typically INT8 quantized.
         let quantization = Some("int8".to_string());
 
         debug!(
@@ -121,24 +106,16 @@ impl ModelProber for RknnModelProber {
 }
 
 /// Parse RKNN file header to extract target platform and SDK version.
-///
-/// RKNN files have a custom binary header. The exact layout depends on
-/// the RKNN Toolkit version, but common fields include:
-/// - Magic bytes: `RKNN` (0x4E4E4B52)
-/// - Version fields for SDK compatibility
-/// - Target platform identifier
 fn parse_rknn_header(data: &[u8]) -> (Option<String>, Option<String>) {
     if data.len() < 16 {
         return (None, None);
     }
 
-    // Check RKNN magic: "RKNN" in little-endian = 0x4E4E4B52
     let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     if magic != 0x4E4E_4B52 {
         return (None, None);
     }
 
-    // Version is typically at offset 4 as a u64 encoding major.minor.patch.
     let version = if data.len() >= 12 {
         let major = u16::from_le_bytes([data[4], data[5]]);
         let minor = u16::from_le_bytes([data[6], data[7]]);
@@ -148,51 +125,93 @@ fn parse_rknn_header(data: &[u8]) -> (Option<String>, Option<String>) {
         None
     };
 
-    // Target platform detection: heuristic based on model structure.
-    // The actual platform info requires rknn_query(RKNN_QUERY_SDK_VERSION).
-    // For header-only parsing, we can detect RK3588 vs RK356x from the
-    // model structure, but this is unreliable. Prefer runtime query.
-    let platform = None;
-
-    (platform, version)
+    (None, version)
 }
 
-/// Attempt to probe RKNN tensor information from model data.
-///
-/// When full RKNN runtime is available (feature `rknn`), this function
-/// will use `rknn_init` → `rknn_query` → `rknn_destroy` to get precise
-/// tensor attributes. Currently returns empty tensors as a stub.
+/// Probe RKNN tensor information using the actual RKNN runtime SDK.
+#[cfg(all(feature = "rknn", target_os = "linux", target_arch = "aarch64"))]
 fn probe_rknn_tensors(
-    _model_data: &[u8],
+    mut model_data: Vec<u8>,
 ) -> Result<(Vec<TensorDesc>, Vec<TensorDesc>), AiEngineError> {
-    // TODO: Implement with actual rknn_lite FFI when the crate is available.
-    //
-    // The implementation will:
-    // 1. rknn_init(&ctx, model_data, model_size, 0)
-    // 2. rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num)
-    // 3. For each input: rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &attr)
-    //    → extract name, dims, n_dims, type (RKNN_TENSOR_UINT8 etc.), fmt (NHWC/NCHW)
-    // 4. For each output: rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &attr)
-    // 5. rknn_destroy(ctx)
-    //
-    // RKNN tensor types map to our TensorDType:
-    //   RKNN_TENSOR_FLOAT32 → Float32
-    //   RKNN_TENSOR_FLOAT16 → Float16
-    //   RKNN_TENSOR_INT8    → Int8
-    //   RKNN_TENSOR_UINT8   → UInt8
-    //   RKNN_TENSOR_INT32   → Int32
-    //   RKNN_TENSOR_INT64   → Int64
-    //
-    // RKNN layout (fmt) is typically NHWC, which affects preprocessing.
+    use ng_gateway_models::enums::ai::TensorDType;
+    use rknpu2::{
+        api::RknnInitFlags,
+        query::{
+            input_attr::InputAttr, output_attr::OutputAttr, InputOutputNum, Query, QueryWithInput,
+            TensorAttrView,
+        },
+        rknn::RKNN,
+        tensor::DataTypeKind,
+    };
 
+    let ctx = RKNN::new_with_library("librknnrt.so", &mut model_data, RknnInitFlags::empty())
+        .map_err(|e| {
+            AiEngineError::IoError(format!(
+                "cannot init RKNN context for probing (librknnrt.so not found?): {e}"
+            ))
+        })?;
+
+    let io_num: InputOutputNum = ctx
+        .query()
+        .map_err(|e| AiEngineError::ModelLoadError(format!("rknn query IN_OUT_NUM: {e}")))?;
+
+    let mut inputs = Vec::with_capacity(io_num.input_num() as usize);
+    for i in 0..io_num.input_num() {
+        let attr: InputAttr = ctx.query_with_input(i).map_err(|e| {
+            AiEngineError::ModelLoadError(format!("rknn query INPUT_ATTR[{i}]: {e}"))
+        })?;
+        inputs.push(TensorDesc {
+            name: attr.name(),
+            shape: attr.dims().iter().map(|&d| d as i64).collect(),
+            dtype: map_rknn_dtype(attr.dtype()),
+        });
+    }
+
+    let mut outputs = Vec::with_capacity(io_num.output_num() as usize);
+    for i in 0..io_num.output_num() {
+        let attr: OutputAttr = ctx.query_with_input(i).map_err(|e| {
+            AiEngineError::ModelLoadError(format!("rknn query OUTPUT_ATTR[{i}]: {e}"))
+        })?;
+        outputs.push(TensorDesc {
+            name: attr.name(),
+            shape: attr.dims().iter().map(|&d| d as i64).collect(),
+            dtype: map_rknn_dtype(attr.dtype()),
+        });
+    }
+
+    // Context is dropped here, calling rknn_destroy() via RAII.
+    Ok((inputs, outputs))
+}
+
+/// Map rknpu2 DataTypeKind to our TensorDType.
+#[cfg(all(feature = "rknn", target_os = "linux", target_arch = "aarch64"))]
+fn map_rknn_dtype(
+    dtype: rknpu2::tensor::DataTypeKind,
+) -> ng_gateway_models::enums::ai::TensorDType {
+    use ng_gateway_models::enums::ai::TensorDType;
+    use rknpu2::tensor::DataTypeKind;
+
+    match dtype {
+        DataTypeKind::Float32(_) => TensorDType::Float32,
+        DataTypeKind::Float16(_) => TensorDType::Float16,
+        DataTypeKind::Int8(_) => TensorDType::Int8,
+        DataTypeKind::UInt8(_) => TensorDType::UInt8,
+        DataTypeKind::Int16(_) => TensorDType::Int16,
+        DataTypeKind::Int32(_) => TensorDType::Int32,
+        DataTypeKind::Int64(_) => TensorDType::Int64,
+        _ => TensorDType::Float32,
+    }
+}
+
+/// Fallback prober: returns empty tensors when RKNN runtime is not available.
+#[cfg(not(all(feature = "rknn", target_os = "linux", target_arch = "aarch64")))]
+fn probe_rknn_tensors(
+    _model_data: Vec<u8>,
+) -> Result<(Vec<TensorDesc>, Vec<TensorDesc>), AiEngineError> {
     Ok((vec![], vec![]))
 }
 
 /// Infer task and variant from RKNN output tensors.
-///
-/// RKNN outputs follow the same shape conventions as ONNX, but the
-/// layout may be NHWC instead of NCHW. The shape analysis is similar
-/// but accounts for potential layout differences.
 fn infer_task_and_variant_rknn(
     outputs: &[TensorDesc],
 ) -> (
@@ -233,7 +252,6 @@ fn infer_task_and_variant_rknn(
             Some(PostProcessorType::Classification),
         ),
         4 => {
-            // RKNN may use NHWC: [1, H, W, C] — channels last
             let last_dim = first.shape[3];
             if last_dim > 1 {
                 (

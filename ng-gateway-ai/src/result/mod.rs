@@ -2,3 +2,6 @@
 
 #[cfg(feature = "engine")]
 pub mod alarm;
+
+#[cfg(feature = "engine")]
+pub mod trajectory;

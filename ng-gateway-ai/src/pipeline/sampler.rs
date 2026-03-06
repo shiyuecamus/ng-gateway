@@ -38,11 +38,16 @@ impl FrameSampler {
         }
     }
 
-    /// Determine whether a frame at the given sequence number should be processed.
+    /// Determine whether a frame should be processed.
+    ///
+    /// - `seq`: monotonic frame sequence number.
+    /// - `is_keyframe`: whether this frame is a keyframe (IDR). Derived from
+    ///   GStreamer's `GST_BUFFER_FLAG_DELTA_UNIT` flag by the extractor.
+    ///   For `KeyFrameOnly` strategy, only keyframes pass the gate.
     ///
     /// For `TargetFps`, uses wall-clock time rather than sequence numbers
     /// to handle variable source frame rates correctly.
-    pub fn should_process(&mut self, seq: u64) -> bool {
+    pub fn should_process(&mut self, seq: u64, is_keyframe: bool) -> bool {
         match &self.strategy {
             SamplingStrategy::EveryFrame => true,
 
@@ -50,12 +55,7 @@ impl FrameSampler {
                 seq.is_multiple_of(*every_n_frames as u64)
             }
 
-            SamplingStrategy::KeyFrameOnly => {
-                // TODO: Key frame detection is handled upstream by the camera driver;
-                // this sampler always returns true and relies on the driver to
-                // only submit key frames.
-                true
-            }
+            SamplingStrategy::KeyFrameOnly => is_keyframe,
 
             SamplingStrategy::TargetFps { .. } => {
                 let now = Instant::now();
@@ -136,5 +136,67 @@ mod tests {
         let before = sampler.current_interval_secs;
         sampler.on_feedback(Some(0.01), false);
         assert!(sampler.current_interval_secs < before);
+    }
+
+    #[test]
+    fn fixed_interval_samples_every_n() {
+        let mut sampler = FrameSampler::new(&SamplingStrategy::FixedInterval { every_n_frames: 5 });
+        let sampled: Vec<u64> = (0..20)
+            .filter(|&seq| sampler.should_process(seq, true))
+            .collect();
+        assert_eq!(sampled, vec![0, 5, 10, 15]);
+    }
+
+    #[test]
+    fn every_frame_always_processes() {
+        let mut sampler = FrameSampler::new(&SamplingStrategy::EveryFrame);
+        for seq in 0..100 {
+            assert!(sampler.should_process(seq, true));
+        }
+    }
+
+    #[test]
+    fn keyframe_only_passes_keyframes() {
+        let mut sampler = FrameSampler::new(&SamplingStrategy::KeyFrameOnly);
+        assert!(sampler.should_process(0, true), "keyframes should pass");
+        assert!(
+            !sampler.should_process(1, false),
+            "delta frames should be rejected"
+        );
+        assert!(sampler.should_process(2, true), "next keyframe should pass");
+    }
+
+    #[test]
+    fn reset_clears_target_fps_state() {
+        let mut sampler = FrameSampler::new(&SamplingStrategy::TargetFps { fps: 10.0 });
+        assert!(sampler.should_process(0, true));
+        assert!(sampler.last_process_time.is_some());
+
+        sampler.reset();
+        assert!(sampler.last_process_time.is_none());
+        assert!(
+            (sampler.current_interval_secs - sampler.base_interval_secs).abs() < 1e-9,
+            "reset should restore the baseline interval"
+        );
+    }
+
+    #[test]
+    fn target_fps_interval_clamped_to_bounds() {
+        let mut sampler = FrameSampler::new(&SamplingStrategy::TargetFps { fps: 10.0 });
+        for _ in 0..100 {
+            sampler.on_feedback(None, true);
+        }
+        assert!(
+            sampler.current_interval_secs <= sampler.max_interval_secs + 1e-9,
+            "interval should not exceed max bound"
+        );
+
+        for _ in 0..100 {
+            sampler.on_feedback(Some(0.001), false);
+        }
+        assert!(
+            sampler.current_interval_secs >= sampler.min_interval_secs - 1e-9,
+            "interval should not go below min bound"
+        );
     }
 }

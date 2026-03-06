@@ -1,28 +1,29 @@
 //! Camera data-plane handle.
 //!
 //! This is the hot-path object published by the SDK supervision loop.
-//! It owns a background frame loop that continuously pulls frames from
-//! the video stream, submits them to the AI engine, and caches the latest
-//! analysis result in a `watch` channel for non-blocking reads by the
-//! Collector.
+//! It registers the camera channel with the AI engine, which internally
+//! creates a GStreamer pipeline for hardware-accelerated frame acquisition
+//! and zero-copy inference. The handle caches the latest analysis result
+//! in a `watch` channel for non-blocking reads by the Collector.
 //!
 //! # Architecture
 //!
 //! ```text
-//! VideoStream → frame_loop_task → AI Engine → latest_result (watch)
-//!                                                    ↑
-//!                       collect_data() reads ─────────┘
+//! register_channel() → AI Engine (GStreamer → inference) → watch(latest)
+//!                                                                       ↑
+//!                                    collect_data() reads ──────────────┘
 //! ```
 
 use crate::{
-    protocol::VideoStream,
     ptz::{self, PtzController},
-    types::{CameraAction, CameraChannel, CameraCommand, CameraOutputKey, CameraPoint},
+    types::{
+        CameraAction, CameraChannel, CameraCommand, CameraOutputKey, CameraPoint, CameraProtocol,
+        RtspTransport,
+    },
 };
 use async_trait::async_trait;
-use ng_gateway_ai::{
-    api::{AiEngineApi, AiEngineError, AnalysisResult, FrameAnalysisRequest, VideoFrame},
-    pipeline::sampler::FrameSampler,
+use ng_gateway_ai::api::{
+    AiEngineApi, AlarmSeverity, AnalysisResult, ChannelRegistration, StreamTransport,
 };
 use ng_gateway_sdk::{
     supervision::ReconnectHandle, AlarmData, CollectItem, CollectorConcurrencyProfile, DriverError,
@@ -31,14 +32,10 @@ use ng_gateway_sdk::{
     WriteResult,
 };
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, OnceLock,
 };
-use tokio::{
-    sync::{mpsc, watch, Mutex},
-    task::JoinHandle,
-};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{mpsc, watch};
 
 /// Camera data-plane handle.
 ///
@@ -46,24 +43,24 @@ use tokio_util::sync::CancellationToken;
 /// to Ready. The Collector's `collect_data()` reads the latest cached
 /// AI result — no blocking inference on the hot path.
 pub struct CameraHandle {
-    /// Channel configuration (protocol, pipeline, sampling).
+    /// Channel configuration (protocol, pipeline).
     channel: Arc<CameraChannel>,
     /// AI Engine API handle (injected from host process via extensions).
     ai_engine: Arc<dyn AiEngineApi>,
-    /// Latest analysis result (updated by the frame loop task).
-    latest_result: watch::Receiver<Option<AnalysisResult>>,
-    /// Sender half for the frame loop to publish results.
-    result_tx: watch::Sender<Option<AnalysisResult>>,
+    /// Latest analysis result (updated by the AI engine's internal frame loop).
+    latest_result: watch::Receiver<Option<Arc<AnalysisResult>>>,
+    /// Sender used by the AI engine's frame loop to publish latest results.
+    result_tx: watch::Sender<Option<Arc<AnalysisResult>>>,
     /// Monotonic frame sequence counter.
     frame_seq: Arc<AtomicU64>,
     /// Reconnect handle (set during session init).
     reconnect: OnceLock<ReconnectHandle>,
-    /// Background frame loop task handle.
-    frame_loop: Mutex<Option<JoinHandle<()>>>,
+    /// Whether the channel is currently registered with the AI engine.
+    registered: AtomicBool,
     /// Stream error notification channel.
     stream_error_tx: mpsc::Sender<String>,
     /// Stream error receiver (consumed by the session's `run()` method).
-    stream_error_rx: Mutex<mpsc::Receiver<String>>,
+    stream_error_rx: tokio::sync::Mutex<mpsc::Receiver<String>>,
     /// Optional PTZ controller (available when connected via ONVIF with PTZ service).
     ptz_controller: parking_lot::Mutex<Option<PtzController>>,
 }
@@ -81,9 +78,9 @@ impl CameraHandle {
             result_tx,
             frame_seq: Arc::new(AtomicU64::new(0)),
             reconnect: OnceLock::new(),
-            frame_loop: Mutex::new(None),
+            registered: AtomicBool::new(false),
             stream_error_tx,
-            stream_error_rx: Mutex::new(stream_error_rx),
+            stream_error_rx: tokio::sync::Mutex::new(stream_error_rx),
             ptz_controller: parking_lot::Mutex::new(None),
         }
     }
@@ -111,117 +108,78 @@ impl CameraHandle {
             ))
     }
 
-    /// Spawn the background frame acquisition + AI submission loop.
+    /// Register this channel with the AI engine for continuous analysis.
     ///
-    /// The loop continuously:
-    /// 1. Pulls frames from the video stream
-    /// 2. Applies the configured sampling strategy (skip non-sampled frames)
-    /// 3. Checks AI engine capacity (backpressure)
-    /// 4. Submits frames to the AI engine for analysis
-    /// 5. Publishes results to the `watch` channel
-    pub async fn start_frame_loop(
-        &self,
-        mut stream: Box<dyn VideoStream>,
-        cancel: CancellationToken,
-    ) -> DriverResult<()> {
-        let ai_engine = Arc::clone(&self.ai_engine);
-        let channel = Arc::clone(&self.channel);
-        let result_tx = self.result_tx.clone();
-        let frame_seq = Arc::clone(&self.frame_seq);
-        let error_tx = self.stream_error_tx.clone();
+    /// The AI engine creates a GStreamer pipeline internally for the given
+    /// stream URL, performing hardware-accelerated decoding and zero-copy
+    /// inference. Results are published directly through a latest-value
+    /// watch channel for non-blocking reads by the Collector.
+    pub async fn register_stream(&self, stream_url: String) -> DriverResult<()> {
+        let channel_id = self.channel.id;
+        let connect_timeout =
+            std::time::Duration::from_millis(self.channel.connection_policy.connect_timeout_ms);
 
-        let task = tokio::spawn(async move {
-            let mut sampler = FrameSampler::new(&channel.config.sampling);
+        let registration = ChannelRegistration {
+            channel_id,
+            device_id: 0,
+            stream_url: stream_url.clone(),
+            pipeline_id: self.channel.config.pipeline_id,
+            transport: self.resolve_stream_transport(),
+            connect_timeout,
+            result_tx: Some(self.result_tx.clone()),
+            error_tx: Some(self.stream_error_tx.clone()),
+        };
 
-            loop {
-                tokio::select! {
-                    biased;
+        self.ai_engine
+            .runtime()
+            .register_channel(registration)
+            .await
+            .map_err(|e| {
+                DriverError::SessionError(format!("failed to register channel with AI engine: {e}"))
+            })?;
 
-                    _ = cancel.cancelled() => break,
+        self.registered.store(true, Ordering::Release);
 
-                    frame_result = stream.next_frame() => {
-                        match frame_result {
-                            Ok(raw_frame) => {
-                                let seq = frame_seq.fetch_add(1, Ordering::Relaxed);
-
-                                if !sampler.should_process(seq) {
-                                    continue;
-                                }
-
-                                if raw_frame.is_key {
-                                    // Key frame detection for KeyFrameOnly strategy is
-                                    // handled here — non-key frames are already skipped
-                                    // by the sampler for that mode.
-                                }
-
-                                if !ai_engine.runtime().has_capacity(&channel.id) {
-                                    tracing::trace!(
-                                        seq,
-                                        pipeline = %channel.config.pipeline_id,
-                                        "AI engine at capacity, dropping frame"
-                                    );
-                                    sampler.on_feedback(None, true);
-                                    continue;
-                                }
-
-                                let request = FrameAnalysisRequest {
-                                    channel_id: channel.id,
-                                    device_id: 0,
-                                    frame: VideoFrame {
-                                        data: raw_frame.data,
-                                        format: raw_frame.format,
-                                        width: raw_frame.width,
-                                        height: raw_frame.height,
-                                        timestamp: chrono::Utc::now(),
-                                        seq,
-                                    },
-                                    roi: None,
-                                };
-
-                                match ai_engine.runtime().analyze_frame(request).await {
-                                    Ok(result) => {
-                                        sampler.on_feedback(
-                                            Some(result.inference_latency.as_secs_f64()),
-                                            false,
-                                        );
-                                        let _ = result_tx.send(Some(result));
-                                    }
-                                    Err(AiEngineError::Backpressure) => {
-                                        sampler.on_feedback(None, true);
-                                        tracing::trace!(seq, "AI backpressure, frame dropped");
-                                    }
-                                    Err(e) => {
-                                        sampler.on_feedback(None, false);
-                                        tracing::warn!(seq, error = %e, "AI analysis error");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "Video stream error, stopping frame loop");
-                                let _ = error_tx.try_send(e.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            tracing::debug!("Camera frame loop exited");
-        });
-
-        *self.frame_loop.lock().await = Some(task);
+        tracing::info!(
+            channel_id,
+            stream_url = %stream_url,
+            "camera channel registered for AI analysis"
+        );
         Ok(())
     }
 
-    /// Stop the background frame loop (if running).
-    pub async fn stop_frame_loop(&self) {
-        if let Some(task) = self.frame_loop.lock().await.take() {
-            task.abort();
-            let _ = task.await;
+    /// Resolve RTSP transport preference from camera protocol config.
+    fn resolve_stream_transport(&self) -> StreamTransport {
+        let transport = match self.channel.config.protocol {
+            CameraProtocol::Rtsp { transport, .. } | CameraProtocol::Onvif { transport, .. } => {
+                transport
+            }
+            CameraProtocol::Mjpeg { .. } => RtspTransport::Tcp,
+        };
+        match transport {
+            RtspTransport::Tcp => StreamTransport::Tcp,
+            RtspTransport::Udp => StreamTransport::UdpFallback,
         }
     }
 
-    /// Wait for a stream error from the frame loop.
+    /// Unregister this channel from the AI engine, stopping frame acquisition.
+    pub async fn unregister_stream(&self) {
+        if !self.registered.swap(false, Ordering::AcqRel) {
+            return;
+        }
+
+        let channel_id = self.channel.id;
+        if let Err(e) = self
+            .ai_engine
+            .runtime()
+            .unregister_channel(channel_id)
+            .await
+        {
+            tracing::warn!(channel_id, error = %e, "failed to unregister channel");
+        }
+    }
+
+    /// Wait for a stream error from the AI engine's frame loop.
     ///
     /// Used by [`CameraSession::run`] to detect disconnection and trigger
     /// reconnection through the supervision loop.
@@ -233,15 +191,11 @@ impl CameraHandle {
 
 #[async_trait]
 impl SouthwardHandle for CameraHandle {
-    /// Camera uses serial collection — the `collect_data` call is a fast,
-    /// non-blocking read of the latest cached result.
     #[inline]
     fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
         CollectorConcurrencyProfile::serial()
     }
 
-    /// Collect data: read the latest cached AI analysis result and convert
-    /// it to standard [`NorthwardData`] based on the configured point mappings.
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {
         let result = self.latest_result.borrow().clone();
 
@@ -251,14 +205,13 @@ impl SouthwardHandle for CameraHandle {
 
         let mut northward_data = Vec::new();
         for (device, points) in items {
-            let data = convert_analysis_to_northward(device, points, &analysis)?;
+            let data = convert_analysis_to_northward(device, points, analysis.as_ref())?;
             northward_data.extend(data);
         }
 
         Ok(northward_data)
     }
 
-    /// Execute camera control actions (PTZ, snapshot, pipeline restart).
     async fn execute_action(
         &self,
         _device: Arc<dyn RuntimeDevice>,
@@ -339,7 +292,6 @@ impl SouthwardHandle for CameraHandle {
         }
     }
 
-    /// Camera points are read-only (AI analysis outputs).
     async fn write_point(
         &self,
         _device: Arc<dyn RuntimeDevice>,
@@ -359,7 +311,6 @@ impl SouthwardHandle for CameraHandle {
 
 // ─── Action parameter helpers ──────────────────────────────────────
 
-/// Flatten SDK action parameters into a simple key-value list for PTZ parsing.
 fn flatten_action_params(
     parameters: &[(Arc<dyn RuntimeParameter>, NGValue)],
 ) -> Vec<(String, serde_json::Value)> {
@@ -376,12 +327,6 @@ fn flatten_action_params(
 
 // ─── Analysis → NorthwardData conversion ───────────────────────────
 
-/// Convert an AI analysis result to standard [`NorthwardData`] based on
-/// the configured camera point output mappings.
-///
-/// Each [`CameraPoint`] has an `output_key` that maps to a specific field
-/// of the [`AnalysisResult`]. The conversion produces telemetry data and
-/// alarm events suitable for northward reporting.
 fn convert_analysis_to_northward(
     device: &Arc<dyn RuntimeDevice>,
     points: &Arc<[Arc<dyn RuntimePoint>]>,
@@ -441,10 +386,7 @@ fn convert_analysis_to_northward(
                     .unwrap_or(0.0);
                 Some(NGValue::Float64(conf))
             }
-            CameraOutputKey::Custom => {
-                // Custom expressions will be supported in Phase 3+
-                None
-            }
+            CameraOutputKey::Custom => None,
         };
 
         if let Some(v) = value {
@@ -460,20 +402,15 @@ fn convert_analysis_to_northward(
         }
     }
 
-    // Convert alarm events to NorthwardData.
     for alarm in analysis.alarms.iter() {
         data.push(NorthwardData::Alarm(AlarmData::new(
             device.id(),
             device.device_name().to_string(),
             alarm.alarm_type.to_string(),
             match alarm.severity {
-                ng_gateway_ai::api::AlarmSeverity::Critical => {
-                    ng_gateway_sdk::AlarmSeverity::Critical
-                }
-                ng_gateway_ai::api::AlarmSeverity::Warning => {
-                    ng_gateway_sdk::AlarmSeverity::Warning
-                }
-                ng_gateway_ai::api::AlarmSeverity::Info => ng_gateway_sdk::AlarmSeverity::Info,
+                AlarmSeverity::Critical => ng_gateway_sdk::AlarmSeverity::Critical,
+                AlarmSeverity::Warning => ng_gateway_sdk::AlarmSeverity::Warning,
+                AlarmSeverity::Info => ng_gateway_sdk::AlarmSeverity::Info,
             },
             alarm.description.to_string(),
         )));

@@ -26,6 +26,14 @@ impl ModelRepository {
         Ok(Model::find().order_by_asc(ModelColumn::Id).all(&db).await?)
     }
 
+    /// List all model rows with an externally provided connection.
+    ///
+    /// Used during engine initialization when `NGAppContext` is not yet
+    /// available (the gateway passes its own DB connection).
+    pub async fn list_all_with<C: ConnectionTrait>(db: &C) -> StorageResult<Vec<ModelModel>> {
+        Ok(Model::find().order_by_asc(ModelColumn::Id).all(db).await?)
+    }
+
     /// Paginate model rows with optional filters.
     pub async fn page(params: ModelPageParams) -> StorageResult<PageResult<ModelInfo>> {
         let db = get_db_connection().await?;
@@ -48,16 +56,19 @@ impl ModelRepository {
             })
             .order_by_asc(ModelColumn::Id);
         let (page, page_size) = (params.page.page.unwrap(), params.page.page_size.unwrap());
-        let total = base.clone().count(&db).await?;
-        let records = base
+        let paginator = base
             .into_partial_model::<ModelInfo>()
-            .paginate(&db, page_size as u64)
-            .fetch_page((page - 1) as u64)
-            .await?;
+            .paginate(&db, page_size);
+        let total = paginator.num_items().await?;
+        let records = paginator.fetch_page(page.saturating_sub(1)).await?;
         Ok(PageResult {
             records,
             total,
-            pages: ((total as f64) / (page_size as f64)).ceil() as u32,
+            pages: if page_size > 0 {
+                total.div_ceil(page_size)
+            } else {
+                0
+            },
             page,
             page_size,
         })

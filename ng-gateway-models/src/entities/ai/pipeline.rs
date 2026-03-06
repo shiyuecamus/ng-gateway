@@ -68,6 +68,15 @@ impl RegionOfInterest {
 /// Annotation rendering configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, IntoActiveValue, Deserialize, FromJsonQueryResult)]
 pub struct AnnotationConfig {
+    /// Master switch for annotation rendering.
+    ///
+    /// When `false`, no annotation work is performed regardless of other flags.
+    /// Useful for saving CPU/memory when no live preview client is connected
+    /// and alarm snapshots are not needed. Setting this to `"on_demand"` in
+    /// future versions will auto-enable based on consumer presence (WebRTC
+    /// preview, alarm triggers).
+    #[serde(default = "AnnotationConfig::default_bool")]
+    pub enabled: bool,
     /// Draw bounding boxes.
     #[serde(default = "AnnotationConfig::default_bool")]
     pub draw_bboxes: bool,
@@ -116,6 +125,7 @@ pub struct AnnotationConfig {
 impl Default for AnnotationConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             draw_bboxes: true,
             draw_labels: true,
             draw_confidence: true,

@@ -1,11 +1,10 @@
 //! Camera supervised session implementation.
 //!
-//! Unlike poll-based drivers (Modbus, S7, etc.) where the session simply waits
-//! for cancellation, the camera session actively drives the frame acquisition
-//! loop through [`CameraHandle::start_frame_loop`] and monitors for stream
-//! errors that trigger reconnection via the supervision loop.
+//! The camera session registers the channel with the AI engine's internal
+//! GStreamer pipeline for hardware-accelerated frame acquisition and
+//! zero-copy inference. It monitors for stream errors or cancellation.
 
-use crate::{handle::CameraHandle, protocol::VideoStream};
+use crate::handle::CameraHandle;
 use ng_gateway_sdk::{
     supervision::{RunOutcome, Session, SessionContext},
     DriverError,
@@ -13,29 +12,26 @@ use ng_gateway_sdk::{
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Camera session — manages the lifecycle of a single video stream connection.
+/// Camera session — manages the lifecycle of a single camera channel.
 ///
-/// The session owns a [`VideoStream`] and passes it to the handle's frame loop
-/// during initialization. It then monitors for stream errors or cancellation.
+/// The session registers the channel's stream URL with the AI engine,
+/// which creates a GStreamer pipeline internally. The session then
+/// monitors for stream errors or cancellation.
 pub struct CameraSession {
     /// Shared data-plane handle.
     handle: Arc<CameraHandle>,
-    /// Transport-layer video stream (RTSP / ONVIF / MJPEG).
-    stream: Option<Box<dyn VideoStream>>,
+    /// Resolved stream URL (RTSP / HTTP / V4L2).
+    stream_url: String,
     /// Cancellation token for cooperative shutdown.
     cancel: CancellationToken,
 }
 
 impl CameraSession {
-    /// Create a new camera session from a connected video stream.
-    pub fn new(
-        handle: Arc<CameraHandle>,
-        stream: Box<dyn VideoStream>,
-        cancel: CancellationToken,
-    ) -> Self {
+    /// Create a new camera session from a resolved stream URL.
+    pub fn new(handle: Arc<CameraHandle>, stream_url: String, cancel: CancellationToken) -> Self {
         Self {
             handle,
-            stream: Some(stream),
+            stream_url,
             cancel,
         }
     }
@@ -53,39 +49,32 @@ impl Session for CameraSession {
 
     /// Post-connect initialization:
     /// 1. Set the reconnect handle for the data-plane
-    /// 2. Start the background frame acquisition loop
+    /// 2. Register the channel with the AI engine for continuous analysis
     async fn init(&mut self, ctx: &SessionContext) -> Result<(), Self::Error> {
         self.handle.set_reconnect(ctx.reconnect.clone());
-
-        let stream = self.stream.take().ok_or(DriverError::SessionError(
-            "Video stream already consumed".into(),
-        ))?;
-
-        self.handle
-            .start_frame_loop(stream, self.cancel.clone())
-            .await?;
-
-        tracing::info!("Camera frame loop started");
+        self.handle.register_stream(self.stream_url.clone()).await?;
+        tracing::info!("Camera channel registered with AI engine");
         Ok(())
     }
 
     /// Drive the session until disconnect, error, or cancellation.
     ///
-    /// The frame loop runs in a spawned task. This session monitors for:
-    /// - Cancellation (shutdown requested) → graceful disconnect
-    /// - Stream error (transport failure) → request reconnection
+    /// The AI engine runs the GStreamer frame loop internally.
+    /// This session monitors for:
+    /// - Cancellation (shutdown requested) → graceful unregister
+    /// - Stream error (GStreamer pipeline failure) → request reconnection
     async fn run(self, _ctx: SessionContext) -> Result<RunOutcome, Self::Error> {
         tokio::select! {
             biased;
 
             _ = self.cancel.cancelled() => {
-                self.handle.stop_frame_loop().await;
+                self.handle.unregister_stream().await;
                 Ok(RunOutcome::Disconnected)
             }
 
             err = self.handle.wait_for_stream_error() => {
                 tracing::warn!(error = %err, "Camera stream error, requesting reconnect");
-                self.handle.stop_frame_loop().await;
+                self.handle.unregister_stream().await;
                 Ok(RunOutcome::ReconnectRequested(Arc::from(
                     format!("stream error: {err}")
                 )))

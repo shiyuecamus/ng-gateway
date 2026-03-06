@@ -5,13 +5,17 @@ use crate::{
     enums::ai::AlarmSeverity,
     initializer::SeedableTrait,
 };
-use sea_orm::{prelude::DateTimeUtc, DeriveIntoActiveModel, FromQueryResult, IntoActiveModel};
+use sea_orm::{
+    prelude::DateTimeUtc, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult,
+    IntoActiveModel, ModelTrait,
+};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 /// Model metadata stored in the registry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, FromQueryResult)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, FromQueryResult, DerivePartialModel)]
 #[serde(rename_all = "camelCase")]
+#[sea_orm(entity = "<crate::entities::prelude::AlarmRuleModel as ModelTrait>::Entity")]
 pub struct AlarmRuleInfo {
     /// Alarm rule unique identifier.
     pub id: i32,

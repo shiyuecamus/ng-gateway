@@ -15,6 +15,7 @@ use ng_gateway_models::{
 };
 use tracing::{info, instrument};
 
+mod alarm_events;
 mod algorithms;
 mod common;
 mod models;
@@ -123,6 +124,19 @@ pub(crate) fn configure_routes(cfg: &mut ServiceConfig) {
         .route(
             "/algorithms/{id}/test",
             web::post().to(algorithms::test_algorithm),
+        )
+        // Alarm event management
+        .route(
+            "/alarms/page",
+            web::get().to(alarm_events::page_alarm_events),
+        )
+        .route(
+            "/alarms/detail/{id}",
+            web::get().to(alarm_events::get_alarm_event),
+        )
+        .route(
+            "/alarms/status",
+            web::put().to(alarm_events::change_alarm_event_status),
         );
 }
 

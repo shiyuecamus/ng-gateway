@@ -6,8 +6,8 @@
 
 use crate::types::{CameraCommand, CameraOutputKey};
 use ng_gateway_sdk::{
-    ui_text, DriverSchemas, EnumItem, Field, Node, RuleValue, Rules, UiDataType, Union, UnionCase,
-    When, WhenEffect,
+    ui_text, DriverSchemas, EnumItem, Field, Node, RuleValue, Rules, UiDataType, UiProps, Union,
+    UnionCase,
 };
 use serde_json::json;
 
@@ -212,10 +212,15 @@ fn build_channel_nodes() -> Vec<Node> {
         Node::Field(Box::new(Field {
             path: "pipelineId".into(),
             label: ui_text!(en = "AI Pipeline", zh = "AI 分析流水线"),
-            data_type: UiDataType::String,
+            data_type: UiDataType::Integer,
             default_value: None,
             order: Some(10),
-            ui: None,
+            ui: Some(UiProps::api_select_with_create(
+                "/api/ai/pipelines/list",
+                "id",
+                "name",
+                "/ai/pipeline",
+            )),
             rules: Some(Rules {
                 required: Some(RuleValue::WithMessage {
                     value: true,
@@ -227,88 +232,6 @@ fn build_channel_nodes() -> Vec<Node> {
                 ..Default::default()
             }),
             when: None,
-        })),
-        // ── Frame Sampling Strategy ────────────────────────────
-        Node::Field(Box::new(Field {
-            path: "sampling.type".into(),
-            label: ui_text!(en = "Frame Sampling", zh = "帧采样策略"),
-            data_type: UiDataType::Enum {
-                items: vec![
-                    EnumItem {
-                        key: json!("target_fps"),
-                        label: ui_text!(en = "Target FPS", zh = "目标帧率"),
-                    },
-                    EnumItem {
-                        key: json!("fixed_interval"),
-                        label: ui_text!(en = "Fixed Interval", zh = "固定间隔"),
-                    },
-                    EnumItem {
-                        key: json!("key_frame_only"),
-                        label: ui_text!(en = "Key Frame Only", zh = "仅关键帧"),
-                    },
-                    EnumItem {
-                        key: json!("every_frame"),
-                        label: ui_text!(en = "Every Frame", zh = "每帧"),
-                    },
-                ],
-            },
-            default_value: Some(json!("target_fps")),
-            order: Some(11),
-            ui: None,
-            rules: None,
-            when: None,
-        })),
-        // ── Target FPS (conditional on sampling type) ──────────
-        Node::Field(Box::new(Field {
-            path: "sampling.fps".into(),
-            label: ui_text!(en = "Target FPS", zh = "目标帧率"),
-            data_type: UiDataType::Float,
-            default_value: Some(json!(5.0)),
-            order: Some(12),
-            ui: None,
-            rules: Some(Rules {
-                min: Some(RuleValue::WithMessage {
-                    value: 0.1,
-                    message: Some(ui_text!(en = "Minimum FPS is 0.1", zh = "最小帧率为 0.1")),
-                }),
-                max: Some(RuleValue::WithMessage {
-                    value: 30.0,
-                    message: Some(ui_text!(en = "Maximum FPS is 30", zh = "最大帧率为 30")),
-                }),
-                ..Default::default()
-            }),
-            when: Some(vec![When {
-                target: "sampling.type".into(),
-                operator: ng_gateway_sdk::Operator::Eq,
-                value: json!("target_fps"),
-                effect: WhenEffect::If,
-            }]),
-        })),
-        // ── Every N Frames (conditional on sampling type) ──────
-        Node::Field(Box::new(Field {
-            path: "sampling.everyNFrames".into(),
-            label: ui_text!(en = "Every N Frames", zh = "每N帧分析一次"),
-            data_type: UiDataType::Integer,
-            default_value: Some(json!(5)),
-            order: Some(13),
-            ui: None,
-            rules: Some(Rules {
-                min: Some(RuleValue::WithMessage {
-                    value: 1.0,
-                    message: Some(ui_text!(en = "Minimum is 1", zh = "最小值为 1")),
-                }),
-                max: Some(RuleValue::WithMessage {
-                    value: 100.0,
-                    message: Some(ui_text!(en = "Maximum is 100", zh = "最大值为 100")),
-                }),
-                ..Default::default()
-            }),
-            when: Some(vec![When {
-                target: "sampling.type".into(),
-                operator: ng_gateway_sdk::Operator::Eq,
-                value: json!("fixed_interval"),
-                effect: WhenEffect::If,
-            }]),
         })),
     ]
 }

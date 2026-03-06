@@ -117,7 +117,6 @@ impl AppRepository {
             .order_by(AppColumn::Id, Order::Asc);
 
         let (page, page_size) = (params.page.page.unwrap(), params.page.page_size.unwrap());
-        let total = base.clone().count(&db).await?;
 
         let select = base
             .left_join(Plugin)
@@ -137,16 +136,18 @@ impl AppRepository {
             .column_as(AppColumn::CreatedAt, "created_at")
             .column_as(AppColumn::UpdatedAt, "updated_at");
 
-        let records = select
-            .into_model::<AppInfo>()
-            .paginate(&db, page_size as u64)
-            .fetch_page((page - 1) as u64)
-            .await?;
+        let paginator = select.into_model::<AppInfo>().paginate(&db, page_size);
+        let total = paginator.num_items().await?;
+        let records = paginator.fetch_page(page.saturating_sub(1)).await?;
 
         Ok(PageResult {
             records,
             total,
-            pages: ((total as f64) / (page_size as f64)).ceil() as u32,
+            pages: if page_size > 0 {
+                total.div_ceil(page_size)
+            } else {
+                0
+            },
             page,
             page_size,
         })

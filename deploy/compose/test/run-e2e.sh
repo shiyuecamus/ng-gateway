@@ -120,9 +120,9 @@ assert_status "Gateway health endpoint" "${GATEWAY_URL}/health"
 
 assert_status "AI engine status endpoint" "${API_PREFIX}/ai/engine/status"
 assert_json_field "AI engine is enabled" "${API_PREFIX}/ai/engine/status" ".data.enabled" "true"
-assert_json_field "Execution provider is cpu" "${API_PREFIX}/ai/engine/status" ".data.execution_provider" "cpu"
-assert_json_gte "Max concurrent >= 1" "${API_PREFIX}/ai/engine/status" ".data.inference.max_concurrent" "1"
-assert_json_gte "Uptime > 0" "${API_PREFIX}/ai/engine/status" ".data.uptime_secs" "0"
+assert_json_field "Execution provider is cpu" "${API_PREFIX}/ai/engine/status" ".data.executionProvider" "cpu"
+assert_json_gte "Max concurrent >= 1" "${API_PREFIX}/ai/engine/status" ".data.inference.maxConcurrent" "1"
+assert_json_gte "Uptime > 0" "${API_PREFIX}/ai/engine/status" ".data.uptimeSecs" "0"
 
 # ── 3. Model Listing ─────────────────────────────────────────────
 

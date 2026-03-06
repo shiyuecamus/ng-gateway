@@ -66,6 +66,25 @@ pub enum AlarmCondition {
         #[serde(default = "AlarmCondition::default_confidence_threshold")]
         min_score: f32,
     },
+    /// Trigger zone dwell events based on track trajectory.
+    ///
+    /// Uses per-track trajectory history to determine when a tracked
+    /// object enters, dwells beyond a timeout, or exits a polygonal zone.
+    /// Requires a Tracker stage in the pipeline.
+    ZoneDwell {
+        /// Zone polygon vertices (normalized `[0.0, 1.0]`).
+        zone: Vec<(f32, f32)>,
+        /// Optional class filter.
+        class: Option<String>,
+        /// Dwell timeout in milliseconds — how long a track must remain
+        /// inside the zone before a `DwellTimeout` event fires.
+        dwell_timeout_ms: i64,
+        /// Cooldown after a dwell-timeout trigger (ms). Prevents the same
+        /// track from re-triggering the same rule within this window.
+        /// `0` means use the rule-level `cooldown_secs`.
+        #[serde(default)]
+        cooldown_ms: i64,
+    },
     /// Trigger based on custom WASM evaluator.
     CustomWasm {
         module_id: String,

@@ -22,10 +22,11 @@ mod inner {
         },
         preprocess::{
             CenterCropPreProcessor, DirectResizePreProcessor, LetterboxPreProcessor,
-            NormalizationParams, PreProcessor,
+            NormalizationParams, PreProcessor, RknnLetterboxPreProcessor,
         },
     };
     use ng_gateway_error::ai::AiEngineError;
+    use ng_gateway_models::enums::ai::ModelFormat;
     use ng_gateway_models::{
         domain::prelude::ModelInfo,
         entities::ai::pipeline::{NormalizationConfig, PostProcessorConfig, PreProcessorConfig},
@@ -121,10 +122,14 @@ mod inner {
 
     /// Resolve effective processors for an inference stage.
     ///
-    /// Priority:
-    /// 1. Stage override config (`preprocess` / `postprocess`)
+    /// Priority (per-field merge, highest wins):
+    /// 1. Stage override config (`preprocess` / `postprocess` on the pipeline stage)
     /// 2. Model-level default override (`ModelInfo.default_*`)
     /// 3. Auto-detected profile default
+    ///
+    /// Field-level merge means: if a stage config specifies `resize_mode` but not
+    /// `normalization`, the normalization falls through to the model default or
+    /// auto-detect — not lost because the stage config was partially populated.
     pub fn resolve_stage_processors(
         model_info: &ModelInfo,
         confidence_threshold: f32,
@@ -133,19 +138,81 @@ mod inner {
         post_cfg: Option<&PostProcessorConfig>,
     ) -> Result<StageProcessors, AiEngineError> {
         let fallback = auto_detect_profile(model_info);
-        let preprocess_cfg = pre_cfg.or(model_info.default_preprocess.as_ref());
-        let postprocess_cfg = post_cfg.or(model_info.default_postprocess.as_ref());
 
-        let preprocess =
-            build_preprocessor(model_info, fallback.preprocessor.name(), preprocess_cfg)?;
+        // Field-level merge: stage config fields take priority, then model default fields.
+        let merged_pre = merge_preprocess_configs(pre_cfg, model_info.default_preprocess.as_ref());
+        let merged_post =
+            merge_postprocess_configs(post_cfg, model_info.default_postprocess.as_ref());
+
+        let preprocess = build_preprocessor(
+            model_info,
+            fallback.preprocessor.name(),
+            merged_pre.as_ref(),
+        )?;
         let postprocess = build_postprocessor(
             model_info,
             fallback.postprocessor.name(),
             confidence_threshold,
             nms_iou_threshold,
-            postprocess_cfg,
+            merged_post.as_ref(),
         )?;
         Ok((preprocess, postprocess))
+    }
+
+    /// Merge two `PreProcessorConfig` at field level.
+    ///
+    /// `primary` fields take precedence; `fallback` fills any `None` gaps.
+    fn merge_preprocess_configs(
+        primary: Option<&PreProcessorConfig>,
+        fallback: Option<&PreProcessorConfig>,
+    ) -> Option<PreProcessorConfig> {
+        match (primary, fallback) {
+            (None, None) => None,
+            (Some(p), None) => Some(p.clone()),
+            (None, Some(f)) => Some(f.clone()),
+            (Some(p), Some(f)) => Some(PreProcessorConfig {
+                resize_mode: p.resize_mode.or(f.resize_mode),
+                normalization: p
+                    .normalization
+                    .as_ref()
+                    .or(f.normalization.as_ref())
+                    .cloned(),
+                channel_order: p.channel_order.or(f.channel_order),
+                pad_value: p.pad_value.or(f.pad_value),
+            }),
+        }
+    }
+
+    /// Merge two `PostProcessorConfig` at field level.
+    fn merge_postprocess_configs(
+        primary: Option<&PostProcessorConfig>,
+        fallback: Option<&PostProcessorConfig>,
+    ) -> Option<PostProcessorConfig> {
+        match (primary, fallback) {
+            (None, None) => None,
+            (Some(p), None) => Some(p.clone()),
+            (None, Some(f)) => Some(f.clone()),
+            (Some(p), Some(f)) => Some(PostProcessorConfig {
+                r#type: p.r#type.or(f.r#type),
+                top_k: p.top_k.or(f.top_k),
+                apply_softmax: p.apply_softmax.or(f.apply_softmax),
+                max_detections: p.max_detections.or(f.max_detections),
+                num_keypoints: p.num_keypoints.or(f.num_keypoints),
+                anomaly_threshold: p.anomaly_threshold.or(f.anomaly_threshold),
+                nms_variant: p.nms_variant.or(f.nms_variant),
+                soft_nms_sigma: p.soft_nms_sigma.or(f.soft_nms_sigma),
+                detection_parallel_threshold: p
+                    .detection_parallel_threshold
+                    .or(f.detection_parallel_threshold),
+                nms_prescreen_multiplier: p.nms_prescreen_multiplier.or(f.nms_prescreen_multiplier),
+                classification_small_class_fast_path: p
+                    .classification_small_class_fast_path
+                    .or(f.classification_small_class_fast_path),
+                segmentation_parallel_min_pixels: p
+                    .segmentation_parallel_min_pixels
+                    .or(f.segmentation_parallel_min_pixels),
+            }),
+        }
     }
 
     fn build_preprocessor(
@@ -153,6 +220,15 @@ mod inner {
         fallback_type: &str,
         cfg: Option<&PreProcessorConfig>,
     ) -> Result<Arc<dyn PreProcessor>, AiEngineError> {
+        // RKNN quantized models: use specialized uint8 NHWC preprocessor
+        // that skips float normalization entirely for maximum throughput.
+        if model_info.format == ModelFormat::Rknn {
+            let pad_value = cfg
+                .and_then(|c| c.pad_value)
+                .unwrap_or(DEFAULT_LETTERBOX_PAD_VALUE);
+            return Ok(Arc::new(RknnLetterboxPreProcessor { pad_value }));
+        }
+
         let mode = cfg
             .and_then(|c| c.resize_mode)
             .map_or(parse_resize_mode_str(fallback_type), Ok)?;
@@ -474,6 +550,146 @@ mod inner {
                 resolve_stage_processors(&model, 0.5, Some(0.45), None, Some(&post_cfg))
                     .expect("resolve processors");
             assert_eq!(post.name(), "passthrough");
+        }
+
+        #[test]
+        fn auto_detect_yolov8_uses_letterbox_and_yolov8() {
+            let model = detection_model();
+            let profile = auto_detect_profile(&model);
+            assert_eq!(profile.preprocessor.name(), "letterbox");
+            assert_eq!(profile.postprocessor.name(), "yolov8_detection");
+        }
+
+        #[test]
+        fn auto_detect_classification_uses_center_crop() {
+            use ng_gateway_models::entities::ai::model::{Labels, TensorDescs};
+
+            let model = ModelInfo {
+                id: 0,
+                model_key: "cls_model".to_string(),
+                name: "cls".to_string(),
+                version: "1.0.0".to_string(),
+                format: ModelFormat::Onnx,
+                path: "cls.onnx".to_string(),
+                inputs: Some(TensorDescs(vec![TensorDesc {
+                    name: "images".to_string(),
+                    shape: vec![1, 3, 224, 224],
+                    dtype: TensorDType::Float32,
+                }])),
+                outputs: Some(TensorDescs(vec![TensorDesc {
+                    name: "output0".to_string(),
+                    shape: vec![1, 1000],
+                    dtype: TensorDType::Float32,
+                }])),
+                task: ModelTask::Classification,
+                labels: Some(Labels((0..1000).map(|i| format!("class_{i}")).collect())),
+                default_preprocess: None,
+                default_postprocess: None,
+                size: 1,
+                checksum: "test".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            let profile = auto_detect_profile(&model);
+            assert_eq!(profile.preprocessor.name(), "center_crop");
+            assert_eq!(profile.postprocessor.name(), "classification");
+        }
+
+        #[test]
+        fn auto_detect_segmentation_uses_direct_resize() {
+            use ng_gateway_models::entities::ai::model::{Labels, TensorDescs};
+
+            let model = ModelInfo {
+                id: 0,
+                model_key: "seg_model".to_string(),
+                name: "seg".to_string(),
+                version: "1.0.0".to_string(),
+                format: ModelFormat::Onnx,
+                path: "seg.onnx".to_string(),
+                inputs: Some(TensorDescs(vec![TensorDesc {
+                    name: "images".to_string(),
+                    shape: vec![1, 3, 512, 512],
+                    dtype: TensorDType::Float32,
+                }])),
+                outputs: Some(TensorDescs(vec![TensorDesc {
+                    name: "output0".to_string(),
+                    shape: vec![1, 21, 512, 512],
+                    dtype: TensorDType::Float32,
+                }])),
+                task: ModelTask::Segmentation,
+                labels: Some(Labels((0..21).map(|i| format!("class_{i}")).collect())),
+                default_preprocess: None,
+                default_postprocess: None,
+                size: 1,
+                checksum: "test".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            let profile = auto_detect_profile(&model);
+            assert_eq!(profile.preprocessor.name(), "direct_resize");
+            assert_eq!(profile.postprocessor.name(), "segmentation");
+        }
+
+        #[test]
+        fn rknn_model_always_uses_rknn_letterbox() {
+            use ng_gateway_models::entities::ai::model::{Labels, TensorDescs};
+
+            let model = ModelInfo {
+                id: 0,
+                model_key: "rknn_model".to_string(),
+                name: "rknn".to_string(),
+                version: "1.0.0".to_string(),
+                format: ModelFormat::Rknn,
+                path: "model.rknn".to_string(),
+                inputs: Some(TensorDescs(vec![TensorDesc {
+                    name: "images".to_string(),
+                    shape: vec![1, 640, 640, 3],
+                    dtype: TensorDType::UInt8,
+                }])),
+                outputs: Some(TensorDescs(vec![TensorDesc {
+                    name: "output0".to_string(),
+                    shape: vec![1, 84, 8400],
+                    dtype: TensorDType::Float32,
+                }])),
+                task: ModelTask::ObjectDetection,
+                labels: Some(Labels(vec!["person".to_string()])),
+                default_preprocess: None,
+                default_postprocess: None,
+                size: 1,
+                checksum: "test".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            let (pre, _post) = resolve_stage_processors(&model, 0.5, Some(0.45), None, None)
+                .expect("resolve processors");
+            assert_eq!(pre.name(), "rknn_letterbox");
+        }
+
+        #[test]
+        fn merge_preprocess_configs_primary_wins() {
+            let primary = PreProcessorConfig {
+                resize_mode: Some(ResizeMode::CenterCrop),
+                normalization: None,
+                channel_order: None,
+                pad_value: Some(128),
+            };
+            let fallback = PreProcessorConfig {
+                resize_mode: Some(ResizeMode::Letterbox),
+                normalization: Some(NormalizationConfig {
+                    preset: Some(NormalizationPreset::Imagenet),
+                    mean: None,
+                    std: None,
+                }),
+                channel_order: Some(ChannelOrder::Bgr),
+                pad_value: Some(114),
+            };
+            let merged =
+                merge_preprocess_configs(Some(&primary), Some(&fallback)).expect("should merge");
+            assert_eq!(merged.resize_mode, Some(ResizeMode::CenterCrop));
+            assert_eq!(merged.pad_value, Some(128));
+            // Normalization should fall through from fallback.
+            assert!(merged.normalization.is_some());
+            assert_eq!(merged.channel_order, Some(ChannelOrder::Bgr));
         }
     }
 }

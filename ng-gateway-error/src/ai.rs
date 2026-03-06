@@ -40,6 +40,10 @@ pub enum AiEngineError {
     #[error("decode error: {0}")]
     DecodeError(String),
 
+    /// Frame memory operation failed (DMA-buf, mmap, buffer pool).
+    #[error("frame error: {0}")]
+    FrameError(String),
+
     /// WASM algorithm execution failed.
     #[error("algorithm error: {0}")]
     AlgorithmError(String),

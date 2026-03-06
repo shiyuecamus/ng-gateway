@@ -74,7 +74,7 @@ impl PostProcessor for LegacyYoloV5PostProcessor {
         &self,
         output: &RawInferenceOutput,
         coord_transform: &CoordinateTransform,
-        labels: &[String],
+        labels: &[Arc<str>],
     ) -> Result<PostprocessOutput, AiEngineError> {
         let tensor = &output.tensors[0].1;
         let shape = tensor.shape();
@@ -84,7 +84,7 @@ impl PostProcessor for LegacyYoloV5PostProcessor {
             .map(|idx| {
                 labels
                     .get(idx)
-                    .map(|s| Arc::<str>::from(s.as_str()))
+                    .cloned()
                     .unwrap_or(Arc::from(format!("class_{idx}")))
             })
             .collect();
@@ -259,7 +259,7 @@ impl PostProcessor for ChunkedYoloV5PostProcessor {
         &self,
         output: &RawInferenceOutput,
         coord_transform: &CoordinateTransform,
-        labels: &[String],
+        labels: &[Arc<str>],
     ) -> Result<PostprocessOutput, AiEngineError> {
         let tensor = &output.tensors[0].1;
         let shape = tensor.shape();
@@ -269,7 +269,7 @@ impl PostProcessor for ChunkedYoloV5PostProcessor {
             .map(|idx| {
                 labels
                     .get(idx)
-                    .map(|s| Arc::<str>::from(s.as_str()))
+                    .cloned()
                     .unwrap_or(Arc::from(format!("class_{idx}")))
             })
             .collect();
@@ -530,7 +530,7 @@ fn make_classification_output(num_classes: usize) -> RawInferenceOutput {
 
 fn bench_yolov8_postprocess(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_yolov8");
-    let labels: Vec<String> = (0..80).map(|i| format!("class_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..80).map(|i| Arc::from(format!("class_{i}"))).collect();
     let coord = make_coord_transform();
     let processor = YoloV8PostProcessor::default();
     for &preds in &[8400usize, 25200usize] {
@@ -550,7 +550,7 @@ fn bench_yolov8_postprocess(c: &mut Criterion) {
 
 fn bench_yolov8_threshold_matrix(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_yolov8_threshold_matrix");
-    let labels: Vec<String> = (0..80).map(|i| format!("class_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..80).map(|i| Arc::from(format!("class_{i}"))).collect();
     let coord = make_coord_transform();
     let preds = 25_200usize;
     let output = make_yolov8_output(80, preds);
@@ -584,7 +584,7 @@ fn bench_yolov8_threshold_matrix(c: &mut Criterion) {
 
 fn bench_yolov5_postprocess(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_yolov5");
-    let labels: Vec<String> = (0..80).map(|i| format!("class_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..80).map(|i| Arc::from(format!("class_{i}"))).collect();
     let coord = make_coord_transform();
     let processor = YoloV5PostProcessor::default();
     for &preds in &[8400usize, 25200usize] {
@@ -604,7 +604,7 @@ fn bench_yolov5_postprocess(c: &mut Criterion) {
 
 fn bench_yolov5_threshold_matrix(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_yolov5_threshold_matrix");
-    let labels: Vec<String> = (0..80).map(|i| format!("class_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..80).map(|i| Arc::from(format!("class_{i}"))).collect();
     let coord = make_coord_transform();
     let preds = 25_200usize;
     let output = make_yolov5_output(80, preds);
@@ -638,7 +638,7 @@ fn bench_yolov5_threshold_matrix(c: &mut Criterion) {
 
 fn bench_yolov5_ab_compare(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_yolov5_ab_compare");
-    let labels: Vec<String> = (0..80).map(|i| format!("class_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..80).map(|i| Arc::from(format!("class_{i}"))).collect();
     let coord = make_coord_transform();
     let optimized = YoloV5PostProcessor::default();
     let legacy = LegacyYoloV5PostProcessor::default();
@@ -694,7 +694,7 @@ fn bench_yolov5_ab_compare(c: &mut Criterion) {
 fn bench_segmentation_postprocess(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_segmentation");
     let processor = SegmentationPostProcessor::default();
-    let labels: Vec<String> = (0..32).map(|i| format!("seg_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..32).map(|i| Arc::from(format!("seg_{i}"))).collect();
     for &(classes, h, w) in &[(21usize, 512usize, 512usize), (32usize, 640usize, 640usize)] {
         let output = make_segmentation_output(classes, h, w);
         group.throughput(Throughput::Elements((h * w) as u64));
@@ -717,7 +717,7 @@ fn bench_segmentation_postprocess(c: &mut Criterion) {
 fn bench_classification_postprocess(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_classification");
     let processor = ClassificationPostProcessor::default();
-    let labels: Vec<String> = (0..1000).map(|i| format!("label_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..1000).map(|i| Arc::from(format!("label_{i}"))).collect();
     for &classes in &[1000usize, 5000usize] {
         let output = make_classification_output(classes);
         group.throughput(Throughput::Elements(classes as u64));
@@ -735,7 +735,7 @@ fn bench_classification_postprocess(c: &mut Criterion) {
 
 fn bench_classification_small_class_fast_path_matrix(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_classification_small_class_fast_path_matrix");
-    let labels: Vec<String> = (0..5000).map(|i| format!("label_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..5000).map(|i| Arc::from(format!("label_{i}"))).collect();
     let classes = 5_000usize;
     let output = make_classification_output(classes);
     group.throughput(Throughput::Elements(classes as u64));
@@ -764,7 +764,7 @@ fn bench_classification_small_class_fast_path_matrix(c: &mut Criterion) {
 
 fn bench_segmentation_parallel_min_pixels_matrix(c: &mut Criterion) {
     let mut group = c.benchmark_group("postprocess_segmentation_parallel_min_pixels_matrix");
-    let labels: Vec<String> = (0..32).map(|i| format!("seg_{i}")).collect();
+    let labels: Vec<Arc<str>> = (0..32).map(|i| Arc::from(format!("seg_{i}"))).collect();
     let output = make_segmentation_output(32, 640, 640);
     let pixels = 640usize * 640usize;
     group.throughput(Throughput::Elements(pixels as u64));

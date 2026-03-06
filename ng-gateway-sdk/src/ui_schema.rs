@@ -827,15 +827,112 @@ impl EnumItem {
     }
 }
 
+/// Data source for dynamically populated select fields.
+///
+/// When a field's props include an `ApiDatasource`, the frontend renderer
+/// fetches options from the specified API endpoint instead of using
+/// static [`EnumItem`] values from [`UiDataType::Enum`].
+///
+/// # Example
+///
+/// ```rust,ignore
+/// UiProps::api_select("/api/ai/pipelines", "id", "name")
+/// ```
+///
+/// This tells the frontend to `GET /api/ai/pipelines`, and for each item
+/// in the response array, use `item.id` as the option value and `item.name`
+/// as the display label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiDatasource {
+    /// API endpoint to fetch options (relative to the API base URL).
+    pub endpoint: String,
+    /// JSON path to the value field in each response item.
+    pub value_field: String,
+    /// JSON path to the label field in each response item.
+    pub label_field: String,
+    /// Optional query parameters appended as `?key=value&...`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+    /// Whether to allow creating new items inline (shows a quick-add button).
+    #[serde(default)]
+    pub allow_create: bool,
+    /// Route path to navigate when the user clicks the quick-add button.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_route: Option<String>,
+    /// Display label for the quick-add button (defaults to "Create new" if absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_label: Option<UiText>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UiProps {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<UiText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub help: Option<UiText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub suffix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub col_span: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    /// Remote data source for dynamically populated select fields.
+    ///
+    /// When present, the frontend fetches options from [`ApiDatasource::endpoint`]
+    /// instead of using static enum items. The field's `data_type` should be set
+    /// to the actual value type (e.g., `Integer` for an ID field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datasource: Option<ApiDatasource>,
+}
+
+impl UiProps {
+    /// Create props for a dynamically-populated select field backed by an API endpoint.
+    ///
+    /// The frontend will `GET {endpoint}`, iterate over the response items, and
+    /// use `item[value_field]` as the option value and `item[label_field]` as the
+    /// display label.
+    pub fn api_select(endpoint: &str, value_field: &str, label_field: &str) -> Self {
+        Self {
+            datasource: Some(ApiDatasource {
+                endpoint: endpoint.to_string(),
+                value_field: value_field.to_string(),
+                label_field: label_field.to_string(),
+                params: None,
+                allow_create: false,
+                create_route: None,
+                create_label: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Create props for a dynamically-populated select field with a quick-create shortcut.
+    ///
+    /// In addition to fetching options from the API, the dropdown footer displays
+    /// a button that navigates the user to `create_route` for inline creation.
+    pub fn api_select_with_create(
+        endpoint: &str,
+        value_field: &str,
+        label_field: &str,
+        create_route: &str,
+    ) -> Self {
+        Self {
+            datasource: Some(ApiDatasource {
+                endpoint: endpoint.to_string(),
+                value_field: value_field.to_string(),
+                label_field: label_field.to_string(),
+                params: None,
+                allow_create: true,
+                create_route: Some(create_route.to_string()),
+                create_label: None,
+            }),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

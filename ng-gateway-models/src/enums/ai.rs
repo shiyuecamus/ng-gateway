@@ -122,6 +122,8 @@ pub enum AlarmType {
     ZoneIntrusion,
     LineCrossing,
     AnomalyDetected,
+    /// Zone dwell event (entered / dwell timeout / exited).
+    ZoneDwell,
     CustomWasm,
 }
 

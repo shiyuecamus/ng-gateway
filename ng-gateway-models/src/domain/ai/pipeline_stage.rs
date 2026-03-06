@@ -4,13 +4,17 @@ use crate::{
     },
     initializer::SeedableTrait,
 };
-use sea_orm::{prelude::DateTimeUtc, DeriveIntoActiveModel, FromQueryResult, IntoActiveModel};
+use sea_orm::{
+    prelude::DateTimeUtc, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult,
+    IntoActiveModel, ModelTrait,
+};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 /// Model metadata stored in the registry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, FromQueryResult)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, FromQueryResult, DerivePartialModel)]
 #[serde(rename_all = "camelCase")]
+#[sea_orm(entity = "<crate::entities::prelude::PipelineStageModel as ModelTrait>::Entity")]
 pub struct PipelineStageInfo {
     /// Pipeline stage unique identifier.
     pub id: i32,

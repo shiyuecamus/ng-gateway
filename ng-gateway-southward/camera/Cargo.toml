@@ -25,9 +25,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 bytes = { version = "1.9", features = ["serde"] }
 
-# Video / RTSP
-retina = { version = "0.4" }
-
 # HTTP client for ONVIF SOAP + MJPEG streaming
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 

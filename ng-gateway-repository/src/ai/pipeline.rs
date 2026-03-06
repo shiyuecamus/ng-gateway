@@ -51,12 +51,11 @@ impl PipelineRepository {
             })
             .order_by_asc(PipelineColumn::Id);
         let (page, page_size) = (params.page.page.unwrap(), params.page.page_size.unwrap());
-        let total = base.clone().count(&db).await?;
-        let mut records = base
+        let paginator = base
             .into_partial_model::<PipelineInfo>()
-            .paginate(&db, page_size as u64)
-            .fetch_page((page - 1) as u64)
-            .await?;
+            .paginate(&db, page_size);
+        let total = paginator.num_items().await?;
+        let mut records = paginator.fetch_page(page.saturating_sub(1)).await?;
 
         // Batch load page-scope stage/rule details to avoid N+1 queries.
         let pipeline_ids: Vec<i32> = records.iter().map(|pipeline| pipeline.id).collect();
@@ -101,7 +100,11 @@ impl PipelineRepository {
         Ok(PageResult {
             records,
             total,
-            pages: ((total as f64) / (page_size as f64)).ceil() as u32,
+            pages: if page_size > 0 {
+                total.div_ceil(page_size)
+            } else {
+                0
+            },
             page,
             page_size,
         })
