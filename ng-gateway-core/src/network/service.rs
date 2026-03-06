@@ -4,16 +4,34 @@
 //! It delegates to the platform-specific [`PlatformNetworkManager`] and manages
 //! caching, capability state, and startup AP initialization.
 
+#[cfg(target_os = "linux")]
+use crate::network::ap_manager::ApServiceManager;
 use crate::network::platform::{self, PlatformNetworkManager};
 use ng_gateway_error::NGResult;
 use ng_gateway_models::domain::prelude::{
     ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
-    NetworkInterfaceSummary, WifiAccessPoint, WifiConnectRequest, WifiStaStatus, WiredStatus,
+    InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
+    WifiAccessPoint, WifiConnectRequest, WifiStaStatus, WiredStatus,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
+
+/// How long cached capabilities remain valid before requiring a refresh.
+const CAPABILITIES_TTL_SECS: u64 = 60;
+
+/// Cached capabilities with timestamp for TTL-based invalidation.
+struct CachedCapabilities {
+    data: NetworkCapabilities,
+    fetched_at: Instant,
+}
+
+impl CachedCapabilities {
+    fn is_valid(&self) -> bool {
+        self.fetched_at.elapsed().as_secs() < CAPABILITIES_TTL_SECS
+    }
+}
 
 /// High-level network management service.
 ///
@@ -21,8 +39,8 @@ use tracing::{info, instrument, warn};
 pub struct NetworkService {
     /// Platform-specific network manager.
     manager: Box<dyn PlatformNetworkManager>,
-    /// Cached platform capabilities (refreshed on startup and on demand).
-    capabilities: Arc<RwLock<Option<NetworkCapabilities>>>,
+    /// Cached platform capabilities with TTL (refreshed on startup, on demand, or after expiry).
+    capabilities: Arc<RwLock<Option<CachedCapabilities>>>,
 }
 
 impl NetworkService {
@@ -78,22 +96,27 @@ impl NetworkService {
 
     // ─── Capabilities ───
 
-    /// Get cached capabilities or refresh if not available.
+    /// Get cached capabilities, refreshing if expired or absent.
     pub async fn capabilities(&self) -> NGResult<NetworkCapabilities> {
         {
             let guard = self.capabilities.read().await;
-            if let Some(caps) = guard.as_ref() {
-                return Ok(caps.clone());
+            if let Some(cached) = guard.as_ref() {
+                if cached.is_valid() {
+                    return Ok(cached.data.clone());
+                }
             }
         }
         self.refresh_capabilities().await
     }
 
-    /// Force-refresh platform capabilities.
+    /// Force-refresh platform capabilities and reset the TTL.
     pub async fn refresh_capabilities(&self) -> NGResult<NetworkCapabilities> {
         let caps = self.manager.detect_capabilities().await?;
         let mut guard = self.capabilities.write().await;
-        *guard = Some(caps.clone());
+        *guard = Some(CachedCapabilities {
+            data: caps.clone(),
+            fetched_at: Instant::now(),
+        });
         Ok(caps)
     }
 
@@ -216,8 +239,6 @@ impl NetworkService {
     /// we log a warning. The gateway does NOT attempt to start them (that's systemd's job).
     #[cfg(target_os = "linux")]
     async fn verify_ap_services(&self) {
-        use crate::network::ap_manager::ApServiceManager;
-
         match ApServiceManager::new().await {
             Ok(mgr) => match mgr.status().await {
                 Ok(status) => {

@@ -39,7 +39,6 @@ pub struct ApRenderContext {
     pub exclusive: bool,
 }
 
-
 /// Render and write all three AP configuration files atomically.
 ///
 /// Returns the list of written file paths.
@@ -156,7 +155,6 @@ ignore_broadcast_ssid=0
 wpa=2
 wpa_passphrase={password}
 wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
 rsn_pairwise=CCMP
 
 # Control interface for status queries

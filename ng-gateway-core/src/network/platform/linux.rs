@@ -10,8 +10,8 @@
 //! All D-Bus operations are asynchronous via `zbus` + tokio runtime.
 
 use crate::network::{
-    ap_config::{self, ApRenderContext, AP_CONFIG_DIR},
-    ap_manager::ApServiceManager,
+    ap_config::{self, ApRenderContext, AP_CONFIG_DIR, AP_ENV_FILE, HOSTAPD_CONF_FILE},
+    ap_manager::{ApServiceManager, ApServiceStatus},
     capability::{
         aggregate_sta_ap_capability, detect_phy_capabilities, determine_ap_mode, resolve_phy_name,
     },
@@ -65,6 +65,10 @@ trait NetworkManager {
     #[zbus(name = "DeactivateConnection")]
     fn deactivate_connection(&self, active_connection: &ObjectPath<'_>) -> zbus::Result<()>;
 
+    /// Look up a connection by interface name across all NM saved connections.
+    #[zbus(name = "GetDeviceByIpIface")]
+    fn get_device_by_ip_iface(&self, iface: &str) -> zbus::Result<OwnedObjectPath>;
+
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;
 }
@@ -94,16 +98,55 @@ const NM_DEVICE_STATE_DISCONNECTED: u32 = 30;
 const NM_DEVICE_STATE_UNAVAILABLE: u32 = 20;
 const NM_DEVICE_STATE_UNMANAGED: u32 = 10;
 
+/// Runtime state directory for persisting transient data across restarts.
+const RUNTIME_STATE_DIR: &str = "/run/ng-gateway";
+
+/// File used to persist the stashed STA connection across gateway restarts.
+const STA_RESTORE_FILE: &str = "sta-restore.json";
+
 /// Stashed STA connection info for restore-after-stop-AP in exclusive mode.
 ///
 /// When starting AP in exclusive mode we disconnect STA; we save the NM connection
 /// and device paths so we can reactivate via `ActivateConnection` when the user stops AP.
-#[derive(Debug, Clone)]
+/// This is also persisted to disk so that a gateway restart does not lose the restore info.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StashedStaConnection {
     /// Settings connection path (org.freedesktop.NetworkManager.Settings.Connection).
     connection_path: String,
     /// Wi-Fi device path (org.freedesktop.NetworkManager.Device).
     device_path: String,
+}
+
+impl StashedStaConnection {
+    /// Persist to `/run/ng-gateway/sta-restore.json`.
+    async fn persist(&self) {
+        if let Err(e) = tokio::fs::create_dir_all(RUNTIME_STATE_DIR).await {
+            warn!("Failed to create runtime state dir: {e}");
+            return;
+        }
+        let path = format!("{RUNTIME_STATE_DIR}/{STA_RESTORE_FILE}");
+        match serde_json::to_string(self) {
+            Ok(json) => {
+                if let Err(e) = tokio::fs::write(&path, json).await {
+                    warn!("Failed to persist STA restore info: {e}");
+                }
+            }
+            Err(e) => warn!("Failed to serialize STA restore info: {e}"),
+        }
+    }
+
+    /// Load from disk (best-effort).
+    async fn load() -> Option<Self> {
+        let path = format!("{RUNTIME_STATE_DIR}/{STA_RESTORE_FILE}");
+        let content = tokio::fs::read_to_string(&path).await.ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Remove the persisted file.
+    async fn remove() {
+        let path = format!("{RUNTIME_STATE_DIR}/{STA_RESTORE_FILE}");
+        let _ = tokio::fs::remove_file(&path).await;
+    }
 }
 
 /// Linux network manager backed by NetworkManager D-Bus.
@@ -112,19 +155,31 @@ pub struct LinuxNetworkManager {
     /// In exclusive mode, STA is disconnected before AP start; this holds the connection
     /// info for restore when the user stops AP.
     stashed_sta_for_restore: RwLock<Option<StashedStaConnection>>,
+    /// Cached AP mode to avoid re-running expensive `detect_capabilities` on every
+    /// `ap_status` call. Updated whenever `detect_capabilities` runs.
+    cached_ap_mode: RwLock<Option<ApMode>>,
 }
 
 impl LinuxNetworkManager {
     /// Create a new instance by connecting to the system D-Bus.
+    ///
+    /// On startup, attempts to load any persisted STA restore info from a previous
+    /// session (covers gateway restart while AP was running in exclusive mode).
     pub async fn new() -> NGResult<Self> {
         let dbus_conn = Connection::system().await.map_err(|e| {
             NetworkError::DBusError(format!("Failed to connect to system D-Bus: {e}"))
         })?;
 
+        let stashed = StashedStaConnection::load().await;
+        if stashed.is_some() {
+            info!("Loaded persisted STA restore info from previous session");
+        }
+
         info!("Connected to system D-Bus for NetworkManager");
         Ok(Self {
             dbus_conn,
-            stashed_sta_for_restore: RwLock::new(None),
+            stashed_sta_for_restore: RwLock::new(stashed),
+            cached_ap_mode: RwLock::new(None),
         })
     }
 
@@ -175,10 +230,12 @@ impl LinuxNetworkManager {
     /// Build a `NetworkInterfaceSummary` from a NM device object path.
     async fn build_interface_summary(
         &self,
-        device_path: &ObjectPath<'_>,
+        device_path: &OwnedObjectPath,
     ) -> NGResult<Option<NetworkInterfaceSummary>> {
+        let device_path_ref = ObjectPath::try_from(device_path.as_str())
+            .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
         let dev_props = self
-            .get_all_properties(device_path, "org.freedesktop.NetworkManager.Device")
+            .get_all_properties(&device_path_ref, "org.freedesktop.NetworkManager.Device")
             .await?;
 
         let iface_name = prop_str(&dev_props, "Interface").unwrap_or_default();
@@ -220,7 +277,7 @@ impl LinuxNetworkManager {
         // Wi-Fi specific properties
         let (wifi_mode, connected_ssid, ap_ssid, signal_dbm, signal_quality) =
             if kind == InterfaceKind::Wifi && state >= NM_DEVICE_STATE_DISCONNECTED {
-                self.read_wifi_info(device_path, state)
+                self.read_wifi_info(&device_path_ref, state)
                     .await
                     .unwrap_or_default()
             } else {
@@ -228,7 +285,7 @@ impl LinuxNetworkManager {
             };
 
         // Traffic stats from /sys/class/net
-        let (rx_bytes, tx_bytes) = read_sysfs_traffic(&iface_name);
+        let (rx_bytes, tx_bytes) = read_sysfs_traffic(&iface_name).await;
 
         Ok(Some(NetworkInterfaceSummary {
             name: iface_name,
@@ -250,6 +307,9 @@ impl LinuxNetworkManager {
     }
 
     /// Read IPv4 configuration from the device's Ip4Config object.
+    ///
+    /// Resolves the actual IP method (DHCP / Static / Disabled) from the active
+    /// NM connection profile rather than guessing.
     async fn read_ipv4_config(
         &self,
         dev_props: &HashMap<String, OwnedValue>,
@@ -272,11 +332,13 @@ impl LinuxNetworkManager {
         let gateway = prop_str(&ip4_props, "Gateway").and_then(|s| s.parse::<IpAddr>().ok());
         let dns = parse_nm_ip4_nameservers(&ip4_props);
 
+        let method = self.resolve_ip_method(dev_props, "ipv4").await;
+
         Ok(Ipv4Config {
             addresses,
             gateway,
             dns,
-            method: IpMethod::Dhcp,
+            method,
         })
     }
 
@@ -303,12 +365,82 @@ impl LinuxNetworkManager {
         let gateway = prop_str(&ip6_props, "Gateway").and_then(|s| s.parse::<IpAddr>().ok());
         let dns = parse_nm_ip6_nameservers(&ip6_props);
 
+        let method = self.resolve_ip_method(dev_props, "ipv6").await;
+
         Ok(Ipv6Config {
             addresses,
             gateway,
             dns,
-            method: IpMethod::Dhcp,
+            method,
         })
+    }
+
+    /// Resolve the actual IP method from the device's active NM connection profile.
+    ///
+    /// Reads `ActiveConnection` → `Connection` (settings path) → `GetSettings()` →
+    /// `ipv4.method` / `ipv6.method` to determine the real method.
+    async fn resolve_ip_method(
+        &self,
+        dev_props: &HashMap<String, OwnedValue>,
+        section: &str,
+    ) -> IpMethod {
+        let active_conn_path = match prop_object_path(dev_props, "ActiveConnection")
+            .filter(|p| !p.is_empty() && p != "/")
+        {
+            Some(p) => p,
+            None => return IpMethod::Dhcp,
+        };
+
+        let active_ref = match ObjectPath::try_from(active_conn_path.as_str()) {
+            Ok(p) => p,
+            Err(_) => return IpMethod::Dhcp,
+        };
+
+        let active_props = self
+            .get_all_properties(
+                &active_ref,
+                "org.freedesktop.NetworkManager.Connection.Active",
+            )
+            .await
+            .unwrap_or_default();
+
+        let settings_path = match prop_object_path(&active_props, "Connection")
+            .filter(|p| !p.is_empty() && p != "/")
+        {
+            Some(p) => p,
+            None => return IpMethod::Dhcp,
+        };
+
+        // Call GetSettings() on the connection to read ipv4/ipv6.method.
+        let method_str = self
+            .dbus_conn
+            .call_method(
+                Some("org.freedesktop.NetworkManager"),
+                settings_path.as_str(),
+                Some("org.freedesktop.NetworkManager.Settings.Connection"),
+                "GetSettings",
+                &(),
+            )
+            .await
+            .ok()
+            .and_then(|reply| {
+                let body = reply
+                    .body()
+                    .deserialize::<HashMap<String, HashMap<String, OwnedValue>>>()
+                    .ok()?;
+                let ip_section = body.get(section)?;
+                let method_val = ip_section.get("method")?;
+                method_val
+                    .downcast_ref::<&str>()
+                    .ok()
+                    .map(|s| s.to_string())
+            });
+
+        match method_str.as_deref() {
+            Some("manual") => IpMethod::Static,
+            Some("disabled") => IpMethod::Disabled,
+            _ => IpMethod::Dhcp,
+        }
     }
 
     /// Read Wi-Fi specific information (mode, SSID, signal) for a wireless device.
@@ -400,6 +532,64 @@ impl LinuxNetworkManager {
         )
     }
 
+    /// Clean up a failed/timed-out Wi-Fi connection attempt.
+    ///
+    /// Deactivates the active connection and deletes the settings profile so NM
+    /// doesn't accumulate orphaned entries.
+    async fn cleanup_connection_profile(
+        &self,
+        active_conn_path: &OwnedObjectPath,
+        settings_path: &OwnedObjectPath,
+    ) {
+        // Deactivate the active connection (best-effort).
+        if let Ok(nm) = self.nm_proxy().await {
+            if let Ok(active_ref) = ObjectPath::try_from(active_conn_path.as_str()) {
+                let _ = nm.deactivate_connection(&active_ref).await;
+            }
+        }
+
+        // Delete the connection profile via Settings.Connection.Delete (best-effort).
+        let _ = self
+            .dbus_conn
+            .call_method(
+                Some("org.freedesktop.NetworkManager"),
+                settings_path.as_str(),
+                Some("org.freedesktop.NetworkManager.Settings.Connection"),
+                "Delete",
+                &(),
+            )
+            .await;
+    }
+
+    /// Find an existing NM connection profile (settings path) for the given interface.
+    ///
+    /// Queries the device's active connection first; if none, searches all saved
+    /// connections for one bound to this interface name.
+    async fn find_connection_for_interface(&self, iface_name: &str) -> Option<String> {
+        let nm = self.nm_proxy().await.ok()?;
+        let device_path = nm.get_device_by_ip_iface(iface_name).await.ok()?;
+        let dev_path_ref = ObjectPath::try_from(device_path.as_str()).ok()?;
+        let dev_props = self
+            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .await
+            .ok()?;
+
+        // Check if there's an active connection on this device.
+        let active_conn_path = prop_object_path(&dev_props, "ActiveConnection")
+            .filter(|p| !p.is_empty() && p != "/")?;
+
+        let active_ref = ObjectPath::try_from(active_conn_path.as_str()).ok()?;
+        let active_props = self
+            .get_all_properties(
+                &active_ref,
+                "org.freedesktop.NetworkManager.Connection.Active",
+            )
+            .await
+            .ok()?;
+
+        prop_object_path(&active_props, "Connection").filter(|p| !p.is_empty() && p != "/")
+    }
+
     /// Stash the current active STA connection for later restore (exclusive mode only).
     ///
     /// Reads the ActiveConnection from the Wi-Fi device, then the Connection property
@@ -443,23 +633,27 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .await
             .map_err(|e| NetworkError::DBusError(format!("GetDevices failed: {e}")))?;
 
-        let mut interfaces = Vec::with_capacity(devices.len());
+        // Query all devices concurrently for maximum throughput.
+        let futures: Vec<_> = devices
+            .iter()
+            .map(|dev_path| self.build_interface_summary(dev_path))
+            .collect();
 
-        for dev_path in &devices {
-            let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
-                .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
+        let results = futures::future::join_all(futures).await;
 
-            match self.build_interface_summary(&dev_path_ref).await {
+        let mut interfaces = Vec::with_capacity(results.len());
+        for result in results {
+            match result {
                 Ok(Some(summary)) => interfaces.push(summary),
                 Ok(None) => {}
                 Err(e) => {
-                    warn!("Failed to read device {}: {e}", dev_path.as_str());
+                    warn!("Failed to read device: {e}");
                 }
             }
         }
 
         // Sort: Ethernet first, then Wi-Fi, then others.
-        interfaces.sort_by_key(|i| match i.kind {
+        interfaces.sort_unstable_by_key(|i| match i.kind {
             InterfaceKind::Ethernet => 0,
             InterfaceKind::Wifi => 1,
             InterfaceKind::Bridge => 2,
@@ -471,57 +665,67 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
     async fn get_interface(&self, name: &str) -> NGResult<NetworkInterfaceDetail> {
         let nm = self.nm_proxy().await?;
-        let devices = nm
-            .get_devices()
+
+        // Resolve device path directly by interface name (O(1) via NM D-Bus).
+        let dev_path = nm
+            .get_device_by_ip_iface(name)
             .await
-            .map_err(|e| NetworkError::DBusError(format!("GetDevices failed: {e}")))?;
+            .map_err(|_| NetworkError::InterfaceNotFound(name.to_string()))?;
 
-        for dev_path in &devices {
-            let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
-                .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
+        let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
+            .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
 
-            let dev_props = self
-                .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
-                .await?;
+        let summary = self
+            .build_interface_summary(&dev_path)
+            .await?
+            .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
 
-            let iface_name = prop_str(&dev_props, "Interface").unwrap_or_default();
-            if iface_name != name {
-                continue;
+        let dev_props = self
+            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .await?;
+
+        let mtu = prop_u32(&dev_props, "Mtu");
+        let driver = prop_str(&dev_props, "Driver");
+        let firmware_version = prop_str(&dev_props, "FirmwareVersion").filter(|v| !v.is_empty());
+
+        // Read NM connection UUID from active connection if present.
+        let nm_connection_uuid = prop_object_path(&dev_props, "ActiveConnection")
+            .filter(|p| !p.is_empty() && p != "/")
+            .and_then(|active_path| {
+                // Will be resolved asynchronously below.
+                Some(active_path)
+            });
+
+        let nm_connection_uuid = if let Some(active_path) = nm_connection_uuid {
+            let active_ref = ObjectPath::try_from(active_path.as_str()).ok();
+            if let Some(active_ref) = active_ref {
+                self.get_all_properties(
+                    &active_ref,
+                    "org.freedesktop.NetworkManager.Connection.Active",
+                )
+                .await
+                .ok()
+                .and_then(|props| prop_str(&props, "Uuid"))
+            } else {
+                None
             }
+        } else {
+            None
+        };
 
-            let summary = self
-                .build_interface_summary(&dev_path_ref)
-                .await?
-                .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
+        let (rx_packets, tx_packets, rx_errors, tx_errors) = read_sysfs_counters(name).await;
 
-            let mtu = prop_u32(&dev_props, "Mtu");
-            let driver = prop_str(&dev_props, "Driver");
-            let firmware_version = prop_str(&dev_props, "FirmwareVersion").and_then(|v| {
-                if v.is_empty() {
-                    None
-                } else {
-                    Some(v)
-                }
-            });
-            let nm_connection_uuid = None; // TODO: read from active connection
-
-            // Read packet counters from sysfs
-            let (rx_packets, tx_packets, rx_errors, tx_errors) = read_sysfs_counters(&name);
-
-            return Ok(NetworkInterfaceDetail {
-                summary,
-                nm_connection_uuid,
-                mtu,
-                driver,
-                firmware_version,
-                rx_packets,
-                tx_packets,
-                rx_errors,
-                tx_errors,
-            });
-        }
-
-        Err(NetworkError::InterfaceNotFound(name.to_string()).into())
+        Ok(NetworkInterfaceDetail {
+            summary,
+            nm_connection_uuid,
+            mtu,
+            driver,
+            firmware_version,
+            rx_packets,
+            tx_packets,
+            rx_errors,
+            tx_errors,
+        })
     }
 
     async fn detect_capabilities(&self) -> NGResult<NetworkCapabilities> {
@@ -567,6 +771,9 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let ap_mode = determine_ap_mode(&wireless_interfaces, sta_ap);
         let can_manage_ap = !matches!(ap_mode, ApMode::Unavailable);
 
+        // Cache ap_mode locally so `ap_status` can avoid re-running detect_capabilities.
+        *self.cached_ap_mode.write().await = Some(ap_mode);
+
         Ok(NetworkCapabilities {
             platform: if nm_available {
                 PlatformSupport::Full
@@ -595,40 +802,15 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         info!(interface = name, method = ?config.method, "Configuring interface");
 
         let nm = self.nm_proxy().await?;
-        let devices = nm
-            .get_devices()
+
+        // Resolve device path directly by interface name instead of iterating all devices.
+        let device_path = nm
+            .get_device_by_ip_iface(name)
             .await
-            .map_err(|e| NetworkError::DBusError(format!("GetDevices failed: {e}")))?;
+            .map_err(|_| NetworkError::InterfaceNotFound(name.to_string()))?;
 
-        // Find the device object path for the given interface name.
-        let mut target_device: Option<OwnedObjectPath> = None;
-        for dev_path in &devices {
-            let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
-                .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
-            let dev_props = self
-                .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
-                .await?;
-            let iface_name = prop_str(&dev_props, "Interface").unwrap_or_default();
-            if iface_name == name {
-                target_device = Some(dev_path.clone());
-                break;
-            }
-        }
-
-        let device_path = target_device.ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
-
-        // Build NM connection settings dict.
-        let mut conn_settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
-
-        // connection section
-        let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
-        connection.insert("id", Value::from(format!("{name}-config")));
-        connection.insert("type", Value::from("802-3-ethernet"));
-        connection.insert("interface-name", Value::from(name));
-        connection.insert("autoconnect", Value::from(true));
-        conn_settings.insert("connection", connection);
-
-        // Pre-compute owned strings so they outlive the Value borrows.
+        // Pre-compute all owned strings so they outlive the Value borrows.
+        let conn_id = format!("{name}-config");
         let addr_str = config.ip_address.as_ref().map(|ip| ip.to_string());
         let gw_str = config.gateway.as_ref().map(|gw| gw.to_string());
         let dns_strings: Vec<String> = config
@@ -637,61 +819,117 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .map(|list| list.iter().map(|d| d.to_string()).collect())
             .unwrap_or_default();
 
-        // ipv4 section
-        let mut ipv4: HashMap<&str, Value<'_>> = HashMap::new();
-        match config.method {
-            IpMethod::Dhcp => {
-                ipv4.insert("method", Value::from("auto"));
+        // Build the NM connection settings dict.
+        // All string references borrow from the locals above, so lifetimes are unified.
+        let build_settings = || -> HashMap<&str, HashMap<&str, Value<'_>>> {
+            let mut conn_settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
+
+            let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
+            connection.insert("id", Value::from(conn_id.as_str()));
+            connection.insert("type", Value::from("802-3-ethernet"));
+            connection.insert("interface-name", Value::from(name));
+            connection.insert("autoconnect", Value::from(true));
+            conn_settings.insert("connection", connection);
+
+            let mut ipv4: HashMap<&str, Value<'_>> = HashMap::new();
+            match config.method {
+                IpMethod::Dhcp => {
+                    ipv4.insert("method", Value::from("auto"));
+                }
+                IpMethod::Static => {
+                    ipv4.insert("method", Value::from("manual"));
+
+                    if let (Some(ip_s), Some(prefix)) = (addr_str.as_deref(), config.prefix_length)
+                    {
+                        let prefix_u32 = prefix as u32;
+                        let mut addr_dict: HashMap<&str, Value<'_>> = HashMap::new();
+                        addr_dict.insert("address", Value::from(ip_s));
+                        addr_dict.insert("prefix", Value::from(prefix_u32));
+                        ipv4.insert("address-data", Value::from(vec![addr_dict]));
+                    }
+
+                    if let Some(gw) = gw_str.as_deref() {
+                        ipv4.insert("gateway", Value::from(gw));
+                    }
+
+                    if !dns_strings.is_empty() {
+                        let dns_data: Vec<HashMap<&str, Value<'_>>> = dns_strings
+                            .iter()
+                            .map(|d| {
+                                let mut m: HashMap<&str, Value<'_>> = HashMap::new();
+                                m.insert("address", Value::from(d.as_str()));
+                                m
+                            })
+                            .collect();
+                        ipv4.insert("dns-data", Value::from(dns_data));
+                    }
+                }
+                IpMethod::Disabled => {
+                    ipv4.insert("method", Value::from("disabled"));
+                }
             }
-            IpMethod::Static => {
-                ipv4.insert("method", Value::from("manual"));
+            conn_settings.insert("ipv4", ipv4);
 
-                if let (Some(ip_s), Some(prefix)) = (addr_str.as_deref(), config.prefix_length) {
-                    let prefix_u32 = prefix as u32;
+            let mut ipv6: HashMap<&str, Value<'_>> = HashMap::new();
+            ipv6.insert("method", Value::from("auto"));
+            conn_settings.insert("ipv6", ipv6);
 
-                    // NM AddressData format: aa{sv} with "address" and "prefix" keys
-                    let mut addr_dict: HashMap<&str, Value<'_>> = HashMap::new();
-                    addr_dict.insert("address", Value::from(ip_s));
-                    addr_dict.insert("prefix", Value::from(prefix_u32));
+            conn_settings
+        };
 
-                    ipv4.insert("address-data", Value::from(vec![addr_dict]));
-                }
+        // Try to find and update an existing NM connection for this interface
+        // to avoid creating duplicate connection profiles.
+        if let Some(settings_path) = self.find_connection_for_interface(name).await {
+            debug!(interface = name, path = %settings_path, "Updating existing NM connection");
 
-                if let Some(gw) = gw_str.as_deref() {
-                    ipv4.insert("gateway", Value::from(gw));
-                }
+            let settings = build_settings();
 
-                if !dns_strings.is_empty() {
-                    let dns_strs: Vec<&str> = dns_strings.iter().map(|s| s.as_str()).collect();
-                    // NM dns format for manual: use dns-data (aa{sv})
-                    let dns_data: Vec<HashMap<&str, Value<'_>>> = dns_strs
-                        .iter()
-                        .map(|d| {
-                            let mut m: HashMap<&str, Value<'_>> = HashMap::new();
-                            m.insert("address", Value::from(*d));
-                            m
-                        })
-                        .collect();
-                    ipv4.insert("dns-data", Value::from(dns_data));
-                }
-            }
-            IpMethod::Disabled => {
-                ipv4.insert("method", Value::from("disabled"));
+            // Update the existing connection via Settings.Connection.Update()
+            if let Err(e) = self
+                .dbus_conn
+                .call_method(
+                    Some("org.freedesktop.NetworkManager"),
+                    settings_path.as_str(),
+                    Some("org.freedesktop.NetworkManager.Settings.Connection"),
+                    "Update",
+                    &(settings,),
+                )
+                .await
+            {
+                warn!(error = %e, "Failed to update existing connection, falling back to AddAndActivate");
+            } else {
+                // Reactivate the updated connection.
+                let settings_ref = ObjectPath::try_from(settings_path.as_str())
+                    .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
+                let device_ref = ObjectPath::try_from(device_path.as_str())
+                    .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
+                let root = ObjectPath::try_from("/")
+                    .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
+
+                nm.activate_connection(&settings_ref, &device_ref, &root)
+                    .await
+                    .map_err(|e| {
+                        NetworkError::ConfigError(format!(
+                            "Failed to reactivate connection for {name}: {e}"
+                        ))
+                    })?;
+
+                info!(
+                    interface = name,
+                    "Interface configuration updated and reactivated"
+                );
+                return Ok(());
             }
         }
-        conn_settings.insert("ipv4", ipv4);
 
-        // ipv6 — keep auto
-        let mut ipv6: HashMap<&str, Value<'_>> = HashMap::new();
-        ipv6.insert("method", Value::from("auto"));
-        conn_settings.insert("ipv6", ipv6);
-
+        // Fallback: create a new connection (first time configuration).
+        let settings = build_settings();
         let device_path_ref = ObjectPath::try_from(device_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
         let root_path = ObjectPath::try_from("/")
             .map_err(|e| NetworkError::DBusError(format!("Invalid root path: {e}")))?;
 
-        nm.add_and_activate_connection(conn_settings, &device_path_ref, &root_path)
+        nm.add_and_activate_connection(settings, &device_path_ref, &root_path)
             .await
             .map_err(|e| {
                 NetworkError::ConfigError(format!("Failed to apply configuration for {name}: {e}"))
@@ -699,7 +937,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
         info!(
             interface = name,
-            "Interface configuration applied successfully"
+            "Interface configuration created and applied"
         );
         Ok(())
     }
@@ -729,8 +967,40 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .map(|m| m.body().deserialize::<()>().unwrap_or(()))
             .map_err(|e| NetworkError::WifiScanFailed(format!("RequestScan failed: {e}")))?;
 
-        // Brief wait for scan results.
-        sleep(Duration::from_secs(2)).await;
+        // Poll for scan completion with adaptive backoff instead of a fixed 2s sleep.
+        // NM updates LastScan timestamp when the scan finishes; we poll until it changes
+        // or a timeout is reached.
+        let scan_timeout = Duration::from_secs(5);
+        let scan_start = std::time::Instant::now();
+        let mut poll_interval = Duration::from_millis(200);
+
+        let last_scan_before: i64 = self
+            .get_property(&dev_path_ref, wireless_iface, "LastScan")
+            .await
+            .ok()
+            .and_then(|v| v.downcast_ref::<i64>().ok())
+            .unwrap_or(-1);
+
+        loop {
+            sleep(poll_interval).await;
+
+            let last_scan_now: i64 = self
+                .get_property(&dev_path_ref, wireless_iface, "LastScan")
+                .await
+                .ok()
+                .and_then(|v| v.downcast_ref::<i64>().ok())
+                .unwrap_or(-1);
+
+            if last_scan_now > last_scan_before {
+                break;
+            }
+            if scan_start.elapsed() >= scan_timeout {
+                debug!("Wi-Fi scan poll timed out, reading available results");
+                break;
+            }
+            // Exponential backoff: 200ms → 400ms → 800ms (capped)
+            poll_interval = (poll_interval * 2).min(Duration::from_millis(800));
+        }
 
         // Read access points.
         let ap_paths: Vec<OwnedObjectPath> = proxy
@@ -791,7 +1061,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             let rsn_flags = prop_u32(&ap_props, "RsnFlags").unwrap_or(0);
 
             let channel = frequency_to_channel(frequency);
-            let band = crate::network::platform::linux::frequency_to_band(frequency);
+            let band = frequency_to_band(frequency);
             let security = derive_security(flags, wpa_flags, rsn_flags);
 
             let is_connected = active_ap
@@ -812,15 +1082,16 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             });
         }
 
-        // Sort by signal descending, deduplicate by SSID (keep strongest).
-        results.sort_by(|a, b| b.signal_quality.cmp(&a.signal_quality));
-        let mut seen = std::collections::HashSet::new();
-        results.retain(|ap| {
-            if ap.ssid.is_empty() {
-                return false;
-            }
-            seen.insert(ap.ssid.clone())
+        // Remove empty SSIDs, sort by signal descending, then deduplicate by SSID.
+        // Since the list is sorted by signal strength, `dedup_by` keeps the strongest.
+        results.retain(|ap| !ap.ssid.is_empty());
+        results.sort_unstable_by(|a, b| {
+            a.ssid
+                .cmp(&b.ssid)
+                .then(b.signal_quality.cmp(&a.signal_quality))
         });
+        results.dedup_by(|a, b| a.ssid == b.ssid);
+        results.sort_unstable_by(|a, b| b.signal_quality.cmp(&a.signal_quality));
 
         Ok(results)
     }
@@ -877,7 +1148,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let root_path = ObjectPath::try_from("/")
             .map_err(|e| NetworkError::DBusError(format!("Invalid root path: {e}")))?;
 
-        let (_, active_conn_path) = nm
+        let (conn_settings_path, active_conn_path) = nm
             .add_and_activate_connection(conn_settings, &dev_path_ref, &root_path)
             .await
             .map_err(|e| {
@@ -890,13 +1161,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let active_path_ref = ObjectPath::try_from(active_conn_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid active conn path: {e}")))?;
 
-        loop {
+        let result = loop {
             if start.elapsed() > Duration::from_secs(timeout_secs) {
-                return Err(NetworkError::WifiConnectionTimeout {
+                break Err(NetworkError::WifiConnectionTimeout {
                     ssid: request.ssid.clone(),
                     timeout_secs,
-                }
-                .into());
+                });
             }
 
             let state = self
@@ -914,20 +1184,28 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 // NM_ACTIVE_CONNECTION_STATE_ACTIVATED = 2
                 2 => {
                     info!(ssid = %request.ssid, "Wi-Fi connection established");
-                    break;
+                    break Ok(());
                 }
                 // NM_ACTIVE_CONNECTION_STATE_DEACTIVATED = 4
                 4 => {
-                    return Err(NetworkError::WifiError(format!(
+                    break Err(NetworkError::WifiError(format!(
                         "Connection to '{}' was rejected or failed",
                         request.ssid
-                    ))
-                    .into());
+                    )));
                 }
                 _ => {
                     sleep(Duration::from_millis(500)).await;
                 }
             }
+        };
+
+        // On failure or timeout, clean up the connection profile NM created
+        // to avoid accumulating orphaned connection entries.
+        if let Err(e) = result {
+            warn!(error = %e, "Wi-Fi connection failed, cleaning up NM connection profile");
+            self.cleanup_connection_profile(&active_conn_path, &conn_settings_path)
+                .await;
+            return Err(e.into());
         }
 
         // Return updated status.
@@ -967,23 +1245,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let dev_path = match self.find_wireless_device(interface_name).await {
             Ok(p) => p,
             Err(_) => {
-                return Ok(WifiStaStatus {
-                    connected: false,
-                    interface_name: None,
-                    ssid: None,
-                    bssid: None,
-                    security: None,
-                    band: None,
-                    channel: None,
-                    frequency: None,
-                    signal_dbm: None,
-                    signal_quality: None,
-                    ip_address: None,
-                    gateway: None,
-                    dns: Vec::new(),
-                    speed_mbps: None,
-                    connected_secs: None,
-                });
+                return Ok(WifiStaStatus::default());
             }
         };
 
@@ -1000,21 +1262,9 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
         if state != NM_DEVICE_STATE_ACTIVATED {
             return Ok(WifiStaStatus {
-                connected: false,
                 interface_name: iface_name,
-                ssid: None,
-                bssid: None,
-                security: None,
-                band: None,
-                channel: None,
-                frequency: None,
-                signal_dbm: None,
-                signal_quality: None,
-                ip_address: None,
-                gateway: None,
-                dns: Vec::new(),
                 speed_mbps: speed,
-                connected_secs: None,
+                ..Default::default()
             });
         }
 
@@ -1090,25 +1340,27 @@ impl PlatformNetworkManager for LinuxNetworkManager {
     }
 
     async fn ap_status(&self) -> NGResult<ApStatus> {
-        use crate::network::ap_manager::ApServiceManager;
-
-        // Resolve ap_mode from cached capabilities.
-        let caps = self.detect_capabilities().await.ok();
-        let ap_mode = caps
-            .as_ref()
-            .map(|c| c.ap_mode)
-            .unwrap_or(ApMode::Unavailable);
+        // Use locally cached ap_mode to avoid expensive detect_capabilities on every call.
+        // Falls back to a fresh detection if no cached value exists.
+        let ap_mode = {
+            let cached = self.cached_ap_mode.read().await;
+            match *cached {
+                Some(mode) => mode,
+                None => {
+                    drop(cached);
+                    let caps = self.detect_capabilities().await.ok();
+                    caps.map(|c| c.ap_mode).unwrap_or(ApMode::Unavailable)
+                }
+            }
+        };
         let sta_will_disconnect = ap_mode == ApMode::Exclusive;
 
         let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
-        let svc_status =
-            mgr.status()
-                .await
-                .unwrap_or(crate::network::ap_manager::ApServiceStatus {
-                    setup_active: false,
-                    hostapd_active: false,
-                    dnsmasq_active: false,
-                });
+        let svc_status = mgr.status().await.unwrap_or(ApServiceStatus {
+            setup_active: false,
+            hostapd_active: false,
+            dnsmasq_active: false,
+        });
 
         if !svc_status.ap_broadcasting() {
             return Ok(ApStatus {
@@ -1128,11 +1380,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         }
 
         // Read hostapd.conf for SSID / channel / hw_mode.
-        let conf_path = format!(
-            "{}/{}",
-            crate::network::ap_config::AP_CONFIG_DIR,
-            crate::network::ap_config::HOSTAPD_CONF_FILE
-        );
+        let conf_path = format!("{AP_CONFIG_DIR}/{HOSTAPD_CONF_FILE}");
         let conf_content = tokio::fs::read_to_string(&conf_path)
             .await
             .unwrap_or_default();
@@ -1157,11 +1405,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         });
 
         // Read ap-env for IP info.
-        let env_path = format!(
-            "{}/{}",
-            crate::network::ap_config::AP_CONFIG_DIR,
-            crate::network::ap_config::AP_ENV_FILE
-        );
+        let env_path = format!("{AP_CONFIG_DIR}/{AP_ENV_FILE}");
         let env_content = tokio::fs::read_to_string(&env_path)
             .await
             .unwrap_or_default();
@@ -1180,7 +1424,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             band,
             channel,
             frequency,
-            security: Some(WifiSecurity::Wpa2Psk),
+            security: Some(parse_hostapd_security(&conf_content)),
             connected_clients,
             ip_address,
             prefix_length,
@@ -1201,9 +1445,11 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         }
 
         // In exclusive mode, stash STA connection for restore after stop_ap, then disconnect.
+        // Persist to disk so gateway restarts don't lose the restore info.
         if caps.ap_mode == ApMode::Exclusive {
             info!("Exclusive mode: stashing STA connection and disconnecting");
             if let Some(stashed) = self.stash_active_sta_connection().await {
+                stashed.persist().await;
                 let mut guard = self.stashed_sta_for_restore.write().await;
                 *guard = Some(stashed);
             }
@@ -1226,9 +1472,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
         mgr.stop_all().await?;
 
-        // In exclusive mode, restore the previously disconnected STA connection.
+        // In exclusive mode, restore the previously disconnected STA connection
+        // and clean up the persisted restore file.
         let stashed = self.stashed_sta_for_restore.write().await.take();
         if let Some(s) = stashed {
+            StashedStaConnection::remove().await;
+
             let conn_ref = ObjectPath::try_from(s.connection_path.as_str())
                 .map_err(|e| NetworkError::DBusError(format!("Invalid connection path: {e}")))?;
             let dev_ref = ObjectPath::try_from(s.device_path.as_str())
@@ -1330,7 +1579,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             if let Err(e) = mgr.restart_hostapd().await {
                 warn!(error = %e, "hostapd restart failed, restoring backup");
                 ap_config::restore_ap_config(AP_CONFIG_DIR).await?;
-                let _ = mgr.restart_hostapd().await;
+                if let Err(restore_err) = mgr.restart_hostapd().await {
+                    tracing::error!(
+                        error = %restore_err,
+                        "CRITICAL: hostapd restart after rollback also failed — AP is in degraded state"
+                    );
+                }
                 return Err(NetworkError::ApConfigRollback {
                     reason: e.to_string(),
                 }
@@ -1415,18 +1669,40 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 continue;
             }
 
-            // Re-apply interface config with the new DNS servers.
+            // Preserve the current IP method so we don't accidentally
+            // switch a static-IP interface to DHCP.
+            let current_ip4 = self.read_ipv4_config(&dev_props).await.ok();
+            let current_method = current_ip4
+                .as_ref()
+                .map(|c| c.method)
+                .unwrap_or(IpMethod::Dhcp);
+
             let dns_list: Vec<IpAddr> = config
                 .servers
                 .iter()
                 .filter_map(|s| s.to_string().parse::<IpAddr>().ok())
                 .collect();
 
+            let (ip_address, prefix_length, gateway) = if current_method == IpMethod::Static {
+                let addr = current_ip4
+                    .as_ref()
+                    .and_then(|c| c.addresses.first())
+                    .map(|a| a.address);
+                let prefix = current_ip4
+                    .as_ref()
+                    .and_then(|c| c.addresses.first())
+                    .map(|a| a.prefix_length);
+                let gw = current_ip4.as_ref().and_then(|c| c.gateway);
+                (addr, prefix, gw)
+            } else {
+                (None, None, None)
+            };
+
             let apply_config = ConfigureInterfaceRequest {
-                method: IpMethod::Dhcp,
-                ip_address: None,
-                prefix_length: None,
-                gateway: None,
+                method: current_method,
+                ip_address,
+                prefix_length,
+                gateway,
                 dns: if dns_list.is_empty() {
                     None
                 } else {
@@ -1540,51 +1816,69 @@ fn quality_to_rssi(quality: u8) -> i32 {
 
 // ─── D-Bus Property Extraction Helpers ───
 
-/// Look up a key in a zvariant Dict by iterating entries.
+/// Trait for extracting typed values from NM property maps.
 ///
-/// `Dict::get` has complex lifetime constraints that make it hard to call
-/// with string literal keys. Iteration is O(n) but NM dicts are tiny.
-fn dict_lookup_str(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<String> {
-    dict.iter()
-        .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
-        .and_then(|(_, v)| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
+/// Centralizes the repetitive `downcast_ref` pattern into a single generic lookup.
+trait NmPropExtract: Sized {
+    fn extract(value: &OwnedValue) -> Option<Self>;
 }
 
-fn dict_lookup_u32(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<u32> {
-    dict.iter()
-        .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
-        .and_then(|(_, v)| v.downcast_ref::<u32>().ok())
+impl NmPropExtract for String {
+    fn extract(value: &OwnedValue) -> Option<Self> {
+        value.downcast_ref::<&str>().ok().map(|s| s.to_string())
+    }
 }
 
+impl NmPropExtract for u32 {
+    fn extract(value: &OwnedValue) -> Option<Self> {
+        value.downcast_ref::<u32>().ok()
+    }
+}
+
+impl NmPropExtract for u8 {
+    fn extract(value: &OwnedValue) -> Option<Self> {
+        value.downcast_ref::<u8>().ok()
+    }
+}
+
+impl NmPropExtract for i64 {
+    fn extract(value: &OwnedValue) -> Option<Self> {
+        value.downcast_ref::<i64>().ok()
+    }
+}
+
+/// Generic D-Bus property lookup from a `HashMap<String, OwnedValue>`.
+fn prop<T: NmPropExtract>(props: &HashMap<String, OwnedValue>, key: &str) -> Option<T> {
+    props.get(key).and_then(T::extract)
+}
+
+/// Convenience aliases for backward compatibility and readability.
+#[inline]
 fn prop_str(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    props
-        .get(key)
-        .and_then(|v| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
+    prop::<String>(props, key)
 }
 
+#[inline]
 fn prop_u32(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
-    props.get(key).and_then(|v| v.downcast_ref::<u32>().ok())
+    prop::<u32>(props, key)
 }
 
+#[inline]
 fn prop_u8(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u8> {
-    props.get(key).and_then(|v| v.downcast_ref::<u8>().ok())
+    prop::<u8>(props, key)
 }
 
 fn prop_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec<u8>> {
     props.get(key).and_then(|v| {
-        // NM Ssid is `ay` (array of bytes).
-        if let Ok(arr) = v.downcast_ref::<&zbus::zvariant::Array>() {
-            let bytes: Vec<u8> = arr
-                .iter()
-                .filter_map(|item| item.downcast_ref::<u8>().ok())
-                .collect();
-            if bytes.is_empty() {
-                None
-            } else {
-                Some(bytes)
-            }
-        } else {
+        let arr = v.downcast_ref::<&zbus::zvariant::Array>().ok()?;
+        let bytes: Vec<u8> = arr
+            .iter()
+            .filter_map(|item| item.downcast_ref::<u8>().ok())
+            .collect();
+        if bytes.is_empty() {
             None
+        } else {
+            Some(bytes)
         }
     })
 }
@@ -1595,6 +1889,21 @@ fn prop_object_path(props: &HashMap<String, OwnedValue>, key: &str) -> Option<St
             .ok()
             .map(|p| p.to_string())
     })
+}
+
+/// Look up a key in a zvariant Dict by iterating entries.
+///
+/// `Dict::get` has complex lifetime constraints; iteration is O(n) but NM dicts are tiny.
+fn dict_lookup_str(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<String> {
+    dict.iter()
+        .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
+        .and_then(|(_, v)| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
+}
+
+fn dict_lookup_u32(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<u32> {
+    dict.iter()
+        .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
+        .and_then(|(_, v)| v.downcast_ref::<u32>().ok())
 }
 
 /// Parse NM IP4Config AddressData property.
@@ -1678,30 +1987,32 @@ fn parse_nm_ip6_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> 
     parse_nm_ip4_nameservers(props) // Same format
 }
 
+/// Read a single sysfs statistic for an interface (async, non-blocking).
+async fn read_sysfs_stat(iface: &str, stat: &str) -> Option<u64> {
+    tokio::fs::read_to_string(format!("/sys/class/net/{iface}/statistics/{stat}"))
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
 /// Read Rx/Tx byte counters from `/sys/class/net/<iface>/statistics/`.
-fn read_sysfs_traffic(iface: &str) -> (Option<u64>, Option<u64>) {
-    let rx = std::fs::read_to_string(format!("/sys/class/net/{iface}/statistics/rx_bytes"))
-        .ok()
-        .and_then(|s| s.trim().parse().ok());
-    let tx = std::fs::read_to_string(format!("/sys/class/net/{iface}/statistics/tx_bytes"))
-        .ok()
-        .and_then(|s| s.trim().parse().ok());
+async fn read_sysfs_traffic(iface: &str) -> (Option<u64>, Option<u64>) {
+    let (rx, tx) = tokio::join!(
+        read_sysfs_stat(iface, "rx_bytes"),
+        read_sysfs_stat(iface, "tx_bytes"),
+    );
     (rx, tx)
 }
 
 /// Read packet counters from `/sys/class/net/<iface>/statistics/`.
-fn read_sysfs_counters(iface: &str) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
-    let read = |stat: &str| -> Option<u64> {
-        std::fs::read_to_string(format!("/sys/class/net/{iface}/statistics/{stat}"))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-    };
-    (
-        read("rx_packets"),
-        read("tx_packets"),
-        read("rx_errors"),
-        read("tx_errors"),
-    )
+async fn read_sysfs_counters(iface: &str) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+    let (rx_packets, tx_packets, rx_errors, tx_errors) = tokio::join!(
+        read_sysfs_stat(iface, "rx_packets"),
+        read_sysfs_stat(iface, "tx_packets"),
+        read_sysfs_stat(iface, "rx_errors"),
+        read_sysfs_stat(iface, "tx_errors"),
+    );
+    (rx_packets, tx_packets, rx_errors, tx_errors)
 }
 
 // ─── Configuration File Parsing Helpers ───
@@ -1738,6 +2049,21 @@ fn parse_env_value(content: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Derive the Wi-Fi security type from hostapd.conf content.
+fn parse_hostapd_security(conf_content: &str) -> WifiSecurity {
+    let wpa_val = parse_conf_value(conf_content, "wpa");
+    let key_mgmt = parse_conf_value(conf_content, "wpa_key_mgmt");
+
+    match (wpa_val.as_deref(), key_mgmt.as_deref()) {
+        (Some("2"), Some("SAE")) => WifiSecurity::Wpa3Sae,
+        (Some("2"), _) => WifiSecurity::Wpa2Psk,
+        (Some("1"), _) => WifiSecurity::WpaPsk,
+        (Some("3"), _) => WifiSecurity::Wpa2Psk, // mixed mode WPA/WPA2
+        (None, _) | (Some("0"), _) => WifiSecurity::Open,
+        _ => WifiSecurity::Unknown,
+    }
+}
+
 /// Count connected clients via hostapd's control interface.
 ///
 /// Sends the `STA-FIRST` / `STA-NEXT` commands to the UNIX socket at
@@ -1761,6 +2087,7 @@ async fn count_hostapd_clients(iface: &str) -> Option<u32> {
 
     let mut buf = [0u8; 4096];
     let mut count: u32 = 0;
+    const MAX_CLIENTS: u32 = 255;
 
     loop {
         let n = tokio::time::timeout(Duration::from_millis(200), sock.recv(&mut buf))
@@ -1774,6 +2101,9 @@ async fn count_hostapd_clients(iface: &str) -> Option<u32> {
         }
 
         count += 1;
+        if count >= MAX_CLIENTS {
+            break;
+        }
 
         // Extract MAC from first line for STA-NEXT.
         let mac = resp.lines().next().unwrap_or("");

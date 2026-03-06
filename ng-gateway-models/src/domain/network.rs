@@ -253,7 +253,7 @@ pub struct WifiAccessPoint {
 }
 
 /// Wi-Fi STA connection status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WifiStaStatus {
     pub connected: bool,

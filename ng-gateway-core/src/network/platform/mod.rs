@@ -192,15 +192,15 @@ pub async fn scan_wifi_native() -> NGResult<Vec<WifiAccessPoint>> {
                 })
                 .collect();
 
-            // Sort by signal descending, deduplicate by SSID.
-            aps.sort_by(|a, b| b.signal_quality.cmp(&a.signal_quality));
-            let mut seen = std::collections::HashSet::new();
-            aps.retain(|ap| {
-                if ap.ssid.is_empty() {
-                    return false;
-                }
-                seen.insert(ap.ssid.clone())
+            // Remove empty SSIDs, sort by signal descending, then deduplicate by SSID.
+            aps.retain(|ap| !ap.ssid.is_empty());
+            aps.sort_unstable_by(|a, b| {
+                a.ssid
+                    .cmp(&b.ssid)
+                    .then(b.signal_quality.cmp(&a.signal_quality))
             });
+            aps.dedup_by(|a, b| a.ssid == b.ssid);
+            aps.sort_unstable_by(|a, b| b.signal_quality.cmp(&a.signal_quality));
 
             Ok(aps)
         }
@@ -212,10 +212,19 @@ pub async fn scan_wifi_native() -> NGResult<Vec<WifiAccessPoint>> {
 }
 
 /// Convert RSSI (dBm) to quality percentage [0-100].
+///
+/// Handles cross-platform differences: some drivers/platforms report signal
+/// as a percentage (0-100) rather than dBm. Values in [0, 100] are treated
+/// as already-converted quality; negative values are treated as dBm.
 fn rssi_to_quality(rssi: i32) -> u8 {
-    match rssi {
-        r if r >= -30 => 100,
-        r if r <= -90 => 0,
-        r => ((r + 90) as u8 * 100 / 60).min(100),
+    if rssi >= 0 {
+        // Already a percentage (e.g., macOS CoreWLAN or some Windows drivers).
+        (rssi as u8).min(100)
+    } else {
+        match rssi {
+            r if r >= -30 => 100,
+            r if r <= -90 => 0,
+            r => ((r + 90) as u8 * 100 / 60).min(100),
+        }
     }
 }
