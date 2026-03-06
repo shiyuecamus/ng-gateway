@@ -77,6 +77,9 @@ pub enum WifiMode {
 }
 
 /// STA + AP concurrency support level detected at runtime via `iw phy info`.
+///
+/// This is the raw hardware capability value used for diagnostics.
+/// For UI decision-making, prefer [`ApMode`] which provides clearer semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StaApCapability {
@@ -88,6 +91,39 @@ pub enum StaApCapability {
     NotSupported,
     /// Unable to determine (macOS/Windows or detection failed).
     Unknown,
+}
+
+/// High-level AP operating mode derived from hardware capabilities.
+///
+/// This drives UI behavior (warnings, confirmations) and backend logic
+/// (whether to disconnect STA before starting AP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApMode {
+    /// STA + AP concurrent on a single card — no STA disruption.
+    Concurrent,
+    /// AP uses a dedicated second wireless card — no STA disruption.
+    DedicatedCard,
+    /// AP and STA are mutually exclusive (single card, driver doesn't support concurrency).
+    /// Starting AP will disconnect the current Wi-Fi STA connection.
+    Exclusive,
+    /// AP is not available (no wireless hardware or no AP mode support).
+    Unavailable,
+}
+
+/// Action to perform on the AP hotspot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApAction {
+    Start,
+    Stop,
+}
+
+/// Request to start or stop the AP hotspot.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlApRequest {
+    pub action: ApAction,
 }
 
 /// Platform network management capability.
@@ -255,6 +291,10 @@ pub struct ApStatus {
     pub ip_address: Option<IpAddr>,
     /// Subnet mask prefix length.
     pub prefix_length: Option<u8>,
+    /// High-level AP operating mode.
+    pub ap_mode: ApMode,
+    /// Whether starting the AP will disconnect the current Wi-Fi STA connection.
+    pub sta_will_disconnect: bool,
 }
 
 /// DNS configuration.
@@ -291,7 +331,9 @@ pub struct NetworkCapabilities {
     pub can_connect_wifi: bool,
     /// Whether AP management is supported.
     pub can_manage_ap: bool,
-    /// STA + AP concurrency support.
+    /// High-level AP operating mode for UI decision-making.
+    pub ap_mode: ApMode,
+    /// Raw STA + AP concurrency support (diagnostics).
     pub sta_ap_capability: StaApCapability,
     /// List of wireless interfaces with their capabilities.
     pub wireless_interfaces: Vec<WirelessInterfaceCapability>,
@@ -311,6 +353,24 @@ pub struct WirelessInterfaceCapability {
     pub supported_bands: Vec<WifiBand>,
     /// Current mode.
     pub current_mode: Option<WifiMode>,
+}
+
+// ─────────────────── Path / Query Params ───────────────────
+
+/// Path parameter for interface name in REST routes (e.g. `/interfaces/{name}`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterfaceNamePath {
+    /// System interface name (e.g. "eth0", "wlan0", "enp2s0").
+    pub name: String,
+}
+
+/// Optional query parameter for Wi-Fi interface selection.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiInterfaceQuery {
+    /// Specific wireless interface to use (defaults to first available).
+    pub interface: Option<String>,
 }
 
 // ─────────────────── Requests ───────────────────

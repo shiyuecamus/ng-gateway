@@ -7,7 +7,9 @@
 //!
 //! This module is used on Linux; other platforms return `Unknown` capabilities.
 
-use ng_gateway_models::domain::prelude::{StaApCapability, WifiBand, WirelessInterfaceCapability};
+use ng_gateway_models::domain::prelude::{
+    ApMode, StaApCapability, WifiBand, WirelessInterfaceCapability,
+};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
@@ -203,6 +205,11 @@ fn extract_frequency(line: &str) -> Option<u32> {
 }
 
 /// Aggregate per-interface capabilities into a single `StaApCapability` for the platform.
+///
+/// Some drivers (especially Realtek) report AP in `Supported interface modes` but omit
+/// `valid interface combinations`, causing `supports_sta_ap_concurrent` to be false.
+/// We treat those as `Unknown` rather than `NotSupported` so that the AP management
+/// UI remains available — the user can still run AP in exclusive mode.
 pub fn aggregate_sta_ap_capability(interfaces: &[WirelessInterfaceCapability]) -> StaApCapability {
     if interfaces.is_empty() {
         return StaApCapability::NotSupported;
@@ -218,7 +225,45 @@ pub fn aggregate_sta_ap_capability(interfaces: &[WirelessInterfaceCapability]) -
         return StaApCapability::DualCard;
     }
 
+    // Single card with AP in supported modes but no `valid interface combinations`
+    // reported — the driver likely supports AP but doesn't advertise concurrency.
+    let supports_ap_mode = interfaces.iter().any(|i| {
+        i.supported_modes
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case("ap"))
+    });
+    if supports_ap_mode {
+        return StaApCapability::Unknown;
+    }
+
     StaApCapability::NotSupported
+}
+
+/// Derive the high-level [`ApMode`] from raw hardware capabilities.
+///
+/// This translates the low-level `StaApCapability` + per-interface mode info
+/// into a single actionable enum that drives both UI behavior and backend logic.
+pub fn determine_ap_mode(
+    interfaces: &[WirelessInterfaceCapability],
+    sta_ap: StaApCapability,
+) -> ApMode {
+    match sta_ap {
+        StaApCapability::SingleCardConcurrent => ApMode::Concurrent,
+        StaApCapability::DualCard => ApMode::DedicatedCard,
+        StaApCapability::Unknown => {
+            let has_ap_mode = interfaces.iter().any(|i| {
+                i.supported_modes
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case("ap"))
+            });
+            if has_ap_mode {
+                ApMode::Exclusive
+            } else {
+                ApMode::Unavailable
+            }
+        }
+        StaApCapability::NotSupported => ApMode::Unavailable,
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +320,83 @@ Wiphy phy0
            total <= 1, #channels <= 1
 "#;
         assert!(!parse_sta_ap_concurrent(output));
+    }
+
+    #[test]
+    fn test_aggregate_single_card_with_ap_no_combinations() {
+        // Realtek-style driver: supports AP mode but no `valid interface combinations`.
+        let iface = WirelessInterfaceCapability {
+            name: "wlP2p33s0".to_string(),
+            phy: "phy0".to_string(),
+            supported_modes: vec![
+                "managed".to_string(),
+                "AP".to_string(),
+                "monitor".to_string(),
+            ],
+            supports_sta_ap_concurrent: false,
+            supported_bands: vec![WifiBand::Band2_4Ghz, WifiBand::Band5Ghz],
+            current_mode: None,
+        };
+        assert_eq!(
+            aggregate_sta_ap_capability(&[iface]),
+            StaApCapability::Unknown,
+        );
+    }
+
+    #[test]
+    fn test_aggregate_single_card_no_ap_mode() {
+        // Card that only supports managed mode — truly not AP capable.
+        let iface = WirelessInterfaceCapability {
+            name: "wlan0".to_string(),
+            phy: "phy0".to_string(),
+            supported_modes: vec!["managed".to_string()],
+            supports_sta_ap_concurrent: false,
+            supported_bands: vec![WifiBand::Band2_4Ghz],
+            current_mode: None,
+        };
+        assert_eq!(
+            aggregate_sta_ap_capability(&[iface]),
+            StaApCapability::NotSupported,
+        );
+    }
+
+    #[test]
+    fn test_determine_ap_mode_concurrent() {
+        let iface = WirelessInterfaceCapability {
+            name: "wlan0".to_string(),
+            phy: "phy0".to_string(),
+            supported_modes: vec!["managed".to_string(), "AP".to_string()],
+            supports_sta_ap_concurrent: true,
+            supported_bands: vec![WifiBand::Band2_4Ghz],
+            current_mode: None,
+        };
+        assert_eq!(
+            determine_ap_mode(&[iface], StaApCapability::SingleCardConcurrent),
+            ApMode::Concurrent,
+        );
+    }
+
+    #[test]
+    fn test_determine_ap_mode_exclusive() {
+        let iface = WirelessInterfaceCapability {
+            name: "wlP2p33s0".to_string(),
+            phy: "phy0".to_string(),
+            supported_modes: vec!["managed".to_string(), "AP".to_string()],
+            supports_sta_ap_concurrent: false,
+            supported_bands: vec![WifiBand::Band2_4Ghz, WifiBand::Band5Ghz],
+            current_mode: None,
+        };
+        assert_eq!(
+            determine_ap_mode(&[iface], StaApCapability::Unknown),
+            ApMode::Exclusive,
+        );
+    }
+
+    #[test]
+    fn test_determine_ap_mode_unavailable() {
+        assert_eq!(
+            determine_ap_mode(&[], StaApCapability::NotSupported),
+            ApMode::Unavailable,
+        );
     }
 }

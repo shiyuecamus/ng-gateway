@@ -198,6 +198,18 @@ impl NetworkService {
         self.manager.ap_status().await
     }
 
+    /// Start the AP hotspot.
+    #[inline]
+    pub async fn start_ap(&self) -> NGResult<ApStatus> {
+        self.manager.start_ap().await
+    }
+
+    /// Stop the AP hotspot.
+    #[inline]
+    pub async fn stop_ap(&self) -> NGResult<ApStatus> {
+        self.manager.stop_ap().await
+    }
+
     /// Configure AP hotspot.
     #[inline]
     pub async fn configure_ap(&self, config: &ConfigureApRequest) -> NGResult<ApStatus> {

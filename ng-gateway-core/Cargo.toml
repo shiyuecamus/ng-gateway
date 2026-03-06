@@ -98,3 +98,6 @@ workspace = true
 # D-Bus (Linux only) — NetworkManager integration for Wi-Fi/AP/interface management
 [target.'cfg(target_os = "linux")'.dependencies.zbus]
 workspace = true
+# Config loading (Linux only) — for AP hotspot default config generation from gateway.toml
+[target.'cfg(target_os = "linux")'.dependencies.config]
+workspace = true

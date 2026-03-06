@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use network_interface::{Addr, NetworkInterfaceConfig};
 use ng_gateway_error::{network::NetworkError, NGResult};
 use ng_gateway_models::domain::prelude::{
-    ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config, LinkState,
-    NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary, PlatformSupport,
-    StaApCapability, WifiAccessPoint, WifiConnectRequest, WifiMode, WifiStaStatus,
+    ApMode, ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest,
+    DnsConfig, InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config,
+    LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
+    PlatformSupport, StaApCapability, WifiAccessPoint, WifiConnectRequest, WifiMode, WifiStaStatus,
 };
 use std::{collections::BTreeMap, net::IpAddr};
 use tokio::process::Command;
@@ -194,6 +194,7 @@ impl PlatformNetworkManager for MacosNetworkManager {
             can_scan_wifi: true,
             can_connect_wifi: false,
             can_manage_ap: false,
+            ap_mode: ApMode::Unavailable,
             sta_ap_capability: StaApCapability::Unknown,
             wireless_interfaces: Vec::new(),
         })
@@ -288,7 +289,23 @@ impl PlatformNetworkManager for MacosNetworkManager {
             connected_clients: None,
             ip_address: None,
             prefix_length: None,
+            ap_mode: ApMode::Unavailable,
+            sta_will_disconnect: false,
         })
+    }
+
+    async fn start_ap(&self) -> NGResult<ApStatus> {
+        Err(NetworkError::PlatformNotSupported(
+            "AP management is not supported on macOS".to_string(),
+        )
+        .into())
+    }
+
+    async fn stop_ap(&self) -> NGResult<ApStatus> {
+        Err(NetworkError::PlatformNotSupported(
+            "AP management is not supported on macOS".to_string(),
+        )
+        .into())
     }
 
     async fn configure_ap(&self, _config: &ConfigureApRequest) -> NGResult<ApStatus> {

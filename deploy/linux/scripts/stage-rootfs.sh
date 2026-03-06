@@ -113,5 +113,11 @@ if [[ -f "$init_net" ]]; then
   chmod +x "${opt_dir}/scripts/init-network.sh"
 fi
 
+# ng-gateway main service unit (always deployed).
+main_unit="${REPO_ROOT}/deploy/linux/systemd/ng-gateway.service"
+if [[ -f "$main_unit" ]]; then
+  cp -f "$main_unit" "${opt_dir}/systemd/ng-gateway.service"
+fi
+
 echo "[ok] staged rootfs at: ${ROOTFS_DIR}"
 

@@ -40,7 +40,9 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/wifi/status", web::get().to(wifi_status))
         // Phase 4: AP Hotspot
         .route("/ap", web::get().to(get_ap_status))
-        .route("/ap", web::put().to(configure_ap));
+        .route("/ap", web::put().to(configure_ap))
+        .route("/ap/start", web::post().to(start_ap))
+        .route("/ap/stop", web::post().to(stop_ap));
 }
 
 /// Initialize RBAC rules for network module (admin only).
@@ -52,7 +54,7 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing network module RBAC rules...");
 
-    let rules: [(Method, String, Box<dyn PermRule>); 13] = [
+    let rules: [(Method, String, Box<dyn PermRule>); 15] = [
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/interfaces"),
@@ -118,6 +120,16 @@ pub(crate) async fn init_rbac_rules(
             format!("{router_prefix}{ROUTER_PREFIX}/ap"),
             Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
         ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/ap/start"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/ap/stop"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
     ];
 
     for (method, path, rule) in rules {
@@ -141,11 +153,6 @@ async fn list_interfaces(
         .await
         .map_err(|e| WebError::InternalError(format!("Failed to list interfaces: {e}")))?;
     Ok(WebResponse::ok(interfaces))
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct InterfaceNamePath {
-    name: String,
 }
 
 /// `GET /network/interfaces/{name}` — Get detailed interface info.
@@ -239,12 +246,6 @@ async fn configure_dns(
 
 // ─── Phase 3: Wi-Fi ───
 
-/// Optional query parameter for Wi-Fi interface selection.
-#[derive(Debug, serde::Deserialize)]
-pub struct WifiInterfaceQuery {
-    interface: Option<String>,
-}
-
 /// `GET /network/wifi/scan` — Scan for Wi-Fi access points.
 #[instrument(name = "network-wifi-scan", skip(_ctx, network))]
 async fn scan_wifi(
@@ -327,5 +328,36 @@ async fn configure_ap(
         .configure_ap(&payload.into_inner())
         .await
         .map_err(|e| WebError::InternalError(format!("Failed to configure AP: {e}")))?;
+    Ok(WebResponse::ok(status))
+}
+
+/// `POST /network/ap/start` — Start the AP hotspot.
+///
+/// In exclusive mode (single card, no STA+AP concurrency), this will disconnect
+/// the current Wi-Fi STA connection before starting the AP.
+#[instrument(name = "network-start-ap", skip_all)]
+async fn start_ap(
+    _ctx: RequestContext,
+    network: web::Data<Arc<NetworkService>>,
+) -> WebResult<WebResponse<ApStatus>> {
+    info!("AP start requested");
+    let status = network
+        .start_ap()
+        .await
+        .map_err(|e| WebError::InternalError(format!("Failed to start AP: {e}")))?;
+    Ok(WebResponse::ok(status))
+}
+
+/// `POST /network/ap/stop` — Stop the AP hotspot.
+#[instrument(name = "network-stop-ap", skip_all)]
+async fn stop_ap(
+    _ctx: RequestContext,
+    network: web::Data<Arc<NetworkService>>,
+) -> WebResult<WebResponse<ApStatus>> {
+    info!("AP stop requested");
+    let status = network
+        .stop_ap()
+        .await
+        .map_err(|e| WebError::InternalError(format!("Failed to stop AP: {e}")))?;
     Ok(WebResponse::ok(status))
 }

@@ -12,19 +12,22 @@
 use crate::network::{
     ap_config::{self, ApRenderContext, AP_CONFIG_DIR},
     ap_manager::ApServiceManager,
+    capability::{
+        aggregate_sta_ap_capability, detect_phy_capabilities, determine_ap_mode, resolve_phy_name,
+    },
     platform::PlatformNetworkManager,
 };
 use async_trait::async_trait;
 use ng_gateway_error::{network::NetworkError, NGResult};
 use ng_gateway_models::domain::prelude::{
-    ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config, LinkState,
-    NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary, PlatformSupport,
-    StaApCapability, WifiAccessPoint, WifiBand, WifiConnectRequest, WifiMode, WifiSecurity,
+    ApMode, ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest,
+    DnsConfig, InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config,
+    LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
+    PlatformSupport, WifiAccessPoint, WifiBand, WifiConnectRequest, WifiMode, WifiSecurity,
     WifiStaStatus, WirelessInterfaceCapability,
 };
 use std::{collections::HashMap, net::IpAddr, time::Duration};
-use tokio::time::sleep;
+use tokio::{sync::RwLock, time::sleep};
 use tracing::{debug, info, warn};
 use zbus::{
     proxy,
@@ -91,9 +94,24 @@ const NM_DEVICE_STATE_DISCONNECTED: u32 = 30;
 const NM_DEVICE_STATE_UNAVAILABLE: u32 = 20;
 const NM_DEVICE_STATE_UNMANAGED: u32 = 10;
 
+/// Stashed STA connection info for restore-after-stop-AP in exclusive mode.
+///
+/// When starting AP in exclusive mode we disconnect STA; we save the NM connection
+/// and device paths so we can reactivate via `ActivateConnection` when the user stops AP.
+#[derive(Debug, Clone)]
+struct StashedStaConnection {
+    /// Settings connection path (org.freedesktop.NetworkManager.Settings.Connection).
+    connection_path: String,
+    /// Wi-Fi device path (org.freedesktop.NetworkManager.Device).
+    device_path: String,
+}
+
 /// Linux network manager backed by NetworkManager D-Bus.
 pub struct LinuxNetworkManager {
     dbus_conn: Connection,
+    /// In exclusive mode, STA is disconnected before AP start; this holds the connection
+    /// info for restore when the user stops AP.
+    stashed_sta_for_restore: RwLock<Option<StashedStaConnection>>,
 }
 
 impl LinuxNetworkManager {
@@ -104,7 +122,10 @@ impl LinuxNetworkManager {
         })?;
 
         info!("Connected to system D-Bus for NetworkManager");
-        Ok(Self { dbus_conn })
+        Ok(Self {
+            dbus_conn,
+            stashed_sta_for_restore: RwLock::new(None),
+        })
     }
 
     /// Create the NM root proxy.
@@ -378,6 +399,39 @@ impl LinuxNetworkManager {
                 .into(),
         )
     }
+
+    /// Stash the current active STA connection for later restore (exclusive mode only).
+    ///
+    /// Reads the ActiveConnection from the Wi-Fi device, then the Connection property
+    /// (settings path) from that ActiveConnection. Returns `None` if no active connection.
+    async fn stash_active_sta_connection(&self) -> Option<StashedStaConnection> {
+        let dev_path = self.find_wireless_device(None).await.ok()?;
+        let dev_path_ref = ObjectPath::try_from(dev_path.as_str()).ok()?;
+        let dev_props = self
+            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .await
+            .ok()?;
+
+        let active_conn_path = prop_object_path(&dev_props, "ActiveConnection")
+            .filter(|p| !p.is_empty() && p != "/")?;
+
+        let active_conn_ref = ObjectPath::try_from(active_conn_path.as_str()).ok()?;
+        let active_props = self
+            .get_all_properties(
+                &active_conn_ref,
+                "org.freedesktop.NetworkManager.Connection.Active",
+            )
+            .await
+            .ok()?;
+
+        let connection_path =
+            prop_object_path(&active_props, "Connection").filter(|p| !p.is_empty() && p != "/")?;
+
+        Some(StashedStaConnection {
+            connection_path,
+            device_path: dev_path.to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -500,10 +554,8 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
                 let iface_name = prop_str(&dev_props, "Interface").unwrap_or_default();
 
-                if let Some(phy) = crate::network::capability::resolve_phy_name(&iface_name).await {
-                    if let Some(cap) =
-                        crate::network::capability::detect_phy_capabilities(&iface_name, &phy).await
-                    {
+                if let Some(phy) = resolve_phy_name(&iface_name).await {
+                    if let Some(cap) = detect_phy_capabilities(&iface_name, &phy).await {
                         wireless_interfaces.push(cap);
                     }
                 }
@@ -511,10 +563,9 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         }
 
         let has_wifi = !wireless_interfaces.is_empty();
-        let sta_ap = crate::network::capability::aggregate_sta_ap_capability(&wireless_interfaces);
-        let can_manage_ap = has_wifi
-            && (sta_ap == StaApCapability::SingleCardConcurrent
-                || sta_ap == StaApCapability::DualCard);
+        let sta_ap = aggregate_sta_ap_capability(&wireless_interfaces);
+        let ap_mode = determine_ap_mode(&wireless_interfaces, sta_ap);
+        let can_manage_ap = !matches!(ap_mode, ApMode::Unavailable);
 
         Ok(NetworkCapabilities {
             platform: if nm_available {
@@ -530,6 +581,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             can_scan_wifi: nm_available && has_wifi,
             can_connect_wifi: nm_available && has_wifi,
             can_manage_ap,
+            ap_mode,
             sta_ap_capability: sta_ap,
             wireless_interfaces,
         })
@@ -1040,6 +1092,14 @@ impl PlatformNetworkManager for LinuxNetworkManager {
     async fn ap_status(&self) -> NGResult<ApStatus> {
         use crate::network::ap_manager::ApServiceManager;
 
+        // Resolve ap_mode from cached capabilities.
+        let caps = self.detect_capabilities().await.ok();
+        let ap_mode = caps
+            .as_ref()
+            .map(|c| c.ap_mode)
+            .unwrap_or(ApMode::Unavailable);
+        let sta_will_disconnect = ap_mode == ApMode::Exclusive;
+
         let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
         let svc_status =
             mgr.status()
@@ -1062,10 +1122,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 connected_clients: None,
                 ip_address: None,
                 prefix_length: None,
+                ap_mode,
+                sta_will_disconnect,
             });
         }
 
-        // Read hostapd.conf for SSID / channel.
+        // Read hostapd.conf for SSID / channel / hw_mode.
         let conf_path = format!(
             "{}/{}",
             crate::network::ap_config::AP_CONFIG_DIR,
@@ -1079,6 +1141,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let channel: Option<u32> =
             parse_conf_value(&conf_content, "channel").and_then(|s| s.parse().ok());
         let iface = parse_conf_value(&conf_content, "interface");
+
+        let band = match parse_conf_value(&conf_content, "hw_mode").as_deref() {
+            Some("a") => Some(WifiBand::Band5Ghz),
+            Some("g") | Some("b") => Some(WifiBand::Band2_4Ghz),
+            _ => Some(WifiBand::Band2_4Ghz),
+        };
 
         let frequency = channel.map(|ch| {
             if ch <= 14 {
@@ -1103,21 +1171,89 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let ip_address = ip_str.and_then(|s| s.parse::<IpAddr>().ok());
         let prefix_length: Option<u8> = prefix_str.and_then(|s| s.parse().ok());
 
-        // Try to count connected clients via hostapd ctrl_interface.
         let connected_clients = count_hostapd_clients(&iface.clone().unwrap_or_default()).await;
 
         Ok(ApStatus {
             active: true,
             interface_name: iface,
             ssid,
-            band: Some(WifiBand::Band2_4Ghz),
+            band,
             channel,
             frequency,
             security: Some(WifiSecurity::Wpa2Psk),
             connected_clients,
             ip_address,
             prefix_length,
+            ap_mode,
+            sta_will_disconnect,
         })
+    }
+
+    async fn start_ap(&self) -> NGResult<ApStatus> {
+        info!("Starting AP hotspot...");
+
+        let caps = self.detect_capabilities().await?;
+        if !caps.can_manage_ap {
+            return Err(NetworkError::ApError(
+                "AP management is not available on this hardware".into(),
+            )
+            .into());
+        }
+
+        // In exclusive mode, stash STA connection for restore after stop_ap, then disconnect.
+        if caps.ap_mode == ApMode::Exclusive {
+            info!("Exclusive mode: stashing STA connection and disconnecting");
+            if let Some(stashed) = self.stash_active_sta_connection().await {
+                let mut guard = self.stashed_sta_for_restore.write().await;
+                *guard = Some(stashed);
+            }
+            if let Err(e) = self.disconnect_wifi(None).await {
+                warn!(error = %e, "Failed to disconnect STA (may already be disconnected)");
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
+        mgr.start_all().await?;
+
+        info!("AP hotspot started");
+        self.ap_status().await
+    }
+
+    async fn stop_ap(&self) -> NGResult<ApStatus> {
+        info!("Stopping AP hotspot...");
+
+        let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
+        mgr.stop_all().await?;
+
+        // In exclusive mode, restore the previously disconnected STA connection.
+        let stashed = self.stashed_sta_for_restore.write().await.take();
+        if let Some(s) = stashed {
+            let conn_ref = ObjectPath::try_from(s.connection_path.as_str())
+                .map_err(|e| NetworkError::DBusError(format!("Invalid connection path: {e}")))?;
+            let dev_ref = ObjectPath::try_from(s.device_path.as_str())
+                .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
+            let root = ObjectPath::try_from("/")
+                .map_err(|e| NetworkError::DBusError(format!("Invalid root path: {e}")))?;
+
+            match self
+                .nm_proxy()
+                .await?
+                .activate_connection(&conn_ref, &dev_ref, &root)
+                .await
+            {
+                Ok(_) => {
+                    info!("Restored previous Wi-Fi STA connection after stopping AP");
+                    sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to restore STA connection after stop_ap");
+                }
+            }
+        }
+
+        info!("AP hotspot stopped");
+        self.ap_status().await
     }
 
     async fn configure_ap(&self, config: &ConfigureApRequest) -> NGResult<ApStatus> {
@@ -1149,6 +1285,13 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             parse_env_value(&current_env, "AP_DHCP_START").unwrap_or("10.47.0.10".to_string());
         let current_dhcp_end =
             parse_env_value(&current_env, "AP_DHCP_END").unwrap_or("10.47.0.200".to_string());
+        let current_sta_iface =
+            parse_env_value(&current_env, "STA_IFACE").unwrap_or_else(|| "wlan0".to_string());
+        let current_uplink_iface = parse_env_value(&current_env, "UPLINK_IFACE")
+            .unwrap_or_else(|| current_sta_iface.clone());
+        let current_exclusive = parse_env_value(&current_env, "AP_EXCLUSIVE")
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         let ctx = ApRenderContext {
             interface: current_iface,
@@ -1160,9 +1303,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             dhcp_range_start: current_dhcp_start,
             dhcp_range_end: current_dhcp_end,
             dhcp_lease_time: "12h".to_string(),
+            sta_iface: current_sta_iface,
+            uplink_iface: current_uplink_iface,
+            exclusive: current_exclusive,
         };
 
-        // Backup → render → restart → rollback on failure.
+        // Backup → render → rollback on failure.
         ap_config::backup_ap_config(AP_CONFIG_DIR).await?;
 
         if let Err(e) = ap_config::render_and_write_ap_config(&ctx, AP_CONFIG_DIR).await {
@@ -1171,9 +1317,16 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             return Err(e);
         }
 
-        let should_restart = config.restart.unwrap_or(true);
+        // Only restart hostapd if AP is currently running.
+        let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
+        let svc_status = mgr.status().await.ok();
+        let ap_running = svc_status
+            .as_ref()
+            .map(|s| s.ap_broadcasting())
+            .unwrap_or(false);
+
+        let should_restart = config.restart.unwrap_or(true) && ap_running;
         if should_restart {
-            let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
             if let Err(e) = mgr.restart_hostapd().await {
                 warn!(error = %e, "hostapd restart failed, restoring backup");
                 ap_config::restore_ap_config(AP_CONFIG_DIR).await?;
@@ -1183,6 +1336,8 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 }
                 .into());
             }
+        } else if !ap_running {
+            info!("AP is not running — configuration saved, will take effect on next start");
         }
 
         self.ap_status().await

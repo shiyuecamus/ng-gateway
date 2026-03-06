@@ -45,15 +45,31 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
 fi
 
+# ─── System Service Sanitization (defensive) ───
+#
+# Disable and mask conflicting system services that may interfere with our AP stack.
+# This runs on every install/upgrade as a defensive measure.
+if command -v systemctl >/dev/null 2>&1; then
+  for svc in dnsmasq.service hostapd.service; do
+    if systemctl is-enabled "$svc" 2>/dev/null | grep -q enabled; then
+      systemctl disable --now "$svc" 2>/dev/null || true
+      systemctl mask "$svc" 2>/dev/null || true
+      echo "[postinstall] Disabled and masked conflicting ${svc}"
+    fi
+  done
+fi
+
 # ─── AP Hotspot Network Initialization ───
 #
 # On first install, run init-network.sh to:
 # 1. Detect wireless hardware
 # 2. Generate default AP configuration (hostapd.conf, dnsmasq-ap.conf, ap-env)
-# 3. Deploy AP systemd units and enable/start AP services
+# 3. Sanitize conflicting system services
+# 4. Deploy AP systemd units and enable/start AP services
 #
 # The AP stack (hostapd + dnsmasq) runs as independent systemd services.
 # They survive ng-gateway restarts/stops — this is by design.
+# In exclusive mode (single card, no STA+AP), AP is NOT auto-started.
 init_script="${opt_dir}/scripts/init-network.sh"
 if [[ -f "${init_script}" ]]; then
   echo "[postinstall] Running network initialization..."

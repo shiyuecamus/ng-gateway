@@ -79,7 +79,22 @@ pub trait PlatformNetworkManager: Send + Sync {
     /// Get current AP hotspot status.
     async fn ap_status(&self) -> NGResult<ApStatus>;
 
+    /// Start the AP hotspot service stack.
+    ///
+    /// In `Exclusive` mode this will disconnect the current STA connection first.
+    /// In `Concurrent` / `DedicatedCard` mode this starts AP alongside STA.
+    async fn start_ap(&self) -> NGResult<ApStatus>;
+
+    /// Stop the AP hotspot service stack.
+    ///
+    /// On Linux in `Exclusive` mode, if STA was disconnected when AP started, this will
+    /// attempt to restore the previous Wi-Fi connection via NetworkManager's `ActivateConnection`.
+    async fn stop_ap(&self) -> NGResult<ApStatus>;
+
     /// Update AP hotspot configuration.
+    ///
+    /// If the AP is running, restarts hostapd to apply changes.
+    /// If the AP is stopped, only writes configuration files.
     async fn configure_ap(&self, config: &ConfigureApRequest) -> NGResult<ApStatus>;
 
     // ─── DNS ───
