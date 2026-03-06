@@ -856,7 +856,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 )
                 .await
                 .ok()
-                .and_then(|v| v.downcast_ref::<u32>().ok().copied())
+                .and_then(|v| v.downcast_ref::<u32>().ok())
                 .unwrap_or(0);
 
             match state {
@@ -1395,15 +1395,11 @@ fn prop_str(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
 }
 
 fn prop_u32(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
-    props
-        .get(key)
-        .and_then(|v| v.downcast_ref::<u32>().ok().copied())
+    props.get(key).and_then(|v| v.downcast_ref::<u32>().ok())
 }
 
 fn prop_u8(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u8> {
-    props
-        .get(key)
-        .and_then(|v| v.downcast_ref::<u8>().ok().copied())
+    props.get(key).and_then(|v| v.downcast_ref::<u8>().ok())
 }
 
 fn prop_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec<u8>> {
@@ -1412,7 +1408,7 @@ fn prop_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec
         if let Ok(arr) = v.downcast_ref::<&zbus::zvariant::Array>() {
             let bytes: Vec<u8> = arr
                 .iter()
-                .filter_map(|item| item.downcast_ref::<u8>().ok().copied())
+                .filter_map(|item| item.downcast_ref::<u8>().ok())
                 .collect();
             if bytes.is_empty() {
                 None
@@ -1444,7 +1440,7 @@ fn parse_nm_ip4_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv4Addres
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
                     let address = dict
-                        .get::<str, Value>("address")
+                        .get::<&str, Value>("address")
                         .ok()
                         .flatten()
                         .and_then(|v| {
@@ -1453,10 +1449,10 @@ fn parse_nm_ip4_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv4Addres
                                 .and_then(|s| s.parse::<IpAddr>().ok())
                         });
                     let prefix = dict
-                        .get::<str, Value>("prefix")
+                        .get::<&str, Value>("prefix")
                         .ok()
                         .flatten()
-                        .and_then(|v| v.downcast_ref::<u32>().ok().copied())
+                        .and_then(|v| v.downcast_ref::<u32>().ok())
                         .unwrap_or(24) as u8;
 
                     if let Some(addr) = address {
@@ -1482,7 +1478,7 @@ fn parse_nm_ip4_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> 
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
                     if let Some(addr) =
-                        dict.get::<str, Value>("address")
+                        dict.get::<&str, Value>("address")
                             .ok()
                             .flatten()
                             .and_then(|v| {
@@ -1510,7 +1506,7 @@ fn parse_nm_ip6_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv6Addres
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
                     let address = dict
-                        .get::<str, Value>("address")
+                        .get::<&str, Value>("address")
                         .ok()
                         .flatten()
                         .and_then(|v| {
@@ -1519,10 +1515,10 @@ fn parse_nm_ip6_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv6Addres
                                 .and_then(|s| s.parse::<IpAddr>().ok())
                         });
                     let prefix = dict
-                        .get::<str, Value>("prefix")
+                        .get::<&str, Value>("prefix")
                         .ok()
                         .flatten()
-                        .and_then(|v| v.downcast_ref::<u32>().ok().copied())
+                        .and_then(|v| v.downcast_ref::<u32>().ok())
                         .unwrap_or(64) as u8;
 
                     if let Some(addr) = address {

@@ -344,7 +344,7 @@ version = "0.17"
 version = "5.4"
 [workspace.dependencies.async-opcua]
 features = ["client"]
-version = "0.17"
+version = "0.18"
 
 # Atomic Arc swapping for lock-free hot-path reads of session handles
 [workspace.dependencies.arc-swap]

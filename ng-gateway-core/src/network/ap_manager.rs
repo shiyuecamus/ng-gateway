@@ -14,11 +14,7 @@ use ng_gateway_error::{network::NetworkError, NGResult};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
-use zbus::{
-    proxy,
-    zvariant::OwnedObjectPath,
-    Connection,
-};
+use zbus::{proxy, zvariant::OwnedObjectPath, Connection};
 
 /// systemd unit names for the AP stack.
 pub const AP_SETUP_UNIT: &str = "ng-gateway-ap-setup.service";
