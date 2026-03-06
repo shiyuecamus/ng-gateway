@@ -170,7 +170,7 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         let summary = interfaces
             .into_iter()
             .find(|i| i.name == name)
-            .ok_or_else(|| NetworkError::InterfaceNotFound(name.to_string()))?;
+            .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
         Ok(NetworkInterfaceDetail {
             summary,
             nm_connection_uuid: None,
@@ -374,7 +374,7 @@ async fn get_wifi_ssid() -> Option<String> {
         let trimmed = line.trim();
         if let Some(ssid) = trimmed
             .strip_prefix("SSID")
-            .or_else(|| trimmed.strip_prefix("SSID"))
+            .or(trimmed.strip_prefix("SSID"))
         {
             let ssid = ssid
                 .trim_start_matches(|c: char| c == ':' || c == ' ')

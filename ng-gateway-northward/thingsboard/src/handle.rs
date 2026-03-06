@@ -281,9 +281,7 @@ impl NorthwardHandle for ThingsBoardHandle {
                         TargetType::Gateway => {
                             let topic = Topics::device_rpc_response_topic(&resp.request_id);
                             let body = if resp.is_success() {
-                                resp.result
-                                    .clone()
-                                    .unwrap_or_else(|| json!({ "success": true }))
+                                resp.result.clone().unwrap_or(json!({ "success": true }))
                             } else {
                                 json!({
                                     "success": false,

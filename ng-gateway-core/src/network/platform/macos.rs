@@ -168,7 +168,7 @@ impl PlatformNetworkManager for MacosNetworkManager {
         let summary = interfaces
             .into_iter()
             .find(|i| i.name == name)
-            .ok_or_else(|| NetworkError::InterfaceNotFound(name.to_string()))?;
+            .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
 
         Ok(NetworkInterfaceDetail {
             summary,

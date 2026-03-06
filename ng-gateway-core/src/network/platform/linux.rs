@@ -234,7 +234,7 @@ impl LinuxNetworkManager {
         dev_props: &HashMap<String, OwnedValue>,
     ) -> NGResult<Ipv4Config> {
         let config_path = prop_object_path(dev_props, "Ip4Config")
-            .ok_or_else(|| NetworkError::ConfigError("No Ip4Config path".to_string()))?;
+            .ok_or(NetworkError::ConfigError("No Ip4Config path".to_string()))?;
 
         if config_path.as_str() == "/" {
             return Err(NetworkError::ConfigError("Ip4Config is /".to_string()).into());
@@ -265,7 +265,7 @@ impl LinuxNetworkManager {
         dev_props: &HashMap<String, OwnedValue>,
     ) -> NGResult<Ipv6Config> {
         let config_path = prop_object_path(dev_props, "Ip6Config")
-            .ok_or_else(|| NetworkError::ConfigError("No Ip6Config path".to_string()))?;
+            .ok_or(NetworkError::ConfigError("No Ip6Config path".to_string()))?;
 
         if config_path.as_str() == "/" {
             return Err(NetworkError::ConfigError("Ip6Config is /".to_string()).into());
@@ -438,7 +438,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             let summary = self
                 .build_interface_summary(&dev_path_ref)
                 .await?
-                .ok_or_else(|| NetworkError::InterfaceNotFound(name.to_string()))?;
+                .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
 
             let mtu = prop_u32(&dev_props, "Mtu");
             let driver = prop_str(&dev_props, "Driver");
@@ -563,8 +563,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             }
         }
 
-        let device_path =
-            target_device.ok_or_else(|| NetworkError::InterfaceNotFound(name.to_string()))?;
+        let device_path = target_device.ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
 
         // Build NM connection settings dict.
         let mut conn_settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
@@ -1141,16 +1140,15 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .and_then(|s| s.parse().ok())
             .unwrap_or(6);
         let current_iface =
-            parse_env_value(&current_env, "AP_IFACE").unwrap_or_else(|| "wlan0_ap".to_string());
-        let current_ip =
-            parse_env_value(&current_env, "AP_IP").unwrap_or_else(|| "10.47.0.1".to_string());
+            parse_env_value(&current_env, "AP_IFACE").unwrap_or("wlan0_ap".to_string());
+        let current_ip = parse_env_value(&current_env, "AP_IP").unwrap_or("10.47.0.1".to_string());
         let current_prefix: u8 = parse_env_value(&current_env, "AP_PREFIX")
             .and_then(|s| s.parse().ok())
             .unwrap_or(24);
-        let current_dhcp_start = parse_env_value(&current_env, "AP_DHCP_START")
-            .unwrap_or_else(|| "10.47.0.10".to_string());
-        let current_dhcp_end = parse_env_value(&current_env, "AP_DHCP_END")
-            .unwrap_or_else(|| "10.47.0.200".to_string());
+        let current_dhcp_start =
+            parse_env_value(&current_env, "AP_DHCP_START").unwrap_or("10.47.0.10".to_string());
+        let current_dhcp_end =
+            parse_env_value(&current_env, "AP_DHCP_END").unwrap_or("10.47.0.200".to_string());
 
         let ctx = ApRenderContext {
             interface: current_iface,
@@ -1329,7 +1327,6 @@ fn nm_wifi_mode_to_mode(mode: u32) -> WifiMode {
 
 /// Derive WifiSecurity from NM AP flags.
 fn derive_security(flags: u32, wpa_flags: u32, rsn_flags: u32) -> WifiSecurity {
-    const NM_AP_SEC_PAIR_CCMP: u32 = 0x8;
     const NM_AP_SEC_KEY_MGMT_PSK: u32 = 0x100;
     const NM_AP_SEC_KEY_MGMT_SAE: u32 = 0x400;
     const NM_AP_SEC_KEY_MGMT_802_1X: u32 = 0x200;
@@ -1388,6 +1385,22 @@ fn quality_to_rssi(quality: u8) -> i32 {
 
 // ─── D-Bus Property Extraction Helpers ───
 
+/// Look up a key in a zvariant Dict by iterating entries.
+///
+/// `Dict::get` has complex lifetime constraints that make it hard to call
+/// with string literal keys. Iteration is O(n) but NM dicts are tiny.
+fn dict_lookup_str(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<String> {
+    dict.iter()
+        .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
+        .and_then(|(_, v)| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
+}
+
+fn dict_lookup_u32(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<u32> {
+    dict.iter()
+        .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
+        .and_then(|(_, v)| v.downcast_ref::<u32>().ok())
+}
+
 fn prop_str(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     props
         .get(key)
@@ -1439,21 +1452,9 @@ fn parse_nm_ip4_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv4Addres
         if let Ok(arr) = addr_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
-                    let address = dict
-                        .get::<&str, Value>("address")
-                        .ok()
-                        .flatten()
-                        .and_then(|v| {
-                            v.downcast_ref::<&str>()
-                                .ok()
-                                .and_then(|s| s.parse::<IpAddr>().ok())
-                        });
-                    let prefix = dict
-                        .get::<&str, Value>("prefix")
-                        .ok()
-                        .flatten()
-                        .and_then(|v| v.downcast_ref::<u32>().ok())
-                        .unwrap_or(24) as u8;
+                    let address =
+                        dict_lookup_str(dict, "address").and_then(|s| s.parse::<IpAddr>().ok());
+                    let prefix = dict_lookup_u32(dict, "prefix").unwrap_or(24) as u8;
 
                     if let Some(addr) = address {
                         result.push(Ipv4AddressInfo {
@@ -1478,14 +1479,7 @@ fn parse_nm_ip4_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> 
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
                     if let Some(addr) =
-                        dict.get::<&str, Value>("address")
-                            .ok()
-                            .flatten()
-                            .and_then(|v| {
-                                v.downcast_ref::<&str>()
-                                    .ok()
-                                    .and_then(|s| s.parse::<IpAddr>().ok())
-                            })
+                        dict_lookup_str(dict, "address").and_then(|s| s.parse::<IpAddr>().ok())
                     {
                         result.push(addr);
                     }
@@ -1505,21 +1499,9 @@ fn parse_nm_ip6_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv6Addres
         if let Ok(arr) = addr_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
-                    let address = dict
-                        .get::<&str, Value>("address")
-                        .ok()
-                        .flatten()
-                        .and_then(|v| {
-                            v.downcast_ref::<&str>()
-                                .ok()
-                                .and_then(|s| s.parse::<IpAddr>().ok())
-                        });
-                    let prefix = dict
-                        .get::<&str, Value>("prefix")
-                        .ok()
-                        .flatten()
-                        .and_then(|v| v.downcast_ref::<u32>().ok())
-                        .unwrap_or(64) as u8;
+                    let address =
+                        dict_lookup_str(dict, "address").and_then(|s| s.parse::<IpAddr>().ok());
+                    let prefix = dict_lookup_u32(dict, "prefix").unwrap_or(64) as u8;
 
                     if let Some(addr) = address {
                         result.push(Ipv6AddressInfo {

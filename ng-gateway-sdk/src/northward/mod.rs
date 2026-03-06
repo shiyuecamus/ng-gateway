@@ -452,7 +452,7 @@ macro_rules! ng_plugin_factory {
             let handle = NG_RUNTIME
                 .as_ref()
                 .map(|rt| rt.handle().clone())
-                .or_else(|| tokio::runtime::Handle::try_current().ok());
+                .or(tokio::runtime::Handle::try_current().ok());
             if let Some(h) = handle {
                 $crate::northward::log::init_plugin_tracing(h, debug);
             }

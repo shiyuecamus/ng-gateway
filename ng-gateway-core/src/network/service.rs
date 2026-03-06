@@ -142,7 +142,7 @@ impl NetworkService {
         let best = ethernet
             .iter()
             .find(|i| i.link_state == LinkState::Up)
-            .or_else(|| ethernet.first())
+            .or(ethernet.first())
             .cloned();
 
         Ok(WiredStatus {
