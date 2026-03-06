@@ -1524,6 +1524,8 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let current_channel: u32 = parse_conf_value(&current_conf, "channel")
             .and_then(|s| s.parse().ok())
             .unwrap_or(6);
+        let current_country = parse_conf_value(&current_conf, "country_code")
+            .unwrap_or(ap_config::DEFAULT_COUNTRY_CODE.to_string());
         let current_iface =
             parse_env_value(&current_env, "AP_IFACE").unwrap_or("wlan0_ap".to_string());
         let current_ip = parse_env_value(&current_env, "AP_IP").unwrap_or("10.47.0.1".to_string());
@@ -1535,9 +1537,9 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let current_dhcp_end =
             parse_env_value(&current_env, "AP_DHCP_END").unwrap_or("10.47.0.200".to_string());
         let current_sta_iface =
-            parse_env_value(&current_env, "STA_IFACE").unwrap_or_else(|| "wlan0".to_string());
-        let current_uplink_iface = parse_env_value(&current_env, "UPLINK_IFACE")
-            .unwrap_or_else(|| current_sta_iface.clone());
+            parse_env_value(&current_env, "STA_IFACE").unwrap_or("wlan0".to_string());
+        let current_uplink_iface =
+            parse_env_value(&current_env, "UPLINK_IFACE").unwrap_or(current_sta_iface.clone());
         let current_exclusive = parse_env_value(&current_env, "AP_EXCLUSIVE")
             .map(|s| s.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -1555,6 +1557,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             sta_iface: current_sta_iface,
             uplink_iface: current_uplink_iface,
             exclusive: current_exclusive,
+            country_code: config.country_code.clone().unwrap_or(current_country),
         };
 
         // Backup → render → rollback on failure.

@@ -418,6 +418,12 @@ pub struct ConfigureApRequest {
     pub password: Option<String>,
     /// 0 = auto channel selection. Valid 2.4 GHz channels: 1-13.
     pub channel: Option<u32>,
+    /// ISO 3166-1 alpha-2 Wi-Fi regulatory country code (e.g. "CN", "US", "JP").
+    ///
+    /// Overrides the value from `gateway.toml` (`general.wifi_country_code`) for this
+    /// configuration update. When omitted, the configured or default value is used.
+    #[validate(length(min = 2, max = 2, message = "country code must be exactly 2 characters"))]
+    pub country_code: Option<String>,
     /// Whether to restart the AP after configuration change.
     pub restart: Option<bool>,
 }

@@ -213,6 +213,17 @@ pub struct General {
     pub ca_cert_path: String,
     #[serde(default = "General::ca_key_path_default")]
     pub ca_key_path: String,
+    /// ISO 3166-1 alpha-2 Wi-Fi regulatory country code (e.g. "CN", "US", "JP").
+    ///
+    /// This is passed to `hostapd` as `country_code` + `ieee80211d=1` when the AP
+    /// hotspot is configured. Without a valid country code, the kernel stays in the
+    /// "world" regulatory domain where all frequencies are `PASSIVE-SCAN`, potentially
+    /// making the AP invisible to nearby devices.
+    ///
+    /// # Environment override
+    /// - `NG__GENERAL__WIFI_COUNTRY_CODE=US`
+    #[serde(default = "General::wifi_country_code_default")]
+    pub wifi_country_code: String,
     /// Collection engine configuration
     #[serde(default)]
     pub collector: Collector,
@@ -230,6 +241,7 @@ impl Default for General {
             runtime_dir: General::runtime_dir_default(),
             ca_cert_path: General::ca_cert_path_default(),
             ca_key_path: General::ca_key_path_default(),
+            wifi_country_code: General::wifi_country_code_default(),
             collector: Collector::default(),
             northward: Northward::default(),
             southward: Southward::default(),
@@ -782,6 +794,10 @@ impl General {
 
     fn ca_key_path_default() -> String {
         "ca.key".into()
+    }
+
+    fn wifi_country_code_default() -> String {
+        "CN".into()
     }
 
     /// Resolve CA certificate path under the runtime root.

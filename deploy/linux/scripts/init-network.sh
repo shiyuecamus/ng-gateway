@@ -25,6 +25,7 @@ SYSTEMD_DIR="/lib/systemd/system"
 DEFAULT_AP_SSID_TEMPLATE="NG-Gateway-{MAC4}"
 DEFAULT_AP_PASSWORD="ng-gateway"
 DEFAULT_AP_CHANNEL=6
+DEFAULT_AP_COUNTRY_CODE="CN"
 DEFAULT_AP_IP="10.47.0.1"
 DEFAULT_AP_PREFIX=24
 DEFAULT_AP_DHCP_START="10.47.0.10"
@@ -257,6 +258,8 @@ APENV
 interface=${ap_iface}
 driver=nl80211
 ssid=${ssid}
+country_code=${DEFAULT_AP_COUNTRY_CODE}
+ieee80211d=1
 hw_mode=g
 channel=${DEFAULT_AP_CHANNEL}
 wmm_enabled=0
