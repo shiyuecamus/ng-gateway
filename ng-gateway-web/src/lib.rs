@@ -93,7 +93,7 @@ impl NGWebServer {
 
         // Initialize NetworkService (best-effort: log warning and continue if it fails).
         let network_service: Option<Data<Arc<NetworkService>>> =
-            match NetworkService::new(settings.network.clone()).await {
+            match NetworkService::new().await {
                 Ok(svc) => Some(Data::new(Arc::new(svc))),
                 Err(e) => {
                     tracing::warn!("Network service initialization failed (degraded mode): {e}");

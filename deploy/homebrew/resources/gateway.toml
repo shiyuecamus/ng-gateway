@@ -54,7 +54,7 @@ override_cleanup_interval_ms = 5000
 ingest_queue_capacity = 10000
 
 [logging.output]
-format = "text"               # text | json
+format = "text"            # text | json
 include_span_fields = true
 
 [logging.output.file]
@@ -62,8 +62,8 @@ enabled = true
 dir = "./logs"
 
 [logging.output.file.rotation]
-mode = "both"                 # time | size | both
-time = "daily"                # hourly | daily
+mode = "both"   # time | size | both
+time = "daily"  # hourly | daily
 size_mb = 100
 max_files = 200
 
@@ -123,30 +123,6 @@ secret = "ng-gateway"
 expire = 3600000
 issuer = "ng-gateway"
 
-# Network management
-[network]
-# Enable network management module (interface enumeration, Wi-Fi, AP hotspot).
-enabled = true
-
-[network.ap]
-# Enable AP hotspot on startup.
-enabled = true
-# Default SSID. {MAC4} is replaced with last 4 hex digits of Wi-Fi MAC address.
-ssid = "NG-Gateway-{MAC4}"
-# WPA2 password (8-63 characters).
-password = "ng-gateway"
-# 2.4GHz channel (1-13). 0 = auto selection.
-channel = 0
-# AP interface IP address.
-ip = "10.47.0.1"
-# Subnet prefix length.
-prefix_length = 24
-# DHCP range for connected clients.
-dhcp_range_start = "10.47.0.10"
-dhcp_range_end = "10.47.0.200"
-# DHCP lease time.
-dhcp_lease_time = "12h"
-
 # Cache
 [cache]
 type = "moka"
@@ -161,5 +137,3 @@ idle_timeout = 5000
 max_lifetime = 5000
 max_connections = 100
 auto_create = true
-
-

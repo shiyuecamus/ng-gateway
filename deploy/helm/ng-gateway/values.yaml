@@ -35,19 +35,19 @@ gateway:
     # Image tag. If empty, chart will default to `.Chart.AppVersion` for reproducible releases.
     tag: ""
     pullPolicy: ""
-  
+
   # Replica count
   replicaCount: 1
-  
+
   # Service account
   serviceAccount:
     create: true
     annotations: {}
     name: ""
-  
+
   # Pod annotations
   podAnnotations: {}
-  
+
   # Pod security context
   # Example:
   # podSecurityContext:
@@ -55,7 +55,7 @@ gateway:
   #   runAsNonRoot: true
   #   runAsUser: 1000
   podSecurityContext: {}
-  
+
   # Container security context
   # Example:
   # securityContext:
@@ -67,7 +67,7 @@ gateway:
   #   runAsNonRoot: true
   #   runAsUser: 1000
   securityContext: {}
-  
+
   # Resource limits and requests
   # Example:
   # resources:
@@ -78,7 +78,7 @@ gateway:
   #     cpu: 500m
   #     memory: 512Mi
   resources: {}
-  
+
   # Liveness and readiness probes
   livenessProbe:
     enabled: true
@@ -89,7 +89,7 @@ gateway:
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 3
-  
+
   readinessProbe:
     enabled: true
     httpGet:
@@ -99,7 +99,7 @@ gateway:
     periodSeconds: 5
     timeoutSeconds: 3
     failureThreshold: 3
-  
+
   # Startup probe
   startupProbe:
     enabled: true
@@ -110,7 +110,7 @@ gateway:
     periodSeconds: 10
     timeoutSeconds: 3
     failureThreshold: 30
-  
+
   # Service configuration
   # Ports are automatically read from gateway.config.web.port and gateway.config.web.ssl.port
   service:
@@ -122,14 +122,14 @@ gateway:
     nodePort:
       http: 30080
       https: 30443
-  
+
   # Gateway configuration (will be converted to ConfigMap environment variables)
   # All values are automatically converted to strings and prefixed with NG__ where applicable
   config:
     # Logging configuration
     logLevel: "info"
     timezone: "Asia/Shanghai"
-    
+
     # General configuration
     general:
       # Runtime root directory. All relative paths (./data, ./drivers, ./plugins, ./certs, ...)
@@ -141,7 +141,7 @@ gateway:
       # CA cert/key file names under ./certs (resolved under runtime root).
       caCertPath: "ca.crt"
       caKeyPath: "ca.key"
-      
+
       # Southward communication configuration
       southward:
         # milliseconds
@@ -156,13 +156,13 @@ gateway:
         snapshotGcWorkers: 2
         # Max devices to scan per snapshot GC tick.
         maxDevicesPerSnapshotTick: 256
-      
+
       # Northward communication configuration
       northward:
         queueCapacity: 10000
         # milliseconds
         startTimeoutMs: 5000
-      
+
       # Collector configuration
       collector:
         # milliseconds
@@ -176,7 +176,7 @@ gateway:
           randomizationFactor: 0.2
           multiplier: 2.0
           maxElapsedTimeMs: 5000
-    
+
     # Logging configuration (top-level)
     logging:
       control:
@@ -186,14 +186,14 @@ gateway:
         overrideCleanupIntervalMs: 5000
         ingestQueueCapacity: 10000
       output:
-        format: "text"               # text | json
+        format: "text" # text | json
         includeSpanFields: true
         file:
           enabled: true
           dir: "./logs"
           rotation:
-            mode: "both"             # time | size | both
-            time: "daily"            # hourly | daily
+            mode: "both" # time | size | both
+            time: "daily" # hourly | daily
             sizeMb: 100
             maxFiles: 200
           retention:
@@ -202,7 +202,7 @@ gateway:
       cleanup:
         enabled: true
         intervalMs: 60000
-    
+
     # Web configuration
     web:
       routerPrefix: "/api"
@@ -219,7 +219,7 @@ gateway:
         type: "auto"
         cert: "./certs/cert.pem"
         key: "./certs/key.pem"
-      
+
       # CORS configuration
       cors:
         # allow_all, whitelist
@@ -246,38 +246,13 @@ gateway:
             - "Access-Control-Allow-Headers"
             - "Content-Type"
           credentials: true
-      
+
       # JWT configuration
       jwt:
         secret: "ng-gateway"
         # milliseconds
         expire: 3600000
         issuer: "ng-gateway"
-    
-    # Network management configuration
-    network:
-      # Enable network management module (interface enumeration, Wi-Fi, AP hotspot).
-      enabled: true
-      # AP hotspot configuration
-      ap:
-        # Enable AP hotspot on startup.
-        enabled: true
-        # Default SSID. {MAC4} is replaced with last 4 hex digits of Wi-Fi MAC address.
-        ssid: "NG-Gateway-{MAC4}"
-        # WPA2 password (8-63 characters).
-        password: "ng-gateway"
-        # 2.4GHz channel (1-13). 0 = auto selection.
-        channel: 0
-        # AP interface IP address.
-        ip: "10.47.0.1"
-        # Subnet prefix length.
-        prefixLength: 24
-        # DHCP range start for connected clients.
-        dhcpRangeStart: "10.47.0.10"
-        # DHCP range end for connected clients.
-        dhcpRangeEnd: "10.47.0.200"
-        # DHCP lease time.
-        dhcpLeaseTime: "12h"
 
     # Cache configuration
     cache:
@@ -285,7 +260,7 @@ gateway:
       type: "moka"
       prefix: "ng-gateway"
       delimiter: ":"
-    
+
     # Database configuration
     db:
       sqlite:
@@ -301,17 +276,17 @@ gateway:
         maxConnections: 100
         # auto create database file and directory if not exists
         autoCreate: true
-  
+
   # Additional environment variables from secrets (optional)
   envFromSecrets: []
-  
+
   # Node selector
   # Example:
   # nodeSelector:
   #   kubernetes.io/os: linux
   #   node-role.kubernetes.io/worker: "true"
   nodeSelector: {}
-  
+
   # Tolerations
   # Example:
   # tolerations:
@@ -323,7 +298,7 @@ gateway:
   #     operator: "Exists"
   #     effect: "NoExecute"
   tolerations: []
-  
+
   # Affinity
   # Example:
   # affinity:
@@ -339,13 +314,13 @@ gateway:
   #                   - gateway
   #           topologyKey: kubernetes.io/hostname
   affinity: {}
-  
+
   # Pod disruption budget
   podDisruptionBudget:
     enabled: false
     minAvailable: 1
     maxUnavailable: ""
-  
+
   # Horizontal Pod Autoscaler
   autoscaling:
     enabled: false
@@ -365,7 +340,7 @@ persistence:
     accessMode: ReadWriteOnce
     size: 10Gi
     annotations: {}
-  
+
   # Gateway drivers persistence
   gatewayDrivers:
     enabled: true
@@ -374,7 +349,7 @@ persistence:
     accessMode: ReadWriteOnce
     size: 2Gi
     annotations: {}
-  
+
   # Gateway plugins persistence
   gatewayPlugins:
     enabled: true
@@ -462,4 +437,3 @@ nameOverride: ""
 
 # Full name override for the chart
 fullnameOverride: ""
-

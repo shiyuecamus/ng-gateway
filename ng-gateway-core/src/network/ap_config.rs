@@ -8,7 +8,6 @@
 //! All files are written to `/etc/ng-gateway/` (or a configurable base directory).
 
 use ng_gateway_error::{network::NetworkError, NGResult};
-use ng_gateway_models::settings::ApHotspot;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::{debug, info};
@@ -40,38 +39,6 @@ pub struct ApRenderContext {
     pub exclusive: bool,
 }
 
-impl ApRenderContext {
-    /// Build from settings + runtime interface name + optional MAC for SSID template.
-    pub fn from_settings(
-        settings: &ApHotspot,
-        interface: &str,
-        sta_iface: &str,
-        uplink_iface: &str,
-        exclusive: bool,
-        mac_suffix: Option<&str>,
-    ) -> Self {
-        let ssid = if let Some(mac4) = mac_suffix {
-            settings.ssid.replace("{MAC4}", mac4)
-        } else {
-            settings.ssid.replace("{MAC4}", "0000")
-        };
-
-        Self {
-            interface: interface.to_string(),
-            ssid,
-            password: settings.password.clone(),
-            channel: settings.channel,
-            ip: settings.ip.clone(),
-            prefix_length: settings.prefix_length,
-            dhcp_range_start: settings.dhcp_range_start.clone(),
-            dhcp_range_end: settings.dhcp_range_end.clone(),
-            dhcp_lease_time: settings.dhcp_lease_time.clone(),
-            sta_iface: sta_iface.to_string(),
-            uplink_iface: uplink_iface.to_string(),
-            exclusive,
-        }
-    }
-}
 
 /// Render and write all three AP configuration files atomically.
 ///

@@ -6,13 +6,10 @@
 
 use crate::network::platform::{self, PlatformNetworkManager};
 use ng_gateway_error::NGResult;
-use ng_gateway_models::{
-    domain::prelude::{
-        ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-        InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
-        NetworkInterfaceSummary, WifiAccessPoint, WifiConnectRequest, WifiStaStatus, WiredStatus,
-    },
-    settings::Network as NetworkSettings,
+use ng_gateway_models::domain::prelude::{
+    ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
+    InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
+    NetworkInterfaceSummary, WifiAccessPoint, WifiConnectRequest, WifiStaStatus, WiredStatus,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -26,14 +23,12 @@ pub struct NetworkService {
     manager: Box<dyn PlatformNetworkManager>,
     /// Cached platform capabilities (refreshed on startup and on demand).
     capabilities: Arc<RwLock<Option<NetworkCapabilities>>>,
-    /// Network configuration from `gateway.toml`.
-    settings: NetworkSettings,
 }
 
 impl NetworkService {
     /// Create and initialize the network service.
-    #[instrument(name = "network-service-init", skip(settings))]
-    pub async fn new(settings: NetworkSettings) -> NGResult<Self> {
+    #[instrument(name = "network-service-init")]
+    pub async fn new() -> NGResult<Self> {
         info!("Initializing network service...");
 
         let manager = platform::create_platform_manager().await?;
@@ -41,7 +36,6 @@ impl NetworkService {
         let service = Self {
             manager,
             capabilities: Arc::new(RwLock::new(None)),
-            settings,
         };
 
         // Pre-warm capabilities cache.
@@ -62,24 +56,10 @@ impl NetworkService {
 
         // Verify AP service status on Linux.
         #[cfg(target_os = "linux")]
-        if service.settings.ap.enabled {
-            service.verify_ap_services().await;
-        }
+        service.verify_ap_services().await;
 
         info!("Network service initialized");
         Ok(service)
-    }
-
-    /// Whether the network module is enabled in configuration.
-    #[inline]
-    pub fn is_enabled(&self) -> bool {
-        self.settings.enabled
-    }
-
-    /// Return a reference to the network settings.
-    #[inline]
-    pub fn settings(&self) -> &NetworkSettings {
-        &self.settings
     }
 
     // ─── Interface Discovery ───

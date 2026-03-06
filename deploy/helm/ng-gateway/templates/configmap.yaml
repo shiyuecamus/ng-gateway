@@ -205,40 +205,6 @@ data:
   {{- end }}
   {{- end }}
   {{- end }}
-  {{- if $config.network }}
-  {{- if hasKey $config.network "enabled" }}
-  NG__NETWORK__ENABLED: {{ $config.network.enabled | quote }}
-  {{- end }}
-  {{- if $config.network.ap }}
-  {{- if hasKey $config.network.ap "enabled" }}
-  NG__NETWORK__AP__ENABLED: {{ $config.network.ap.enabled | quote }}
-  {{- end }}
-  {{- if $config.network.ap.ssid }}
-  NG__NETWORK__AP__SSID: {{ $config.network.ap.ssid | quote }}
-  {{- end }}
-  {{- if $config.network.ap.password }}
-  NG__NETWORK__AP__PASSWORD: {{ $config.network.ap.password | quote }}
-  {{- end }}
-  {{- if hasKey $config.network.ap "channel" }}
-  NG__NETWORK__AP__CHANNEL: {{ $config.network.ap.channel | quote }}
-  {{- end }}
-  {{- if $config.network.ap.ip }}
-  NG__NETWORK__AP__IP: {{ $config.network.ap.ip | quote }}
-  {{- end }}
-  {{- if hasKey $config.network.ap "prefixLength" }}
-  NG__NETWORK__AP__PREFIX_LENGTH: {{ $config.network.ap.prefixLength | quote }}
-  {{- end }}
-  {{- if $config.network.ap.dhcpRangeStart }}
-  NG__NETWORK__AP__DHCP_RANGE_START: {{ $config.network.ap.dhcpRangeStart | quote }}
-  {{- end }}
-  {{- if $config.network.ap.dhcpRangeEnd }}
-  NG__NETWORK__AP__DHCP_RANGE_END: {{ $config.network.ap.dhcpRangeEnd | quote }}
-  {{- end }}
-  {{- if $config.network.ap.dhcpLeaseTime }}
-  NG__NETWORK__AP__DHCP_LEASE_TIME: {{ $config.network.ap.dhcpLeaseTime | quote }}
-  {{- end }}
-  {{- end }}
-  {{- end }}
   {{- if $config.cache }}
   {{- if $config.cache.type }}
   NG__CACHE__TYPE: {{ $config.cache.type | quote }}
