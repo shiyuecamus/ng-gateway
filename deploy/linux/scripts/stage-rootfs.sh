@@ -107,11 +107,13 @@ for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dn
     cp -f "$src" "${opt_dir}/systemd/${unit}"
   fi
 done
-init_net="${REPO_ROOT}/deploy/linux/scripts/init-network.sh"
-if [[ -f "$init_net" ]]; then
-  cp -f "$init_net" "${opt_dir}/scripts/init-network.sh"
-  chmod +x "${opt_dir}/scripts/init-network.sh"
-fi
+for script in init-network.sh ap-setup.sh ap-teardown.sh; do
+  src="${REPO_ROOT}/deploy/linux/scripts/${script}"
+  if [[ -f "$src" ]]; then
+    cp -f "$src" "${opt_dir}/scripts/${script}"
+    chmod +x "${opt_dir}/scripts/${script}"
+  fi
+done
 
 # ng-gateway main service unit (always deployed).
 main_unit="${REPO_ROOT}/deploy/linux/systemd/ng-gateway.service"
