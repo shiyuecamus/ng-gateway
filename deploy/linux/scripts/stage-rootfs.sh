@@ -98,5 +98,20 @@ echo "[stage] builtin drivers/plugins"
 cp -f "${REPO_ROOT}/drivers/builtin/"*.so "${opt_dir}/drivers/builtin/" 2>/dev/null || true
 cp -f "${REPO_ROOT}/plugins/builtin/"*.so "${opt_dir}/plugins/builtin/" 2>/dev/null || true
 
+# AP hotspot systemd units + init script.
+echo "[stage] AP hotspot resources"
+mkdir -p "${opt_dir}/systemd" "${opt_dir}/scripts"
+for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service; do
+  src="${REPO_ROOT}/deploy/linux/systemd/${unit}"
+  if [[ -f "$src" ]]; then
+    cp -f "$src" "${opt_dir}/systemd/${unit}"
+  fi
+done
+init_net="${REPO_ROOT}/deploy/linux/scripts/init-network.sh"
+if [[ -f "$init_net" ]]; then
+  cp -f "$init_net" "${opt_dir}/scripts/init-network.sh"
+  chmod +x "${opt_dir}/scripts/init-network.sh"
+fi
+
 echo "[ok] staged rootfs at: ${ROOTFS_DIR}"
 

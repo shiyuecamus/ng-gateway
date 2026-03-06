@@ -45,6 +45,26 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
 fi
 
+# ─── AP Hotspot Network Initialization ───
+#
+# On first install, run init-network.sh to:
+# 1. Detect wireless hardware
+# 2. Generate default AP configuration (hostapd.conf, dnsmasq-ap.conf, ap-env)
+# 3. Deploy AP systemd units and enable/start AP services
+#
+# The AP stack (hostapd + dnsmasq) runs as independent systemd services.
+# They survive ng-gateway restarts/stops — this is by design.
+init_script="${opt_dir}/scripts/init-network.sh"
+if [[ -f "${init_script}" ]]; then
+  echo "[postinstall] Running network initialization..."
+  bash "${init_script}" || {
+    echo "[postinstall] WARN: Network initialization had issues (non-fatal)."
+    echo "[postinstall] AP hotspot may need manual setup. See: ${init_script}"
+  }
+else
+  echo "[postinstall] WARN: init-network.sh not found, skipping AP setup."
+fi
+
 # User-friendly post-install hints (printed for both deb and rpm).
 #
 # Note:

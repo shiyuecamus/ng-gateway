@@ -9,6 +9,7 @@ mod device;
 mod driver;
 mod menu;
 mod net_debug;
+mod network;
 mod plugin;
 mod point;
 mod role;
@@ -84,6 +85,7 @@ fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
             .service(web::scope(app::ROUTER_PREFIX).configure(app::configure_routes))
             .service(web::scope(app_sub::ROUTER_PREFIX).configure(app_sub::configure_routes))
             .service(web::scope(net_debug::ROUTER_PREFIX).configure(net_debug::configure_routes))
+            .service(web::scope(network::ROUTER_PREFIX).configure(network::configure_routes))
             .service(web::scope(system::ROUTER_PREFIX).configure(system::configure_routes)),
     );
 }
@@ -138,6 +140,9 @@ pub async fn init_rbac_rules(
 
     // Maintenance net-debug module rules
     net_debug::init_rbac_rules(router_prefix, perm_checker).await?;
+
+    // Network configuration module rules
+    network::init_rbac_rules(router_prefix, perm_checker).await?;
 
     // System settings module rules
     system::init_rbac_rules(router_prefix, perm_checker).await?;

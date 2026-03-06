@@ -27,6 +27,8 @@ mod menu;
 #[allow(clippy::needless_update)]
 mod net_debug;
 #[allow(clippy::needless_update)]
+mod network;
+#[allow(clippy::needless_update)]
 mod plugin;
 #[allow(clippy::needless_update)]
 mod point;

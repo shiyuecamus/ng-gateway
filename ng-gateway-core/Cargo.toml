@@ -86,3 +86,15 @@ workspace = true
 workspace = true
 [dependencies.sysinfo]
 workspace = true
+
+# Cross-platform network interface enumeration
+[dependencies.network-interface]
+workspace = true
+
+# Cross-platform Wi-Fi scanning (CoreWLAN on macOS, win32-wlan on Windows, nl80211 on Linux)
+[dependencies.wifi_scan]
+workspace = true
+
+# D-Bus (Linux only) — NetworkManager integration for Wi-Fi/AP/interface management
+[target.'cfg(target_os = "linux")'.dependencies.zbus]
+workspace = true

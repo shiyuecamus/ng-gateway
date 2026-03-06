@@ -190,6 +190,8 @@ pub struct Inner {
     pub db: Db,
     #[serde(default)]
     pub cache: Cache,
+    #[serde(default)]
+    pub network: Network,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1583,5 +1585,118 @@ impl Northward {
 
     fn start_timeout_ms_default() -> AtomicU64Setting {
         AtomicU64Setting::new(5000)
+    }
+}
+
+/// Network configuration (AP hotspot, interface management).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Network {
+    /// Enable network management module.
+    #[serde(default = "Network::enabled_default")]
+    pub enabled: bool,
+
+    /// AP hotspot configuration.
+    #[serde(default)]
+    pub ap: ApHotspot,
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self {
+            enabled: Self::enabled_default(),
+            ap: ApHotspot::default(),
+        }
+    }
+}
+
+impl Network {
+    fn enabled_default() -> bool {
+        true
+    }
+}
+
+/// AP hotspot configuration section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApHotspot {
+    /// Enable AP hotspot on startup.
+    #[serde(default = "ApHotspot::enabled_default")]
+    pub enabled: bool,
+
+    /// Default SSID for the AP. `{MAC4}` is replaced with the last 4 hex digits of the Wi-Fi MAC.
+    #[serde(default = "ApHotspot::ssid_default")]
+    pub ssid: String,
+
+    /// WPA2 password for the AP (8-63 characters).
+    #[serde(default = "ApHotspot::password_default")]
+    pub password: String,
+
+    /// 2.4 GHz channel (1-13). 0 = auto selection.
+    #[serde(default = "ApHotspot::channel_default")]
+    pub channel: u32,
+
+    /// IP address for the AP interface.
+    #[serde(default = "ApHotspot::ip_default")]
+    pub ip: String,
+
+    /// Subnet prefix length for the AP interface.
+    #[serde(default = "ApHotspot::prefix_length_default")]
+    pub prefix_length: u8,
+
+    /// DHCP range start for connected clients.
+    #[serde(default = "ApHotspot::dhcp_range_start_default")]
+    pub dhcp_range_start: String,
+
+    /// DHCP range end for connected clients.
+    #[serde(default = "ApHotspot::dhcp_range_end_default")]
+    pub dhcp_range_end: String,
+
+    /// DHCP lease time (e.g. "12h").
+    #[serde(default = "ApHotspot::dhcp_lease_time_default")]
+    pub dhcp_lease_time: String,
+}
+
+impl Default for ApHotspot {
+    fn default() -> Self {
+        Self {
+            enabled: Self::enabled_default(),
+            ssid: Self::ssid_default(),
+            password: Self::password_default(),
+            channel: Self::channel_default(),
+            ip: Self::ip_default(),
+            prefix_length: Self::prefix_length_default(),
+            dhcp_range_start: Self::dhcp_range_start_default(),
+            dhcp_range_end: Self::dhcp_range_end_default(),
+            dhcp_lease_time: Self::dhcp_lease_time_default(),
+        }
+    }
+}
+
+impl ApHotspot {
+    fn enabled_default() -> bool {
+        true
+    }
+    fn ssid_default() -> String {
+        "NG-Gateway-{MAC4}".into()
+    }
+    fn password_default() -> String {
+        "ng-gateway".into()
+    }
+    fn channel_default() -> u32 {
+        0
+    }
+    fn ip_default() -> String {
+        "10.47.0.1".into()
+    }
+    fn prefix_length_default() -> u8 {
+        24
+    }
+    fn dhcp_range_start_default() -> String {
+        "10.47.0.10".into()
+    }
+    fn dhcp_range_end_default() -> String {
+        "10.47.0.200".into()
+    }
+    fn dhcp_lease_time_default() -> String {
+        "12h".into()
     }
 }

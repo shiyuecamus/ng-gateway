@@ -385,5 +385,18 @@ async fn get_menu_seed_data(_: &mut InitContext) -> Result<Option<Vec<NewMenuWit
             keep_alive: true,
             ..Default::default()
         },
+        NewMenuWithId {
+            id: 19,
+            name: "网络配置".into(),
+            parent_id: 12,
+            r#type: MenuType::Menu,
+            path: Some("/maintenance/network".into()),
+            component: "/maintenance/network/index".into(),
+            sort: Some(1),
+            title: "page.maintenance.network.title".into(),
+            icon: Some("mdi:ethernet".into()),
+            keep_alive: true,
+            ..Default::default()
+        },
     ]))
 }

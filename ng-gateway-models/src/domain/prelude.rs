@@ -26,6 +26,13 @@ pub use crate::domain::{
         HttpMethod, HttpRequest, HttpResponse, PingMode, PingRequest, PingResponse, PingSample,
         TcpConnectRequest, TcpConnectResponse,
     },
+    network::{
+        ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
+        InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config,
+        LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
+        PlatformSupport, StaApCapability, WifiAccessPoint, WifiBand, WifiConnectRequest, WifiMode,
+        WifiSecurity, WifiStaStatus, WiredStatus, WirelessInterfaceCapability,
+    },
     plugin::{NewPlugin, PluginInfo, PluginPageParams, UpdatePlugin},
     point::{
         NewPoint, PointInfo, PointPageParams, UpdatePoint, WritePointPayload, WritePointResult,

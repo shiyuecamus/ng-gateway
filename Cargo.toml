@@ -372,6 +372,16 @@ version = "0.13"
 features = ["json", "rustls-native-certs", "stream"]
 [workspace.dependencies.surge-ping]
 version = "0.8"
+[workspace.dependencies.network-interface]
+version = "2"
+[workspace.dependencies.wifi_scan]
+version = "0.7"
+
+# D-Bus (Linux only — used for NetworkManager integration)
+[workspace.dependencies.zbus]
+version = "5"
+default-features = false
+features = ["tokio"]
 
 # Memory Allocator
 # Use jemalloc as the global allocator on Linux to reduce memory fragmentation

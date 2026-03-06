@@ -9,9 +9,14 @@ description: "High-throughput IoT gateway (NG Gateway)"
 homepage: "https://github.com/shiyuecamus/ng-gateway"
 license: "Apache-2.0"
 
-# Runtime dependencies (best-effort baseline; validated in Phase 2 tests).
+# Runtime dependencies.
 depends:
   - ca-certificates
+recommends:
+  - hostapd
+  - dnsmasq-base
+  - iw
+  - iptables
 
 contents:
   # Create install root directory explicitly.
@@ -33,6 +38,15 @@ contents:
 
   - src: {{SYSTEMD_UNIT}}
     dst: /lib/systemd/system/ng-gateway.service
+
+  # AP hotspot resources (init-network.sh deploys units to /lib/systemd/system at first boot).
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway/systemd
+    dst: /opt/ng-gateway/systemd
+    type: dir
+  - src: {{ROOTFS_DIR}}/opt/ng-gateway/scripts
+    dst: /opt/ng-gateway/scripts
+    type: dir
+
   - src: {{ROOTFS_DIR}}/etc/ng-gateway
     dst: /etc/ng-gateway
     type: dir

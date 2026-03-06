@@ -13,6 +13,7 @@ use actix_web::{
 };
 use async_trait::async_trait;
 use middleware::cors::middleware;
+use ng_gateway_core::NetworkService;
 use ng_gateway_error::{init::InitContextError, NGError, NGResult};
 use ng_gateway_models::{
     settings::{SSLType, Settings, WebUiMode},
@@ -90,25 +91,39 @@ impl NGWebServer {
             gateway,
         };
 
-        let mut server = HttpServer::new(move || {
-            let mut app = App::new()
-                .app_data(Data::new(Arc::new(state.clone())))
-                .wrap(middleware(&cors_config))
-                .wrap(Logger::default())
-                .wrap(Compress::default())
-                .wrap(NormalizePath::trim())
-                // Public root routes (not under `/api`).
-                .configure(api::configure_public_routes)
-                // Versioned API routes under router prefix (default: `/api`).
-                .service(web::scope(&router_prefix).configure(api::configure_routes));
+        // Initialize NetworkService (best-effort: log warning and continue if it fails).
+        let network_service: Option<Data<Arc<NetworkService>>> =
+            match NetworkService::new(settings.network.clone()).await {
+                Ok(svc) => Some(Data::new(Arc::new(svc))),
+                Err(e) => {
+                    tracing::warn!("Network service initialization failed (degraded mode): {e}");
+                    None
+                }
+            };
 
-            // Register UI routes as the last-resort GET/HEAD handler (SPA + static files).
-            // Best practice: a single switch (`web.ui.enabled`) controls on/off.
+        let mut server = HttpServer::new(move || {
+            let mut app = App::new().app_data(Data::new(Arc::new(state.clone())));
+
+            if let Some(ref ns) = network_service {
+                app = app.app_data(ns.clone());
+            }
+
             if ui_enabled {
                 app = app.app_data(ui_cfg_data.clone());
                 if let Some(ref assets) = ui_assets_data {
                     app = app.app_data(assets.clone());
                 }
+            }
+
+            let mut app = app
+                .wrap(middleware(&cors_config))
+                .wrap(Logger::default())
+                .wrap(Compress::default())
+                .wrap(NormalizePath::trim())
+                .configure(api::configure_public_routes)
+                .service(web::scope(&router_prefix).configure(api::configure_routes));
+
+            if ui_enabled {
                 app = app.configure(static_ui::configure_ui_routes);
             }
 
