@@ -37,6 +37,7 @@ replace "ROOTFS_DIR" "${ROOTFS_DIR:-}"
 replace "SYSTEMD_UNIT" "${SYSTEMD_UNIT:-}"
 replace "POSTINSTALL" "${POSTINSTALL:-}"
 replace "PREREMOVE" "${PREREMOVE:-}"
+replace "POSTREMOVE" "${POSTREMOVE:-}"
 
 if grep -q "{{DEB_ARCH}}" "${out}"; then
   replace "DEB_ARCH" "${DEB_ARCH:-}"
