@@ -7,6 +7,7 @@
 //!
 //! All files are written to `/etc/ng-gateway/` (or a configurable base directory).
 
+use crate::network::capability::ApUsableChannel;
 use ng_gateway_error::{network::NetworkError, NGResult};
 use ng_gateway_models::domain::prelude::WifiBand;
 use std::path::{Path, PathBuf};
@@ -68,15 +69,70 @@ pub fn hw_mode_for_channel(channel: u32) -> &'static str {
 
 /// Pick a sensible default channel when the user specifies `0` (auto).
 ///
-/// Prefers 5 GHz (channel 36) if the hardware supports it — less interference and
-/// higher throughput. Falls back to 2.4 GHz channel 6 (widely compatible, minimal
-/// overlap with channels 1 and 11).
-pub fn default_channel_for_bands(bands: &[WifiBand]) -> u32 {
-    if bands.contains(&WifiBand::Band5Ghz) {
-        36
-    } else {
-        6
+/// This is the **static fallback** used when runtime channel availability data
+/// is not available (e.g. during `init-network.sh` first boot before the Rust
+/// process runs). Always returns 2.4 GHz channel 6 for maximum compatibility.
+///
+/// Prefer [`select_best_ap_channel`] when runtime `iw phy info` data is available.
+pub fn default_channel_for_bands(_bands: &[WifiBand]) -> u32 {
+    6
+}
+
+/// Select the best AP channel from a list of kernel-verified usable channels.
+///
+/// Selection strategy (in priority order):
+/// 1. **Non-DFS 5 GHz** (channels 149-165) — highest throughput, least interference.
+///    Among candidates, prefer channel 149 (widest availability).
+/// 2. **Non-DFS 5 GHz** (channels 36-48) — good throughput, but DFS in many regions.
+///    Only reached if the kernel confirms these are non-DFS for the current regulatory domain.
+/// 3. **2.4 GHz channel 6** — universal fallback, minimal overlap with channels 1 and 11.
+/// 4. **Any 2.4 GHz** — if channel 6 is somehow not in the list.
+///
+/// Returns `None` if the usable channel list is empty (caller should fall back to
+/// [`default_channel_for_bands`]).
+pub fn select_best_ap_channel(usable_channels: &[ApUsableChannel]) -> Option<u32> {
+    if usable_channels.is_empty() {
+        return None;
     }
+
+    // Priority 1: Non-DFS 5 GHz UNII-3 band (149-165) — least DFS globally.
+    let unii3: Vec<_> = usable_channels
+        .iter()
+        .filter(|c| c.band == WifiBand::Band5Ghz && c.channel >= 149)
+        .collect();
+    if !unii3.is_empty() {
+        return Some(unii3.iter().min_by_key(|c| c.channel).unwrap().channel);
+    }
+
+    // Priority 2: Non-DFS 5 GHz UNII-1 band (36-48).
+    let unii1: Vec<_> = usable_channels
+        .iter()
+        .filter(|c| c.band == WifiBand::Band5Ghz && c.channel <= 48)
+        .collect();
+    if !unii1.is_empty() {
+        return Some(unii1.iter().min_by_key(|c| c.channel).unwrap().channel);
+    }
+
+    // Priority 3: 2.4 GHz channel 6 (preferred non-overlapping channel).
+    if usable_channels.iter().any(|c| c.channel == 6) {
+        return Some(6);
+    }
+
+    // Priority 4: Any 2.4 GHz channel (prefer 1, then 11, then lowest).
+    let two_g: Vec<_> = usable_channels
+        .iter()
+        .filter(|c| c.band == WifiBand::Band2_4Ghz)
+        .collect();
+    if !two_g.is_empty() {
+        for preferred in [1, 11] {
+            if two_g.iter().any(|c| c.channel == preferred) {
+                return Some(preferred);
+            }
+        }
+        return Some(two_g.iter().min_by_key(|c| c.channel).unwrap().channel);
+    }
+
+    None
 }
 
 /// Check whether a channel number falls in the 5 GHz range.
@@ -321,13 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn test_render_hostapd_auto_channel_prefers_5g() {
+    fn test_render_hostapd_auto_channel_fallback_2g() {
         let mut ctx = test_ctx();
         ctx.channel = 0;
         ctx.supported_bands = vec![WifiBand::Band2_4Ghz, WifiBand::Band5Ghz];
         let conf = render_hostapd_conf(&ctx);
-        assert!(conf.contains("hw_mode=a"));
-        assert!(conf.contains("channel=36"));
+        assert!(conf.contains("hw_mode=g"));
+        assert!(conf.contains("channel=6"));
     }
 
     #[test]
@@ -384,11 +440,65 @@ mod tests {
     #[test]
     fn test_default_channel_for_bands() {
         assert_eq!(default_channel_for_bands(&[WifiBand::Band2_4Ghz]), 6);
-        assert_eq!(default_channel_for_bands(&[WifiBand::Band5Ghz]), 36);
+        assert_eq!(default_channel_for_bands(&[WifiBand::Band5Ghz]), 6);
         assert_eq!(
             default_channel_for_bands(&[WifiBand::Band2_4Ghz, WifiBand::Band5Ghz]),
-            36
+            6
         );
         assert_eq!(default_channel_for_bands(&[]), 6);
+    }
+
+    fn ch(channel: u32, frequency: u32, band: WifiBand) -> ApUsableChannel {
+        ApUsableChannel {
+            channel,
+            frequency,
+            band,
+        }
+    }
+
+    #[test]
+    fn test_select_best_prefers_unii3_5ghz() {
+        let channels = vec![
+            ch(6, 2437, WifiBand::Band2_4Ghz),
+            ch(36, 5180, WifiBand::Band5Ghz),
+            ch(149, 5745, WifiBand::Band5Ghz),
+            ch(153, 5765, WifiBand::Band5Ghz),
+        ];
+        assert_eq!(select_best_ap_channel(&channels), Some(149));
+    }
+
+    #[test]
+    fn test_select_best_falls_back_to_unii1() {
+        let channels = vec![
+            ch(1, 2412, WifiBand::Band2_4Ghz),
+            ch(6, 2437, WifiBand::Band2_4Ghz),
+            ch(36, 5180, WifiBand::Band5Ghz),
+            ch(40, 5200, WifiBand::Band5Ghz),
+        ];
+        assert_eq!(select_best_ap_channel(&channels), Some(36));
+    }
+
+    #[test]
+    fn test_select_best_falls_back_to_2g_ch6() {
+        let channels = vec![
+            ch(1, 2412, WifiBand::Band2_4Ghz),
+            ch(6, 2437, WifiBand::Band2_4Ghz),
+            ch(11, 2462, WifiBand::Band2_4Ghz),
+        ];
+        assert_eq!(select_best_ap_channel(&channels), Some(6));
+    }
+
+    #[test]
+    fn test_select_best_2g_without_ch6() {
+        let channels = vec![
+            ch(1, 2412, WifiBand::Band2_4Ghz),
+            ch(11, 2462, WifiBand::Band2_4Ghz),
+        ];
+        assert_eq!(select_best_ap_channel(&channels), Some(1));
+    }
+
+    #[test]
+    fn test_select_best_empty() {
+        assert_eq!(select_best_ap_channel(&[]), None);
     }
 }

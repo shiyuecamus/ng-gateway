@@ -12,8 +12,13 @@ Requires=ng-gateway-ap-setup.service
 [Service]
 Type=simple
 ExecStart=/usr/sbin/hostapd /etc/ng-gateway/hostapd.conf
-Restart=always
-RestartSec=2
+Restart=on-failure
+RestartSec=3
+# Stop restarting after 5 failures within 30 seconds to prevent infinite
+# crash loops (e.g. DFS/RADAR channel rejection). Without this, a config
+# error leaves the WiFi interface stuck in __ap mode indefinitely.
+StartLimitBurst=5
+StartLimitIntervalSec=30
 
 [Install]
 WantedBy=multi-user.target

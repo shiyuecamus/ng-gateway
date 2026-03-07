@@ -1124,14 +1124,14 @@ impl LinuxNetworkManager {
     }
 
     /// Ensure `ap-env` and `hostapd.conf` reflect the runtime-detected AP mode
-    /// and that the hostapd band configuration (`hw_mode`, 802.11n/ac flags)
-    /// matches the configured channel.
+    /// and that the hostapd channel is actually usable (non-DFS, non-disabled).
     ///
-    /// Handles two classes of drift:
+    /// Handles three classes of drift:
     /// 1. **Mode mismatch** — install-time probe vs runtime probe gave different
     ///    AP mode results (Concurrent vs Exclusive).
-    /// 2. **Band mismatch** — `hw_mode` in hostapd.conf doesn't match the channel
-    ///    (e.g. `hw_mode=g` with channel 36, or missing `ieee80211ac` for 5 GHz).
+    /// 2. **Channel unusable** — configured channel is DFS/RADAR or disabled in
+    ///    the current regulatory domain (e.g. channel 36 in CN).
+    /// 3. **Band mismatch** — `hw_mode` in hostapd.conf doesn't match the channel.
     async fn sync_ap_config_with_mode(&self, caps: &NetworkCapabilities) -> NGResult<()> {
         let env_path = format!("{}/{}", AP_CONFIG_DIR, AP_ENV_FILE);
         let current_env = tokio::fs::read_to_string(&env_path)
@@ -1149,12 +1149,21 @@ impl LinuxNetworkManager {
         let runtime_exclusive = caps.ap_mode == ApMode::Exclusive;
         let mode_changed = file_exclusive != runtime_exclusive;
 
-        // ── 2. Check band / hw_mode consistency ──
+        // ── 2. Query kernel for AP-usable channels and validate current config ──
         let file_channel: u32 = parse_conf_value(&current_conf, "channel")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let file_hw_mode =
             parse_conf_value(&current_conf, "hw_mode").unwrap_or_else(|| "g".to_string());
+
+        // Get the phy name from the first wireless interface for channel query.
+        let phy_name = caps.wireless_interfaces.first().map(|w| w.phy.as_str());
+
+        let usable_channels = if let Some(phy) = phy_name {
+            crate::network::capability::detect_ap_usable_channels(phy).await
+        } else {
+            Vec::new()
+        };
 
         let supported_bands: Vec<WifiBand> = caps
             .wireless_interfaces
@@ -1162,14 +1171,31 @@ impl LinuxNetworkManager {
             .flat_map(|w| w.supported_bands.iter().cloned())
             .collect();
 
-        // Resolve channel 0 → concrete default based on hardware.
-        let effective_channel = if file_channel == 0 {
-            ap_config::default_channel_for_bands(&supported_bands)
-        } else {
+        // Check if the currently configured channel is usable.
+        let current_channel_usable =
+            file_channel > 0 && usable_channels.iter().any(|c| c.channel == file_channel);
+
+        // Resolve the effective channel: use current if usable, otherwise pick best.
+        let effective_channel = if current_channel_usable {
             file_channel
+        } else if !usable_channels.is_empty() {
+            let best = ap_config::select_best_ap_channel(&usable_channels)
+                .unwrap_or_else(|| ap_config::default_channel_for_bands(&supported_bands));
+            if file_channel > 0 {
+                warn!(
+                    old_channel = file_channel,
+                    new_channel = best,
+                    "Configured AP channel is not usable (DFS/RADAR/disabled) — switching"
+                );
+            }
+            best
+        } else {
+            ap_config::default_channel_for_bands(&supported_bands)
         };
+
         let expected_hw_mode = ap_config::hw_mode_for_channel(effective_channel);
-        let band_changed = file_hw_mode != expected_hw_mode || file_channel == 0;
+        let band_changed =
+            file_hw_mode != expected_hw_mode || file_channel == 0 || !current_channel_usable;
 
         if !mode_changed && !band_changed {
             return Ok(());
@@ -1526,7 +1552,24 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         if let Some(settings_path) = self.find_connection_for_interface(name).await {
             debug!(interface = name, path = %settings_path, "Updating existing NM connection");
 
-            let settings = build_settings();
+            // NM Update() replaces ALL settings — we must GetSettings first, merge
+            // our ipv4 changes, then Update. This preserves WiFi-specific sections
+            // (802-11-wireless SSID, 802-11-wireless-security) that would otherwise
+            // be wiped, causing the connection to become invalid.
+            let settings_ref = ObjectPath::try_from(settings_path.as_str())
+                .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
+            let mut current = self
+                .get_connection_settings(&settings_ref)
+                .await
+                .ok_or_else(|| {
+                    NetworkError::ConfigError(format!(
+                        "Failed to read existing connection settings for {name}"
+                    ))
+                })?;
+
+            // Merge ipv4 settings into the existing connection profile.
+            let ipv4_owned = build_ipv4_settings_owned(&config.ip_config, &ip_strings);
+            current.insert(nm_dbus::conn::IPV4.to_string(), ipv4_owned);
 
             if let Err(e) = self
                 .dbus_conn
@@ -1535,14 +1578,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                     settings_path.as_str(),
                     Some(nm_dbus::iface::SETTINGS_CONN),
                     nm_dbus::dbus_method::UPDATE,
-                    &(settings,),
+                    &(current,),
                 )
                 .await
             {
                 warn!(error = %e, "Failed to update existing connection, falling back to AddAndActivate");
             } else {
-                let settings_ref = ObjectPath::try_from(settings_path.as_str())
-                    .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
                 let device_ref = ObjectPath::try_from(device_path.as_str())
                     .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
                 let root = ObjectPath::try_from("/")
@@ -2758,6 +2799,72 @@ impl IpConfigStrings {
             },
         }
     }
+}
+
+/// Build NM IPv4 settings as `HashMap<String, OwnedValue>` for merging into
+/// existing connection settings via GetSettings → modify → Update.
+///
+/// Unlike [`build_nm_ipv4_settings`] (which returns borrowed `Value<'a>`), this
+/// produces owned values compatible with the `HashMap<String, HashMap<String, OwnedValue>>`
+/// returned by `GetSettings()`.
+fn build_ipv4_settings_owned(
+    ip_config: &IpConfig,
+    strings: &IpConfigStrings,
+) -> HashMap<String, OwnedValue> {
+    let mut ipv4: HashMap<String, OwnedValue> = HashMap::new();
+    match ip_config {
+        IpConfig::Dhcp => {
+            ipv4.insert(
+                nm_dbus::conn::METHOD.to_string(),
+                OwnedValue::try_from(Value::from(nm_dbus::method::AUTO)).unwrap(),
+            );
+        }
+        IpConfig::Static { prefix_length, .. } => {
+            ipv4.insert(
+                nm_dbus::conn::METHOD.to_string(),
+                OwnedValue::try_from(Value::from(nm_dbus::method::MANUAL)).unwrap(),
+            );
+
+            if let Some(ip_s) = strings.addr_str.as_deref() {
+                let prefix_u32 = *prefix_length as u32;
+                let mut addr_dict: HashMap<&str, Value<'_>> = HashMap::new();
+                addr_dict.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(ip_s));
+                addr_dict.insert(nm_dbus::prop::ADDR_KEY_PREFIX, Value::from(prefix_u32));
+                if let Ok(v) = OwnedValue::try_from(Value::from(vec![addr_dict])) {
+                    ipv4.insert(nm_dbus::conn::ADDRESS_DATA.to_string(), v);
+                }
+            }
+
+            if let Some(gw) = strings.gw_str.as_deref() {
+                ipv4.insert(
+                    "gateway".to_string(),
+                    OwnedValue::try_from(Value::from(gw)).unwrap(),
+                );
+            }
+
+            if !strings.dns_strings.is_empty() {
+                let dns_data: Vec<HashMap<&str, Value<'_>>> = strings
+                    .dns_strings
+                    .iter()
+                    .map(|d| {
+                        let mut m: HashMap<&str, Value<'_>> = HashMap::new();
+                        m.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(d.as_str()));
+                        m
+                    })
+                    .collect();
+                if let Ok(v) = OwnedValue::try_from(Value::from(dns_data)) {
+                    ipv4.insert(nm_dbus::conn::DNS_DATA.to_string(), v);
+                }
+            }
+        }
+        IpConfig::Disabled => {
+            ipv4.insert(
+                nm_dbus::conn::METHOD.to_string(),
+                OwnedValue::try_from(Value::from(nm_dbus::method::DISABLED)).unwrap(),
+            );
+        }
+    }
+    ipv4
 }
 
 /// Build NM D-Bus IPv4 settings dict from the unified [`IpConfig`] enum.

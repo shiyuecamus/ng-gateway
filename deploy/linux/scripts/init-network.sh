@@ -150,23 +150,84 @@ phy_supports_5ghz() {
   iw phy "$phy" info 2>/dev/null | grep -qE '^\s+\*\s+5[1-8][0-9]{2}(\.[0-9]+)?\s+MHz'
 }
 
+# Find the best AP-usable channel by querying the kernel's regulatory data.
+#
+# Strategy:
+#   1. Parse `iw phy <phy> info` for channels without DFS/RADAR/no-IR/disabled flags.
+#   2. Prefer non-DFS 5 GHz UNII-3 (149-165) for best throughput.
+#   3. Fall back to non-DFS 5 GHz UNII-1 (36-48) if kernel says they're usable.
+#   4. Fall back to 2.4 GHz channel 6 as universal safe default.
+#
+# Sets global: BEST_AP_CHANNEL (0 if detection fails → caller uses fallback).
+find_best_ap_channel() {
+  local phy="$1"
+  BEST_AP_CHANNEL=0
+
+  local phy_info
+  phy_info=$(iw phy "$phy" info 2>/dev/null) || return
+
+  # Extract usable channels: lines with MHz that don't have DFS/radar/no-IR/disabled.
+  # Example line: "  * 5745.0 MHz [149] (30.0 dBm)"
+  # DFS line:     "  * 5180.0 MHz [36] (23.0 dBm) (no IR, radar detection)"
+  local usable_5g_unii3=""
+  local usable_5g_unii1=""
+  local usable_2g_ch6=""
+  local usable_2g_any=""
+
+  while IFS= read -r line; do
+    local trimmed="${line#"${line%%[![:space:]]*}"}"
+    [[ "$trimmed" == "* "* ]] || continue
+    echo "$trimmed" | grep -qi "MHz" || continue
+
+    # Skip channels with DFS/radar/no-IR/disabled flags.
+    local lower
+    lower=$(echo "$trimmed" | tr '[:upper:]' '[:lower:]')
+    echo "$lower" | grep -qE '(disabled|no ir|radar|passive)' && continue
+
+    # Extract channel number from [N].
+    local ch
+    ch=$(echo "$trimmed" | grep -oP '\[\K[0-9]+(?=\])') || continue
+
+    if [[ "$ch" -ge 149 && "$ch" -le 165 ]]; then
+      [[ -z "$usable_5g_unii3" ]] && usable_5g_unii3="$ch"
+    elif [[ "$ch" -ge 36 && "$ch" -le 48 ]]; then
+      [[ -z "$usable_5g_unii1" ]] && usable_5g_unii1="$ch"
+    elif [[ "$ch" -eq 6 ]]; then
+      usable_2g_ch6=6
+    elif [[ "$ch" -ge 1 && "$ch" -le 14 ]]; then
+      [[ -z "$usable_2g_any" ]] && usable_2g_any="$ch"
+    fi
+  done <<< "$phy_info"
+
+  # Select best channel in priority order.
+  if [[ -n "$usable_5g_unii3" ]]; then
+    BEST_AP_CHANNEL="$usable_5g_unii3"
+  elif [[ -n "$usable_5g_unii1" ]]; then
+    BEST_AP_CHANNEL="$usable_5g_unii1"
+  elif [[ -n "$usable_2g_ch6" ]]; then
+    BEST_AP_CHANNEL=6
+  elif [[ -n "$usable_2g_any" ]]; then
+    BEST_AP_CHANNEL="$usable_2g_any"
+  fi
+}
+
 # Resolve channel and hw_mode based on hardware capabilities.
-#   - If channel=0 (auto): pick 5 GHz ch 36 if supported, else 2.4 GHz ch 6.
+#   - If channel=0 (auto): query kernel for best non-DFS channel.
+#     Prefers 5 GHz UNII-3 (149-165), then UNII-1 (36-48), then 2.4 GHz ch 6.
+#     Falls back to ch 6 if kernel query fails or no usable channels found.
 #   - Returns via globals: RESOLVED_CHANNEL, RESOLVED_HW_MODE, RESOLVED_BAND_CAPS.
 resolve_channel_and_band() {
   local phy="$1"
   local requested_channel="$2"
 
-  local has_5g=false
-  if phy_supports_5ghz "$phy"; then
-    has_5g=true
-  fi
-
   if [[ "$requested_channel" -eq 0 ]]; then
-    if [[ "$has_5g" == "true" ]]; then
-      RESOLVED_CHANNEL=36
+    find_best_ap_channel "$phy"
+    if [[ "$BEST_AP_CHANNEL" -gt 0 ]]; then
+      RESOLVED_CHANNEL="$BEST_AP_CHANNEL"
+      log "Auto-selected AP channel ${RESOLVED_CHANNEL} (kernel-verified non-DFS)"
     else
       RESOLVED_CHANNEL=6
+      log "No kernel channel data available — using safe default channel 6"
     fi
   else
     RESOLVED_CHANNEL="$requested_channel"

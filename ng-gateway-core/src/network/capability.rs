@@ -364,6 +364,103 @@ fn extract_frequency(line: &str) -> Option<u32> {
     int_part.parse::<u32>().ok()
 }
 
+/// A Wi-Fi channel usable for AP mode (non-DFS, not disabled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApUsableChannel {
+    pub channel: u32,
+    pub frequency: u32,
+    pub band: WifiBand,
+}
+
+/// Parse channels from `iw phy <phy> info` that are usable for AP mode.
+///
+/// A channel is considered usable when its flags do NOT contain:
+/// - `no IR` (no initiate radiation — passive scan only)
+/// - `radar` / `radar detection` (DFS — requires CAC, most drivers reject)
+/// - `disabled`
+///
+/// Example frequency line from `iw phy info`:
+/// ```text
+///     * 5180.0 MHz [36] (20.0 dBm) (no IR, radar detection)
+///     * 2412.0 MHz [1] (20.0 dBm)
+///     * 5745.0 MHz [149] (30.0 dBm)
+/// ```
+pub fn parse_ap_usable_channels(iw_output: &str) -> Vec<ApUsableChannel> {
+    let mut channels = Vec::new();
+
+    for line in iw_output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(iw_tokens::BULLET_PREFIX) || !trimmed.contains("MHz") {
+            continue;
+        }
+
+        let lower = trimmed.to_lowercase();
+        if lower.contains("disabled")
+            || lower.contains("no ir")
+            || lower.contains("radar")
+            || lower.contains("passive")
+        {
+            continue;
+        }
+
+        let Some(freq) = extract_frequency(trimmed) else {
+            continue;
+        };
+        let Some(channel) = extract_channel_number(trimmed) else {
+            continue;
+        };
+
+        let band = match freq {
+            2400..=2500 => WifiBand::Band2_4Ghz,
+            5150..=5900 => WifiBand::Band5Ghz,
+            5925..=7125 => WifiBand::Band6Ghz,
+            _ => continue,
+        };
+
+        channels.push(ApUsableChannel {
+            channel,
+            frequency: freq,
+            band,
+        });
+    }
+
+    channels
+}
+
+/// Extract the channel number from a frequency line like `* 5180.0 MHz [36] (20.0 dBm)`.
+#[inline]
+fn extract_channel_number(line: &str) -> Option<u32> {
+    let open = line.find('[')?;
+    let close = line.find(']')?;
+    if close <= open + 1 {
+        return None;
+    }
+    line[open + 1..close].parse::<u32>().ok()
+}
+
+/// Query the kernel for AP-usable channels by running `iw phy <phy> info`.
+///
+/// Returns an empty Vec if `iw` is not available or the command fails.
+#[cfg(target_os = "linux")]
+pub async fn detect_ap_usable_channels(phy_name: &str) -> Vec<ApUsableChannel> {
+    let output = Command::new("iw")
+        .args(["phy", phy_name, "info"])
+        .output()
+        .await
+        .ok();
+
+    match output {
+        Some(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_ap_usable_channels(&stdout)
+        }
+        _ => {
+            warn!(phy = phy_name, "Failed to query phy info for AP channels");
+            Vec::new()
+        }
+    }
+}
+
 /// Aggregate per-interface capabilities into a single `StaApCapability` for the platform.
 ///
 /// Some drivers (especially Realtek) report AP in `Supported interface modes` but omit
@@ -602,5 +699,88 @@ Wiphy phy0
             determine_ap_mode(&[], StaApCapability::NotSupported),
             ApMode::Unavailable,
         );
+    }
+
+    // ─── AP usable channel parsing tests ───
+
+    const SAMPLE_IW_WITH_DFS: &str = r#"
+    Band 1:
+        * 2412.0 MHz [1] (20.0 dBm)
+        * 2437.0 MHz [6] (20.0 dBm)
+        * 2462.0 MHz [11] (20.0 dBm)
+    Band 2:
+        * 5180.0 MHz [36] (23.0 dBm) (no IR, radar detection)
+        * 5200.0 MHz [40] (23.0 dBm) (no IR, radar detection)
+        * 5240.0 MHz [48] (23.0 dBm) (no IR, radar detection)
+        * 5745.0 MHz [149] (30.0 dBm)
+        * 5765.0 MHz [153] (30.0 dBm)
+        * 5785.0 MHz [157] (30.0 dBm)
+        * 5805.0 MHz [161] (30.0 dBm)
+        * 5825.0 MHz [165] (30.0 dBm)
+"#;
+
+    #[test]
+    fn test_parse_ap_usable_channels_filters_dfs() {
+        let channels = parse_ap_usable_channels(SAMPLE_IW_WITH_DFS);
+        let ch_nums: Vec<u32> = channels.iter().map(|c| c.channel).collect();
+
+        // DFS channels 36, 40, 48 should be filtered out.
+        assert!(!ch_nums.contains(&36));
+        assert!(!ch_nums.contains(&40));
+        assert!(!ch_nums.contains(&48));
+
+        // Non-DFS channels should be present.
+        assert!(ch_nums.contains(&1));
+        assert!(ch_nums.contains(&6));
+        assert!(ch_nums.contains(&149));
+        assert!(ch_nums.contains(&165));
+    }
+
+    #[test]
+    fn test_parse_ap_usable_channels_band_assignment() {
+        let channels = parse_ap_usable_channels(SAMPLE_IW_WITH_DFS);
+        let ch6 = channels.iter().find(|c| c.channel == 6).unwrap();
+        assert_eq!(ch6.band, WifiBand::Band2_4Ghz);
+        assert_eq!(ch6.frequency, 2437);
+
+        let ch149 = channels.iter().find(|c| c.channel == 149).unwrap();
+        assert_eq!(ch149.band, WifiBand::Band5Ghz);
+        assert_eq!(ch149.frequency, 5745);
+    }
+
+    #[test]
+    fn test_parse_ap_usable_channels_all_dfs() {
+        let output = r#"
+    Band 2:
+        * 5180.0 MHz [36] (23.0 dBm) (no IR, radar detection)
+        * 5200.0 MHz [40] (23.0 dBm) (no IR, radar detection)
+"#;
+        let channels = parse_ap_usable_channels(output);
+        assert!(channels.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ap_usable_channels_disabled() {
+        let output = r#"
+    Band 1:
+        * 2412.0 MHz [1] (20.0 dBm)
+        * 2484.0 MHz [14] (disabled)
+"#;
+        let channels = parse_ap_usable_channels(output);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].channel, 1);
+    }
+
+    #[test]
+    fn test_extract_channel_number() {
+        assert_eq!(
+            extract_channel_number("* 5745.0 MHz [149] (30.0 dBm)"),
+            Some(149)
+        );
+        assert_eq!(
+            extract_channel_number("* 2412.0 MHz [1] (20.0 dBm)"),
+            Some(1)
+        );
+        assert_eq!(extract_channel_number("no brackets here"), None);
     }
 }
