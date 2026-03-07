@@ -8,6 +8,8 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+pub mod nm_dbus;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -23,7 +25,7 @@ use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::domain::prelude::{
     ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
     NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary, WifiAccessPoint,
-    WifiBand, WifiConnectRequest, WifiSecurity, WifiStaStatus,
+    WifiBand, WifiConnectPreflight, WifiConnectRequest, WifiSecurity, WifiStaStatus,
 };
 
 /// Platform-abstracted network management interface.
@@ -65,7 +67,21 @@ pub trait PlatformNetworkManager: Send + Sync {
     /// Request a Wi-Fi scan and return visible access points.
     async fn scan_wifi(&self, interface_name: Option<&str>) -> NGResult<Vec<WifiAccessPoint>>;
 
+    /// Pre-flight check for a Wi-Fi connect operation.
+    ///
+    /// Returns information about side-effects (AP stop, connection loss) so the
+    /// frontend can display an appropriate confirmation dialog before proceeding.
+    async fn wifi_connect_preflight(
+        &self,
+        request: &WifiConnectRequest,
+    ) -> NGResult<WifiConnectPreflight>;
+
     /// Connect to a Wi-Fi network as STA.
+    ///
+    /// When AP is running in exclusive mode, this will orchestrate: stop AP →
+    /// switch to managed mode → connect STA. If the driver actually supports
+    /// concurrent STA+AP (detected via probe), AP will be restored on a
+    /// virtual interface after STA is connected.
     async fn connect_wifi(&self, request: &WifiConnectRequest) -> NGResult<WifiStaStatus>;
 
     /// Disconnect Wi-Fi STA on the given (or default) interface.

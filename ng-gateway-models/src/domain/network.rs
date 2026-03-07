@@ -274,6 +274,27 @@ pub struct WifiStaStatus {
     pub connected_secs: Option<u64>,
 }
 
+/// Pre-flight check result for Wi-Fi connect operations.
+///
+/// Returned by the preflight endpoint so the frontend can display appropriate
+/// confirmation dialogs before proceeding with `connect_wifi`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiConnectPreflight {
+    /// Target SSID the user wants to connect to.
+    pub ssid: String,
+    /// Whether the AP hotspot is currently active and will be stopped to free the interface.
+    pub ap_will_stop: bool,
+    /// Whether the current management connection (the one serving this Web UI) will be lost.
+    /// True when the user is connected via the AP hotspot and the AP will be stopped.
+    pub connection_will_be_lost: bool,
+    /// Whether the AP can be automatically restored on a virtual interface after
+    /// the STA connection succeeds (probe detected concurrent STA+AP support).
+    pub ap_can_restore: bool,
+    /// Human-readable warnings for the frontend to display.
+    pub warnings: Vec<String>,
+}
+
 /// AP hotspot status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -295,6 +316,10 @@ pub struct ApStatus {
     pub ap_mode: ApMode,
     /// Whether starting the AP will disconnect the current Wi-Fi STA connection.
     pub sta_will_disconnect: bool,
+    /// Set to `true` if a previous `stop_ap` failed to restore the STA connection.
+    /// The frontend should prompt the user to restart the network or reboot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sta_restore_failed: bool,
 }
 
 /// DNS configuration.
@@ -422,7 +447,11 @@ pub struct ConfigureApRequest {
     ///
     /// Overrides the value from `gateway.toml` (`general.wifi_country_code`) for this
     /// configuration update. When omitted, the configured or default value is used.
-    #[validate(length(min = 2, max = 2, message = "country code must be exactly 2 characters"))]
+    #[validate(length(
+        min = 2,
+        max = 2,
+        message = "country code must be exactly 2 characters"
+    ))]
     pub country_code: Option<String>,
     /// Whether to restart the AP after configuration change.
     pub restart: Option<bool>,

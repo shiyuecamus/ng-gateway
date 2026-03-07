@@ -15,7 +15,7 @@ use crate::network::{
     capability::{
         aggregate_sta_ap_capability, detect_phy_capabilities, determine_ap_mode, resolve_phy_name,
     },
-    platform::PlatformNetworkManager,
+    platform::{nm_dbus, PlatformNetworkManager},
 };
 use async_trait::async_trait;
 use ng_gateway_error::{network::NetworkError, NGResult};
@@ -23,8 +23,8 @@ use ng_gateway_models::domain::prelude::{
     ApMode, ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest,
     DnsConfig, InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config,
     LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
-    PlatformSupport, WifiAccessPoint, WifiBand, WifiConnectRequest, WifiMode, WifiSecurity,
-    WifiStaStatus, WirelessInterfaceCapability,
+    PlatformSupport, WifiAccessPoint, WifiBand, WifiConnectPreflight, WifiConnectRequest, WifiMode,
+    WifiSecurity, WifiStaStatus, WirelessInterfaceCapability,
 };
 use std::{collections::HashMap, net::IpAddr, time::Duration};
 use tokio::{sync::RwLock, time::sleep};
@@ -36,6 +36,9 @@ use zbus::{
 };
 
 // ─── D-Bus Proxy Definitions ───
+//
+// Note: `#[proxy]` macro attributes require string literals — we cannot
+// use `nm_dbus::iface::*` constants inside the macro invocation.
 
 /// Proxy for `org.freedesktop.NetworkManager` root interface.
 #[proxy(
@@ -65,7 +68,6 @@ trait NetworkManager {
     #[zbus(name = "DeactivateConnection")]
     fn deactivate_connection(&self, active_connection: &ObjectPath<'_>) -> zbus::Result<()>;
 
-    /// Look up a connection by interface name across all NM saved connections.
     #[zbus(name = "GetDeviceByIpIface")]
     fn get_device_by_ip_iface(&self, iface: &str) -> zbus::Result<OwnedObjectPath>;
 
@@ -84,19 +86,33 @@ trait NMProperties {
     fn get_all(&self, interface_name: &str) -> zbus::Result<HashMap<String, OwnedValue>>;
 }
 
-// ─── NM Device Type Constants ───
+// ─── Linux-specific path and protocol constants ───
 
-const NM_DEVICE_TYPE_ETHERNET: u32 = 1;
-const NM_DEVICE_TYPE_WIFI: u32 = 2;
-const NM_DEVICE_TYPE_BRIDGE: u32 = 13;
-const NM_DEVICE_TYPE_VLAN: u32 = 11;
+/// sysfs paths and statistic counter names.
+mod sysfs {
+    pub const NET_DIR: &str = "/sys/class/net";
+    pub const STATISTICS_DIR: &str = "statistics";
+    pub const RX_BYTES: &str = "rx_bytes";
+    pub const TX_BYTES: &str = "tx_bytes";
+    pub const RX_PACKETS: &str = "rx_packets";
+    pub const TX_PACKETS: &str = "tx_packets";
+    pub const RX_ERRORS: &str = "rx_errors";
+    pub const TX_ERRORS: &str = "tx_errors";
 
-// ─── NM Device State Constants ───
+    /// Build the full sysfs stat path for a given interface and counter.
+    pub fn stat_path(iface: &str, stat: &str) -> String {
+        format!("{NET_DIR}/{iface}/{STATISTICS_DIR}/{stat}")
+    }
+}
 
-const NM_DEVICE_STATE_ACTIVATED: u32 = 100;
-const NM_DEVICE_STATE_DISCONNECTED: u32 = 30;
-const NM_DEVICE_STATE_UNAVAILABLE: u32 = 20;
-const NM_DEVICE_STATE_UNMANAGED: u32 = 10;
+/// hostapd control interface constants.
+mod hostapd_ctrl {
+    pub const CTRL_DIR: &str = "/var/run/hostapd";
+    pub const CLIENT_PATH_PREFIX: &str = "/tmp/ng-gw-hapd";
+    pub const CMD_STA_FIRST: &str = "STA-FIRST";
+    pub const CMD_STA_NEXT: &str = "STA-NEXT";
+    pub const RESP_FAIL: &str = "FAIL";
+}
 
 /// Runtime state directory for persisting transient data across restarts.
 const RUNTIME_STATE_DIR: &str = "/run/ng-gateway";
@@ -235,15 +251,15 @@ impl LinuxNetworkManager {
         let device_path_ref = ObjectPath::try_from(device_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
         let dev_props = self
-            .get_all_properties(&device_path_ref, "org.freedesktop.NetworkManager.Device")
+            .get_all_properties(&device_path_ref, nm_dbus::iface::DEVICE)
             .await?;
 
-        let iface_name = prop_str(&dev_props, "Interface").unwrap_or_default();
+        let iface_name = prop_str(&dev_props, nm_dbus::prop::INTERFACE).unwrap_or_default();
         if iface_name.is_empty() {
             return Ok(None);
         }
 
-        let device_type = prop_u32(&dev_props, "DeviceType").unwrap_or(0);
+        let device_type = prop_u32(&dev_props, nm_dbus::prop::DEVICE_TYPE).unwrap_or(0);
         let kind = nm_device_type_to_kind(device_type);
 
         // Skip loopback and unrecognized virtual interfaces.
@@ -251,24 +267,25 @@ impl LinuxNetworkManager {
             return Ok(None);
         }
 
-        let state = prop_u32(&dev_props, "State").unwrap_or(0);
+        let state = prop_u32(&dev_props, nm_dbus::prop::STATE).unwrap_or(0);
         let link_state = nm_state_to_link_state(state);
 
-        let mac_address = prop_str(&dev_props, "HwAddress");
+        let mac_address = prop_str(&dev_props, nm_dbus::prop::HW_ADDRESS);
         let speed_mbps =
-            prop_u32(&dev_props, "Speed").and_then(|s| if s > 0 { Some(s) } else { None });
-        let _mtu = prop_u32(&dev_props, "Mtu");
-        let _driver = prop_str(&dev_props, "Driver");
+            prop_u32(&dev_props, nm_dbus::prop::SPEED)
+                .and_then(|s| if s > 0 { Some(s) } else { None });
+        let _mtu = prop_u32(&dev_props, nm_dbus::prop::MTU);
+        let _driver = prop_str(&dev_props, nm_dbus::prop::DRIVER);
 
         // IPv4 config
-        let ipv4 = if state == NM_DEVICE_STATE_ACTIVATED {
+        let ipv4 = if state == nm_dbus::device_state::ACTIVATED {
             self.read_ipv4_config(&dev_props).await.ok()
         } else {
             None
         };
 
         // IPv6 config
-        let ipv6 = if state == NM_DEVICE_STATE_ACTIVATED {
+        let ipv6 = if state == nm_dbus::device_state::ACTIVATED {
             self.read_ipv6_config(&dev_props).await.ok()
         } else {
             None
@@ -276,7 +293,7 @@ impl LinuxNetworkManager {
 
         // Wi-Fi specific properties
         let (wifi_mode, connected_ssid, ap_ssid, signal_dbm, signal_quality) =
-            if kind == InterfaceKind::Wifi && state >= NM_DEVICE_STATE_DISCONNECTED {
+            if kind == InterfaceKind::Wifi && state >= nm_dbus::device_state::DISCONNECTED {
                 self.read_wifi_info(&device_path_ref, state)
                     .await
                     .unwrap_or_default()
@@ -314,7 +331,7 @@ impl LinuxNetworkManager {
         &self,
         dev_props: &HashMap<String, OwnedValue>,
     ) -> NGResult<Ipv4Config> {
-        let config_path = prop_object_path(dev_props, "Ip4Config")
+        let config_path = prop_object_path(dev_props, nm_dbus::prop::IP4_CONFIG)
             .ok_or(NetworkError::ConfigError("No Ip4Config path".to_string()))?;
 
         if config_path.as_str() == "/" {
@@ -325,14 +342,15 @@ impl LinuxNetworkManager {
             .map_err(|e| NetworkError::DBusError(format!("Invalid Ip4Config path: {e}")))?;
 
         let ip4_props = self
-            .get_all_properties(&config_path_ref, "org.freedesktop.NetworkManager.IP4Config")
+            .get_all_properties(&config_path_ref, nm_dbus::iface::IP4_CONFIG)
             .await?;
 
         let addresses = parse_nm_ip4_addresses(&ip4_props);
-        let gateway = prop_str(&ip4_props, "Gateway").and_then(|s| s.parse::<IpAddr>().ok());
+        let gateway =
+            prop_str(&ip4_props, nm_dbus::prop::GATEWAY).and_then(|s| s.parse::<IpAddr>().ok());
         let dns = parse_nm_ip4_nameservers(&ip4_props);
 
-        let method = self.resolve_ip_method(dev_props, "ipv4").await;
+        let method = self.resolve_ip_method(dev_props, nm_dbus::conn::IPV4).await;
 
         Ok(Ipv4Config {
             addresses,
@@ -347,7 +365,7 @@ impl LinuxNetworkManager {
         &self,
         dev_props: &HashMap<String, OwnedValue>,
     ) -> NGResult<Ipv6Config> {
-        let config_path = prop_object_path(dev_props, "Ip6Config")
+        let config_path = prop_object_path(dev_props, nm_dbus::prop::IP6_CONFIG)
             .ok_or(NetworkError::ConfigError("No Ip6Config path".to_string()))?;
 
         if config_path.as_str() == "/" {
@@ -358,14 +376,15 @@ impl LinuxNetworkManager {
             .map_err(|e| NetworkError::DBusError(format!("Invalid Ip6Config path: {e}")))?;
 
         let ip6_props = self
-            .get_all_properties(&config_path_ref, "org.freedesktop.NetworkManager.IP6Config")
+            .get_all_properties(&config_path_ref, nm_dbus::iface::IP6_CONFIG)
             .await?;
 
         let addresses = parse_nm_ip6_addresses(&ip6_props);
-        let gateway = prop_str(&ip6_props, "Gateway").and_then(|s| s.parse::<IpAddr>().ok());
+        let gateway =
+            prop_str(&ip6_props, nm_dbus::prop::GATEWAY).and_then(|s| s.parse::<IpAddr>().ok());
         let dns = parse_nm_ip6_nameservers(&ip6_props);
 
-        let method = self.resolve_ip_method(dev_props, "ipv6").await;
+        let method = self.resolve_ip_method(dev_props, nm_dbus::conn::IPV6).await;
 
         Ok(Ipv6Config {
             addresses,
@@ -384,7 +403,7 @@ impl LinuxNetworkManager {
         dev_props: &HashMap<String, OwnedValue>,
         section: &str,
     ) -> IpMethod {
-        let active_conn_path = match prop_object_path(dev_props, "ActiveConnection")
+        let active_conn_path = match prop_object_path(dev_props, nm_dbus::prop::ACTIVE_CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")
         {
             Some(p) => p,
@@ -397,14 +416,11 @@ impl LinuxNetworkManager {
         };
 
         let active_props = self
-            .get_all_properties(
-                &active_ref,
-                "org.freedesktop.NetworkManager.Connection.Active",
-            )
+            .get_all_properties(&active_ref, nm_dbus::iface::ACTIVE_CONN)
             .await
             .unwrap_or_default();
 
-        let settings_path = match prop_object_path(&active_props, "Connection")
+        let settings_path = match prop_object_path(&active_props, nm_dbus::prop::CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")
         {
             Some(p) => p,
@@ -415,10 +431,10 @@ impl LinuxNetworkManager {
         let method_str = self
             .dbus_conn
             .call_method(
-                Some("org.freedesktop.NetworkManager"),
+                Some(nm_dbus::iface::NM),
                 settings_path.as_str(),
-                Some("org.freedesktop.NetworkManager.Settings.Connection"),
-                "GetSettings",
+                Some(nm_dbus::iface::SETTINGS_CONN),
+                nm_dbus::dbus_method::GET_SETTINGS,
                 &(),
             )
             .await
@@ -429,7 +445,7 @@ impl LinuxNetworkManager {
                     .deserialize::<HashMap<String, HashMap<String, OwnedValue>>>()
                     .ok()?;
                 let ip_section = body.get(section)?;
-                let method_val = ip_section.get("method")?;
+                let method_val = ip_section.get(nm_dbus::conn::METHOD)?;
                 method_val
                     .downcast_ref::<&str>()
                     .ok()
@@ -437,8 +453,8 @@ impl LinuxNetworkManager {
             });
 
         match method_str.as_deref() {
-            Some("manual") => IpMethod::Static,
-            Some("disabled") => IpMethod::Disabled,
+            Some(nm_dbus::method::MANUAL) => IpMethod::Static,
+            Some(nm_dbus::method::DISABLED) => IpMethod::Disabled,
             _ => IpMethod::Dhcp,
         }
     }
@@ -456,34 +472,30 @@ impl LinuxNetworkManager {
         Option<u8>,
     )> {
         let wifi_props = self
-            .get_all_properties(
-                device_path,
-                "org.freedesktop.NetworkManager.Device.Wireless",
-            )
+            .get_all_properties(device_path, nm_dbus::iface::DEVICE_WIRELESS)
             .await?;
 
-        let mode = prop_u32(&wifi_props, "Mode").map(nm_wifi_mode_to_mode);
+        let mode = prop_u32(&wifi_props, nm_dbus::prop::MODE).map(nm_wifi_mode_to_mode);
 
         let mut connected_ssid = None;
         let mut signal_dbm = None;
         let mut signal_quality = None;
 
-        if device_state == NM_DEVICE_STATE_ACTIVATED {
-            if let Some(active_ap_path) = prop_object_path(&wifi_props, "ActiveAccessPoint") {
+        if device_state == nm_dbus::device_state::ACTIVATED {
+            if let Some(active_ap_path) =
+                prop_object_path(&wifi_props, nm_dbus::prop::ACTIVE_ACCESS_POINT)
+            {
                 if active_ap_path.as_str() != "/" {
                     let ap_path_ref = ObjectPath::try_from(active_ap_path.as_str())
                         .map_err(|e| NetworkError::DBusError(format!("Invalid AP path: {e}")))?;
                     let ap_props = self
-                        .get_all_properties(
-                            &ap_path_ref,
-                            "org.freedesktop.NetworkManager.AccessPoint",
-                        )
+                        .get_all_properties(&ap_path_ref, nm_dbus::iface::ACCESS_POINT)
                         .await?;
 
-                    connected_ssid = prop_byte_array(&ap_props, "Ssid")
+                    connected_ssid = prop_byte_array(&ap_props, nm_dbus::prop::SSID)
                         .map(|bytes| String::from_utf8_lossy(&bytes).to_string());
 
-                    let strength = prop_u8(&ap_props, "Strength").unwrap_or(0);
+                    let strength = prop_u8(&ap_props, nm_dbus::prop::STRENGTH).unwrap_or(0);
                     signal_quality = Some(strength);
                     signal_dbm = Some(quality_to_rssi(strength));
                 }
@@ -508,16 +520,16 @@ impl LinuxNetworkManager {
             let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
                 .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
             let dev_props = self
-                .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+                .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
                 .await?;
 
-            let device_type = prop_u32(&dev_props, "DeviceType").unwrap_or(0);
-            if device_type != NM_DEVICE_TYPE_WIFI {
+            let device_type = prop_u32(&dev_props, nm_dbus::prop::DEVICE_TYPE).unwrap_or(0);
+            if device_type != nm_dbus::device_type::WIFI {
                 continue;
             }
 
             if let Some(target) = interface_name {
-                let name = prop_str(&dev_props, "Interface").unwrap_or_default();
+                let name = prop_str(&dev_props, nm_dbus::prop::INTERFACE).unwrap_or_default();
                 if name != target {
                     continue;
                 }
@@ -552,10 +564,10 @@ impl LinuxNetworkManager {
         let _ = self
             .dbus_conn
             .call_method(
-                Some("org.freedesktop.NetworkManager"),
+                Some(nm_dbus::iface::NM),
                 settings_path.as_str(),
-                Some("org.freedesktop.NetworkManager.Settings.Connection"),
-                "Delete",
+                Some(nm_dbus::iface::SETTINGS_CONN),
+                nm_dbus::dbus_method::DELETE,
                 &(),
             )
             .await;
@@ -570,24 +582,22 @@ impl LinuxNetworkManager {
         let device_path = nm.get_device_by_ip_iface(iface_name).await.ok()?;
         let dev_path_ref = ObjectPath::try_from(device_path.as_str()).ok()?;
         let dev_props = self
-            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
             .await
             .ok()?;
 
         // Check if there's an active connection on this device.
-        let active_conn_path = prop_object_path(&dev_props, "ActiveConnection")
+        let active_conn_path = prop_object_path(&dev_props, nm_dbus::prop::ACTIVE_CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")?;
 
         let active_ref = ObjectPath::try_from(active_conn_path.as_str()).ok()?;
         let active_props = self
-            .get_all_properties(
-                &active_ref,
-                "org.freedesktop.NetworkManager.Connection.Active",
-            )
+            .get_all_properties(&active_ref, nm_dbus::iface::ACTIVE_CONN)
             .await
             .ok()?;
 
-        prop_object_path(&active_props, "Connection").filter(|p| !p.is_empty() && p != "/")
+        prop_object_path(&active_props, nm_dbus::prop::CONNECTION)
+            .filter(|p| !p.is_empty() && p != "/")
     }
 
     /// Stash the current active STA connection for later restore (exclusive mode only).
@@ -598,29 +608,95 @@ impl LinuxNetworkManager {
         let dev_path = self.find_wireless_device(None).await.ok()?;
         let dev_path_ref = ObjectPath::try_from(dev_path.as_str()).ok()?;
         let dev_props = self
-            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
             .await
             .ok()?;
 
-        let active_conn_path = prop_object_path(&dev_props, "ActiveConnection")
+        let active_conn_path = prop_object_path(&dev_props, nm_dbus::prop::ACTIVE_CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")?;
 
         let active_conn_ref = ObjectPath::try_from(active_conn_path.as_str()).ok()?;
         let active_props = self
-            .get_all_properties(
-                &active_conn_ref,
-                "org.freedesktop.NetworkManager.Connection.Active",
-            )
+            .get_all_properties(&active_conn_ref, nm_dbus::iface::ACTIVE_CONN)
             .await
             .ok()?;
 
-        let connection_path =
-            prop_object_path(&active_props, "Connection").filter(|p| !p.is_empty() && p != "/")?;
+        let connection_path = prop_object_path(&active_props, nm_dbus::prop::CONNECTION)
+            .filter(|p| !p.is_empty() && p != "/")?;
 
         Some(StashedStaConnection {
             connection_path,
             device_path: dev_path.to_string(),
         })
+    }
+
+    /// Attempt to restore AP on a virtual interface after STA connection succeeds.
+    ///
+    /// This transitions the AP from exclusive mode to concurrent mode by:
+    /// 1. Updating `ap-env` to use a virtual AP interface (`{sta_iface}_ap`)
+    /// 2. Setting `AP_EXCLUSIVE=false`
+    /// 3. Restarting the AP service stack
+    async fn try_restore_ap_concurrent(&self) -> NGResult<()> {
+        let env_path = format!("{}/{}", AP_CONFIG_DIR, AP_ENV_FILE);
+        let current_env = tokio::fs::read_to_string(&env_path)
+            .await
+            .unwrap_or_default();
+
+        let sta_iface =
+            parse_env_value(&current_env, "STA_IFACE").unwrap_or_else(|| "wlan0".to_string());
+        let ap_iface = format!("{sta_iface}_ap");
+
+        let updated_env = current_env
+            .lines()
+            .map(|line| {
+                if line.starts_with("AP_IFACE=") {
+                    format!("AP_IFACE=\"{ap_iface}\"")
+                } else if line.starts_with("AP_EXCLUSIVE=") {
+                    "AP_EXCLUSIVE=\"false\"".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        tokio::fs::write(&env_path, &updated_env)
+            .await
+            .map_err(|e| {
+                NetworkError::ApError(format!("Failed to update ap-env for concurrent mode: {e}"))
+            })?;
+
+        // Also update hostapd.conf interface line.
+        let conf_path = format!("{}/{}", AP_CONFIG_DIR, HOSTAPD_CONF_FILE);
+        if let Ok(conf_content) = tokio::fs::read_to_string(&conf_path).await {
+            let updated_conf = conf_content
+                .lines()
+                .map(|line| {
+                    if line.starts_with("interface=") {
+                        format!("interface={ap_iface}")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _ = tokio::fs::write(&conf_path, &updated_conf).await;
+        }
+
+        info!(
+            ap_iface = %ap_iface,
+            "Updated AP config for concurrent mode — restarting AP services"
+        );
+
+        let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
+        mgr.start_all().await?;
+
+        // Update cached AP mode since we've transitioned to concurrent.
+        let mut cached = self.cached_ap_mode.write().await;
+        *cached = Some(ApMode::Concurrent);
+
+        info!("AP restored on virtual interface in concurrent mode");
+        Ok(())
     }
 }
 
@@ -681,15 +757,15 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
 
         let dev_props = self
-            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
             .await?;
 
-        let mtu = prop_u32(&dev_props, "Mtu");
-        let driver = prop_str(&dev_props, "Driver");
+        let mtu = prop_u32(&dev_props, nm_dbus::prop::MTU);
+        let driver = prop_str(&dev_props, nm_dbus::prop::DRIVER);
         let firmware_version = prop_str(&dev_props, "FirmwareVersion").filter(|v| !v.is_empty());
 
         // Read NM connection UUID from active connection if present.
-        let nm_connection_uuid = prop_object_path(&dev_props, "ActiveConnection")
+        let nm_connection_uuid = prop_object_path(&dev_props, nm_dbus::prop::ACTIVE_CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")
             .and_then(|active_path| {
                 // Will be resolved asynchronously below.
@@ -699,13 +775,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let nm_connection_uuid = if let Some(active_path) = nm_connection_uuid {
             let active_ref = ObjectPath::try_from(active_path.as_str()).ok();
             if let Some(active_ref) = active_ref {
-                self.get_all_properties(
-                    &active_ref,
-                    "org.freedesktop.NetworkManager.Connection.Active",
-                )
-                .await
-                .ok()
-                .and_then(|props| prop_str(&props, "Uuid"))
+                self.get_all_properties(&active_ref, nm_dbus::iface::ACTIVE_CONN)
+                    .await
+                    .ok()
+                    .and_then(|props| prop_str(&props, nm_dbus::prop::UUID))
             } else {
                 None
             }
@@ -748,15 +821,17 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                     Err(_) => continue,
                 };
                 let dev_props = self
-                    .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+                    .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
                     .await
                     .unwrap_or_default();
 
-                if prop_u32(&dev_props, "DeviceType") != Some(NM_DEVICE_TYPE_WIFI) {
+                if prop_u32(&dev_props, nm_dbus::prop::DEVICE_TYPE)
+                    != Some(nm_dbus::device_type::WIFI)
+                {
                     continue;
                 }
 
-                let iface_name = prop_str(&dev_props, "Interface").unwrap_or_default();
+                let iface_name = prop_str(&dev_props, nm_dbus::prop::INTERFACE).unwrap_or_default();
 
                 if let Some(phy) = resolve_phy_name(&iface_name).await {
                     if let Some(cap) = detect_phy_capabilities(&iface_name, &phy).await {
@@ -825,27 +900,27 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             let mut conn_settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
 
             let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
-            connection.insert("id", Value::from(conn_id.as_str()));
-            connection.insert("type", Value::from("802-3-ethernet"));
-            connection.insert("interface-name", Value::from(name));
-            connection.insert("autoconnect", Value::from(true));
-            conn_settings.insert("connection", connection);
+            connection.insert(nm_dbus::conn::ID, Value::from(conn_id.as_str()));
+            connection.insert(nm_dbus::conn::TYPE, Value::from(nm_dbus::conn::ETHERNET));
+            connection.insert(nm_dbus::conn::INTERFACE_NAME, Value::from(name));
+            connection.insert(nm_dbus::conn::AUTOCONNECT, Value::from(true));
+            conn_settings.insert(nm_dbus::conn::CONNECTION, connection);
 
             let mut ipv4: HashMap<&str, Value<'_>> = HashMap::new();
             match config.method {
                 IpMethod::Dhcp => {
-                    ipv4.insert("method", Value::from("auto"));
+                    ipv4.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
                 }
                 IpMethod::Static => {
-                    ipv4.insert("method", Value::from("manual"));
+                    ipv4.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::MANUAL));
 
                     if let (Some(ip_s), Some(prefix)) = (addr_str.as_deref(), config.prefix_length)
                     {
                         let prefix_u32 = prefix as u32;
                         let mut addr_dict: HashMap<&str, Value<'_>> = HashMap::new();
-                        addr_dict.insert("address", Value::from(ip_s));
-                        addr_dict.insert("prefix", Value::from(prefix_u32));
-                        ipv4.insert("address-data", Value::from(vec![addr_dict]));
+                        addr_dict.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(ip_s));
+                        addr_dict.insert(nm_dbus::prop::ADDR_KEY_PREFIX, Value::from(prefix_u32));
+                        ipv4.insert(nm_dbus::conn::ADDRESS_DATA, Value::from(vec![addr_dict]));
                     }
 
                     if let Some(gw) = gw_str.as_deref() {
@@ -857,22 +932,25 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                             .iter()
                             .map(|d| {
                                 let mut m: HashMap<&str, Value<'_>> = HashMap::new();
-                                m.insert("address", Value::from(d.as_str()));
+                                m.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(d.as_str()));
                                 m
                             })
                             .collect();
-                        ipv4.insert("dns-data", Value::from(dns_data));
+                        ipv4.insert(nm_dbus::conn::DNS_DATA, Value::from(dns_data));
                     }
                 }
                 IpMethod::Disabled => {
-                    ipv4.insert("method", Value::from("disabled"));
+                    ipv4.insert(
+                        nm_dbus::conn::METHOD,
+                        Value::from(nm_dbus::method::DISABLED),
+                    );
                 }
             }
-            conn_settings.insert("ipv4", ipv4);
+            conn_settings.insert(nm_dbus::conn::IPV4, ipv4);
 
             let mut ipv6: HashMap<&str, Value<'_>> = HashMap::new();
-            ipv6.insert("method", Value::from("auto"));
-            conn_settings.insert("ipv6", ipv6);
+            ipv6.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
+            conn_settings.insert(nm_dbus::conn::IPV6, ipv6);
 
             conn_settings
         };
@@ -888,10 +966,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             if let Err(e) = self
                 .dbus_conn
                 .call_method(
-                    Some("org.freedesktop.NetworkManager"),
+                    Some(nm_dbus::iface::NM),
                     settings_path.as_str(),
-                    Some("org.freedesktop.NetworkManager.Settings.Connection"),
-                    "Update",
+                    Some(nm_dbus::iface::SETTINGS_CONN),
+                    nm_dbus::dbus_method::UPDATE,
                     &(settings,),
                 )
                 .await
@@ -949,7 +1027,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
         // Trigger a scan.
         let scan_options: HashMap<&str, Value<'_>> = HashMap::new();
-        let wireless_iface = "org.freedesktop.NetworkManager.Device.Wireless";
+        let wireless_iface = nm_dbus::iface::DEVICE_WIRELESS;
 
         // Call RequestScan
         let proxy = self.props_proxy(&dev_path_ref).await?;
@@ -957,10 +1035,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .inner()
             .connection()
             .call_method(
-                Some("org.freedesktop.NetworkManager"),
+                Some(nm_dbus::iface::NM),
                 dev_path.as_str(),
                 Some(wireless_iface),
-                "RequestScan",
+                nm_dbus::dbus_method::REQUEST_SCAN,
                 &(scan_options,),
             )
             .await
@@ -975,7 +1053,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let mut poll_interval = Duration::from_millis(200);
 
         let last_scan_before: i64 = self
-            .get_property(&dev_path_ref, wireless_iface, "LastScan")
+            .get_property(&dev_path_ref, wireless_iface, nm_dbus::prop::LAST_SCAN)
             .await
             .ok()
             .and_then(|v| v.downcast_ref::<i64>().ok())
@@ -985,7 +1063,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             sleep(poll_interval).await;
 
             let last_scan_now: i64 = self
-                .get_property(&dev_path_ref, wireless_iface, "LastScan")
+                .get_property(&dev_path_ref, wireless_iface, nm_dbus::prop::LAST_SCAN)
                 .await
                 .ok()
                 .and_then(|v| v.downcast_ref::<i64>().ok())
@@ -1007,10 +1085,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .inner()
             .connection()
             .call_method(
-                Some("org.freedesktop.NetworkManager"),
+                Some(nm_dbus::iface::NM),
                 dev_path.as_str(),
                 Some(wireless_iface),
-                "GetAllAccessPoints",
+                nm_dbus::dbus_method::GET_ALL_ACCESS_POINTS,
                 &(),
             )
             .await
@@ -1026,8 +1104,8 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .get_all_properties(&dev_path_ref, wireless_iface)
             .await
             .unwrap_or_default();
-        let active_ap =
-            prop_object_path(&wifi_props, "ActiveAccessPoint").filter(|p| p.as_str() != "/");
+        let active_ap = prop_object_path(&wifi_props, nm_dbus::prop::ACTIVE_ACCESS_POINT)
+            .filter(|p| p.as_str() != "/");
 
         let mut results = Vec::with_capacity(ap_paths.len());
 
@@ -1038,7 +1116,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             };
 
             let ap_props = match self
-                .get_all_properties(&ap_path_ref, "org.freedesktop.NetworkManager.AccessPoint")
+                .get_all_properties(&ap_path_ref, nm_dbus::iface::ACCESS_POINT)
                 .await
             {
                 Ok(p) => p,
@@ -1048,17 +1126,17 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 }
             };
 
-            let ssid = prop_byte_array(&ap_props, "Ssid")
+            let ssid = prop_byte_array(&ap_props, nm_dbus::prop::SSID)
                 .map(|b| String::from_utf8_lossy(&b).to_string())
                 .unwrap_or_default();
 
-            let bssid = prop_str(&ap_props, "HwAddress").unwrap_or_default();
-            let strength = prop_u8(&ap_props, "Strength").unwrap_or(0);
-            let frequency = prop_u32(&ap_props, "Frequency").unwrap_or(0);
-            let max_bitrate = prop_u32(&ap_props, "MaxBitrate");
-            let flags = prop_u32(&ap_props, "Flags").unwrap_or(0);
-            let wpa_flags = prop_u32(&ap_props, "WpaFlags").unwrap_or(0);
-            let rsn_flags = prop_u32(&ap_props, "RsnFlags").unwrap_or(0);
+            let bssid = prop_str(&ap_props, nm_dbus::prop::HW_ADDRESS).unwrap_or_default();
+            let strength = prop_u8(&ap_props, nm_dbus::prop::STRENGTH).unwrap_or(0);
+            let frequency = prop_u32(&ap_props, nm_dbus::prop::FREQUENCY).unwrap_or(0);
+            let max_bitrate = prop_u32(&ap_props, nm_dbus::prop::MAX_BITRATE);
+            let flags = prop_u32(&ap_props, nm_dbus::prop::FLAGS).unwrap_or(0);
+            let wpa_flags = prop_u32(&ap_props, nm_dbus::prop::WPA_FLAGS).unwrap_or(0);
+            let rsn_flags = prop_u32(&ap_props, nm_dbus::prop::RSN_FLAGS).unwrap_or(0);
 
             let channel = frequency_to_channel(frequency);
             let band = frequency_to_band(frequency);
@@ -1096,8 +1174,83 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         Ok(results)
     }
 
+    async fn wifi_connect_preflight(
+        &self,
+        request: &WifiConnectRequest,
+    ) -> NGResult<WifiConnectPreflight> {
+        let caps = self.detect_capabilities().await?;
+        let ap_status = self.ap_status().await.unwrap_or(ApStatus {
+            active: false,
+            interface_name: None,
+            ssid: None,
+            band: None,
+            channel: None,
+            frequency: None,
+            security: None,
+            connected_clients: None,
+            ip_address: None,
+            prefix_length: None,
+            ap_mode: caps.ap_mode,
+            sta_will_disconnect: false,
+            sta_restore_failed: false,
+        });
+
+        let ap_running = ap_status.active;
+        let is_exclusive = caps.ap_mode == ApMode::Exclusive;
+
+        let ap_will_stop = ap_running && is_exclusive;
+        let connection_will_be_lost = ap_will_stop;
+
+        // Probe whether we can restore AP on a virtual interface after STA connects.
+        let ap_can_restore = if ap_will_stop {
+            caps.wireless_interfaces
+                .iter()
+                .any(|i| i.supports_sta_ap_concurrent)
+        } else {
+            false
+        };
+
+        let mut warnings = Vec::new();
+
+        if ap_will_stop {
+            if ap_can_restore {
+                warnings.push(
+                    "AP hotspot will briefly stop during the switch. \
+                     It will be automatically restored on a virtual interface after \
+                     Wi-Fi connection succeeds."
+                        .to_string(),
+                );
+            } else {
+                warnings.push(
+                    "AP hotspot will be stopped to free the wireless interface. \
+                     You will lose your current connection to the gateway. \
+                     After connecting, access the gateway via the new Wi-Fi \
+                     network's IP address."
+                        .to_string(),
+                );
+            }
+        }
+
+        Ok(WifiConnectPreflight {
+            ssid: request.ssid.clone(),
+            ap_will_stop,
+            connection_will_be_lost,
+            ap_can_restore,
+            warnings,
+        })
+    }
+
     async fn connect_wifi(&self, request: &WifiConnectRequest) -> NGResult<WifiStaStatus> {
         info!(ssid = %request.ssid, "Connecting to Wi-Fi network");
+
+        // ─── Orchestrate AP stop if needed (exclusive mode) ───
+        let preflight = self.wifi_connect_preflight(request).await?;
+        if preflight.ap_will_stop {
+            info!("AP is running in exclusive mode — stopping AP before STA connect");
+            let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
+            mgr.stop_all().await?;
+            sleep(Duration::from_millis(500)).await;
+        }
 
         let dev_path = self
             .find_wireless_device(request.interface_name.as_deref())
@@ -1111,39 +1264,45 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let mut conn_settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
 
         let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
-        connection.insert("id", Value::from(request.ssid.as_str()));
-        connection.insert("type", Value::from("802-11-wireless"));
-        connection.insert("autoconnect", Value::from(true));
-        conn_settings.insert("connection", connection);
+        connection.insert(nm_dbus::conn::ID, Value::from(request.ssid.as_str()));
+        connection.insert(nm_dbus::conn::TYPE, Value::from(nm_dbus::conn::WIFI));
+        connection.insert(nm_dbus::conn::AUTOCONNECT, Value::from(true));
+        conn_settings.insert(nm_dbus::conn::CONNECTION, connection);
 
         let mut wireless: HashMap<&str, Value<'_>> = HashMap::new();
         let ssid_bytes: Vec<u8> = request.ssid.as_bytes().to_vec();
-        wireless.insert("ssid", Value::from(ssid_bytes));
-        wireless.insert("mode", Value::from("infrastructure"));
+        wireless.insert(nm_dbus::conn::WIFI_SSID, Value::from(ssid_bytes));
+        wireless.insert(
+            nm_dbus::conn::WIFI_MODE,
+            Value::from(nm_dbus::wifi_mode::INFRASTRUCTURE),
+        );
         if request.hidden.unwrap_or(false) {
-            wireless.insert("hidden", Value::from(true));
+            wireless.insert(nm_dbus::conn::WIFI_HIDDEN, Value::from(true));
         }
         if let Some(bssid) = &request.bssid {
-            wireless.insert("bssid", Value::from(bssid.as_str()));
+            wireless.insert(nm_dbus::conn::WIFI_BSSID, Value::from(bssid.as_str()));
         }
-        conn_settings.insert("802-11-wireless", wireless);
+        conn_settings.insert(nm_dbus::conn::WIFI, wireless);
 
         if let Some(password) = &request.password {
             if !password.is_empty() {
                 let mut security: HashMap<&str, Value<'_>> = HashMap::new();
-                security.insert("key-mgmt", Value::from("wpa-psk"));
-                security.insert("psk", Value::from(password.as_str()));
-                conn_settings.insert("802-11-wireless-security", security);
+                security.insert(
+                    nm_dbus::conn::KEY_MGMT,
+                    Value::from(nm_dbus::key_mgmt::WPA_PSK),
+                );
+                security.insert(nm_dbus::conn::PSK, Value::from(password.as_str()));
+                conn_settings.insert(nm_dbus::conn::WIFI_SECURITY, security);
             }
         }
 
         let mut ipv4: HashMap<&str, Value<'_>> = HashMap::new();
-        ipv4.insert("method", Value::from("auto"));
-        conn_settings.insert("ipv4", ipv4);
+        ipv4.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
+        conn_settings.insert(nm_dbus::conn::IPV4, ipv4);
 
         let mut ipv6: HashMap<&str, Value<'_>> = HashMap::new();
-        ipv6.insert("method", Value::from("auto"));
-        conn_settings.insert("ipv6", ipv6);
+        ipv6.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
+        conn_settings.insert(nm_dbus::conn::IPV6, ipv6);
 
         let root_path = ObjectPath::try_from("/")
             .map_err(|e| NetworkError::DBusError(format!("Invalid root path: {e}")))?;
@@ -1172,8 +1331,8 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             let state = self
                 .get_property(
                     &active_path_ref,
-                    "org.freedesktop.NetworkManager.Connection.Active",
-                    "State",
+                    nm_dbus::iface::ACTIVE_CONN,
+                    nm_dbus::prop::STATE,
                 )
                 .await
                 .ok()
@@ -1181,13 +1340,11 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 .unwrap_or(0);
 
             match state {
-                // NM_ACTIVE_CONNECTION_STATE_ACTIVATED = 2
-                2 => {
+                nm_dbus::active_conn_state::ACTIVATED => {
                     info!(ssid = %request.ssid, "Wi-Fi connection established");
                     break Ok(());
                 }
-                // NM_ACTIVE_CONNECTION_STATE_DEACTIVATED = 4
-                4 => {
+                nm_dbus::active_conn_state::DEACTIVATED => {
                     break Err(NetworkError::WifiError(format!(
                         "Connection to '{}' was rejected or failed",
                         request.ssid
@@ -1199,16 +1356,44 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             }
         };
 
-        // On failure or timeout, clean up the connection profile NM created
-        // to avoid accumulating orphaned connection entries.
+        // On failure or timeout, clean up the NM connection profile and — critically
+        // — if we stopped AP to attempt the connection, restart it so the user can
+        // still reach the gateway via the AP hotspot.
         if let Err(e) = result {
             warn!(error = %e, "Wi-Fi connection failed, cleaning up NM connection profile");
             self.cleanup_connection_profile(&active_conn_path, &conn_settings_path)
                 .await;
+
+            if preflight.ap_will_stop {
+                warn!("STA connection failed after AP was stopped — restarting AP as fallback");
+                let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
+                if let Err(ap_err) = mgr.start_all().await {
+                    warn!(error = %ap_err, "Failed to restart AP fallback after STA failure");
+                } else {
+                    info!("AP restarted as fallback — gateway is reachable via AP hotspot");
+                }
+            }
+
             return Err(e.into());
         }
 
-        // Return updated status.
+        // ─── Post-connect AP handling ───
+        if preflight.ap_will_stop {
+            if preflight.ap_can_restore {
+                // Hardware supports concurrent STA+AP (e.g. Realtek via virtual interface).
+                info!("STA connected — restoring AP on virtual interface");
+                if let Err(e) = self.try_restore_ap_concurrent().await {
+                    warn!(error = %e, "Failed to restore AP in concurrent mode after STA connect");
+                }
+            } else {
+                // True exclusive mode — AP stays off, STA is now the management channel.
+                info!(
+                    "STA connected in exclusive mode — AP remains off. \
+                     Gateway is now reachable via the new Wi-Fi network."
+                );
+            }
+        }
+
         self.wifi_sta_status(request.interface_name.as_deref())
             .await
     }
@@ -1221,10 +1406,11 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
 
         let dev_props = self
-            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
             .await?;
 
-        let active_conn = prop_object_path(&dev_props, "ActiveConnection").filter(|p| p != "/");
+        let active_conn =
+            prop_object_path(&dev_props, nm_dbus::prop::ACTIVE_CONNECTION).filter(|p| p != "/");
 
         if let Some(conn_path) = active_conn {
             let nm = self.nm_proxy().await?;
@@ -1253,14 +1439,14 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
 
         let dev_props = self
-            .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
             .await?;
 
-        let iface_name = prop_str(&dev_props, "Interface");
-        let state = prop_u32(&dev_props, "State").unwrap_or(0);
-        let speed = prop_u32(&dev_props, "Speed");
+        let iface_name = prop_str(&dev_props, nm_dbus::prop::INTERFACE);
+        let state = prop_u32(&dev_props, nm_dbus::prop::STATE).unwrap_or(0);
+        let speed = prop_u32(&dev_props, nm_dbus::prop::SPEED);
 
-        if state != NM_DEVICE_STATE_ACTIVATED {
+        if state != nm_dbus::device_state::ACTIVATED {
             return Ok(WifiStaStatus {
                 interface_name: iface_name,
                 speed_mbps: speed,
@@ -1270,32 +1456,29 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
         // Read active AP properties.
         let wifi_props = self
-            .get_all_properties(
-                &dev_path_ref,
-                "org.freedesktop.NetworkManager.Device.Wireless",
-            )
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE_WIRELESS)
             .await
             .unwrap_or_default();
 
         let (ssid, bssid, security, band, channel, frequency, signal_dbm, signal_quality) =
-            if let Some(ap_path) =
-                prop_object_path(&wifi_props, "ActiveAccessPoint").filter(|p| p != "/")
+            if let Some(ap_path) = prop_object_path(&wifi_props, nm_dbus::prop::ACTIVE_ACCESS_POINT)
+                .filter(|p| p != "/")
             {
                 let ap_path_ref = ObjectPath::try_from(ap_path.as_str())
                     .map_err(|e| NetworkError::DBusError(format!("Invalid AP path: {e}")))?;
                 let ap_props = self
-                    .get_all_properties(&ap_path_ref, "org.freedesktop.NetworkManager.AccessPoint")
+                    .get_all_properties(&ap_path_ref, nm_dbus::iface::ACCESS_POINT)
                     .await
                     .unwrap_or_default();
 
-                let ssid = prop_byte_array(&ap_props, "Ssid")
+                let ssid = prop_byte_array(&ap_props, nm_dbus::prop::SSID)
                     .map(|b| String::from_utf8_lossy(&b).to_string());
-                let bssid = prop_str(&ap_props, "HwAddress");
-                let strength = prop_u8(&ap_props, "Strength").unwrap_or(0);
-                let freq = prop_u32(&ap_props, "Frequency").unwrap_or(0);
-                let flags = prop_u32(&ap_props, "Flags").unwrap_or(0);
-                let wpa_flags = prop_u32(&ap_props, "WpaFlags").unwrap_or(0);
-                let rsn_flags = prop_u32(&ap_props, "RsnFlags").unwrap_or(0);
+                let bssid = prop_str(&ap_props, nm_dbus::prop::HW_ADDRESS);
+                let strength = prop_u8(&ap_props, nm_dbus::prop::STRENGTH).unwrap_or(0);
+                let freq = prop_u32(&ap_props, nm_dbus::prop::FREQUENCY).unwrap_or(0);
+                let flags = prop_u32(&ap_props, nm_dbus::prop::FLAGS).unwrap_or(0);
+                let wpa_flags = prop_u32(&ap_props, nm_dbus::prop::WPA_FLAGS).unwrap_or(0);
+                let rsn_flags = prop_u32(&ap_props, nm_dbus::prop::RSN_FLAGS).unwrap_or(0);
 
                 (
                     ssid,
@@ -1376,6 +1559,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 prefix_length: None,
                 ap_mode,
                 sta_will_disconnect,
+                sta_restore_failed: false,
             });
         }
 
@@ -1430,6 +1614,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             prefix_length,
             ap_mode,
             sta_will_disconnect,
+            sta_restore_failed: false,
         })
     }
 
@@ -1614,12 +1799,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 Err(_) => continue,
             };
             let dev_props = self
-                .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+                .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
                 .await
                 .unwrap_or_default();
 
-            let state = prop_u32(&dev_props, "State").unwrap_or(0);
-            if state != NM_DEVICE_STATE_ACTIVATED {
+            let state = prop_u32(&dev_props, nm_dbus::prop::STATE).unwrap_or(0);
+            if state != nm_dbus::device_state::ACTIVATED {
                 continue;
             }
 
@@ -1660,15 +1845,17 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 Err(_) => continue,
             };
             let dev_props = self
-                .get_all_properties(&dev_path_ref, "org.freedesktop.NetworkManager.Device")
+                .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
                 .await
                 .unwrap_or_default();
 
-            let device_type = prop_u32(&dev_props, "DeviceType").unwrap_or(0);
-            let state = prop_u32(&dev_props, "State").unwrap_or(0);
-            let iface_name = prop_str(&dev_props, "Interface").unwrap_or_default();
+            let device_type = prop_u32(&dev_props, nm_dbus::prop::DEVICE_TYPE).unwrap_or(0);
+            let state = prop_u32(&dev_props, nm_dbus::prop::STATE).unwrap_or(0);
+            let iface_name = prop_str(&dev_props, nm_dbus::prop::INTERFACE).unwrap_or_default();
 
-            if device_type != NM_DEVICE_TYPE_ETHERNET || state != NM_DEVICE_STATE_ACTIVATED {
+            if device_type != nm_dbus::device_type::ETHERNET
+                || state != nm_dbus::device_state::ACTIVATED
+            {
                 continue;
             }
 
@@ -1726,30 +1913,33 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 // ─── Helper Functions ───
 
 /// Map NM DeviceType to our InterfaceKind.
+#[inline]
 fn nm_device_type_to_kind(device_type: u32) -> InterfaceKind {
     match device_type {
-        NM_DEVICE_TYPE_ETHERNET => InterfaceKind::Ethernet,
-        NM_DEVICE_TYPE_WIFI => InterfaceKind::Wifi,
-        NM_DEVICE_TYPE_BRIDGE => InterfaceKind::Bridge,
-        NM_DEVICE_TYPE_VLAN => InterfaceKind::Vlan,
+        nm_dbus::device_type::ETHERNET => InterfaceKind::Ethernet,
+        nm_dbus::device_type::WIFI => InterfaceKind::Wifi,
+        nm_dbus::device_type::BRIDGE => InterfaceKind::Bridge,
+        nm_dbus::device_type::VLAN => InterfaceKind::Vlan,
         14 => InterfaceKind::Loopback, // NM_DEVICE_TYPE_GENERIC (lo)
         _ => InterfaceKind::Unknown,
     }
 }
 
 /// Map NM device state to our LinkState.
+#[inline]
 fn nm_state_to_link_state(state: u32) -> LinkState {
     match state {
-        NM_DEVICE_STATE_ACTIVATED => LinkState::Up,
-        NM_DEVICE_STATE_DISCONNECTED => LinkState::Down,
-        NM_DEVICE_STATE_UNAVAILABLE => LinkState::Down,
-        NM_DEVICE_STATE_UNMANAGED => LinkState::Down,
+        nm_dbus::device_state::ACTIVATED => LinkState::Up,
+        nm_dbus::device_state::DISCONNECTED => LinkState::Down,
+        nm_dbus::device_state::UNAVAILABLE => LinkState::Down,
+        nm_dbus::device_state::UNMANAGED => LinkState::Down,
         40..=99 => LinkState::Dormant, // Connecting states
         _ => LinkState::Unknown,
     }
 }
 
 /// Map NM Wi-Fi mode constant to our WifiMode.
+#[inline]
 fn nm_wifi_mode_to_mode(mode: u32) -> WifiMode {
     match mode {
         2 => WifiMode::Station, // NM_802_11_MODE_INFRA
@@ -1760,24 +1950,21 @@ fn nm_wifi_mode_to_mode(mode: u32) -> WifiMode {
 }
 
 /// Derive WifiSecurity from NM AP flags.
+#[inline]
 fn derive_security(flags: u32, wpa_flags: u32, rsn_flags: u32) -> WifiSecurity {
-    const NM_AP_SEC_KEY_MGMT_PSK: u32 = 0x100;
-    const NM_AP_SEC_KEY_MGMT_SAE: u32 = 0x400;
-    const NM_AP_SEC_KEY_MGMT_802_1X: u32 = 0x200;
-
-    if rsn_flags & NM_AP_SEC_KEY_MGMT_SAE != 0 {
+    if rsn_flags & nm_dbus::ap_sec::KEY_MGMT_SAE != 0 {
         return WifiSecurity::Wpa3Sae;
     }
-    if rsn_flags & NM_AP_SEC_KEY_MGMT_802_1X != 0 {
+    if rsn_flags & nm_dbus::ap_sec::KEY_MGMT_802_1X != 0 {
         return WifiSecurity::Wpa2Enterprise;
     }
-    if rsn_flags & NM_AP_SEC_KEY_MGMT_PSK != 0 {
+    if rsn_flags & nm_dbus::ap_sec::KEY_MGMT_PSK != 0 {
         return WifiSecurity::Wpa2Psk;
     }
-    if wpa_flags & NM_AP_SEC_KEY_MGMT_802_1X != 0 {
+    if wpa_flags & nm_dbus::ap_sec::KEY_MGMT_802_1X != 0 {
         return WifiSecurity::WpaEnterprise;
     }
-    if wpa_flags & NM_AP_SEC_KEY_MGMT_PSK != 0 {
+    if wpa_flags & nm_dbus::ap_sec::KEY_MGMT_PSK != 0 {
         return WifiSecurity::WpaPsk;
     }
     if flags & 0x1 != 0 {
@@ -1788,6 +1975,7 @@ fn derive_security(flags: u32, wpa_flags: u32, rsn_flags: u32) -> WifiSecurity {
 }
 
 /// Convert frequency (MHz) to channel number.
+#[inline]
 fn frequency_to_channel(freq: u32) -> u32 {
     match freq {
         2412..=2484 => {
@@ -1803,6 +1991,7 @@ fn frequency_to_channel(freq: u32) -> u32 {
 }
 
 /// Convert frequency (MHz) to Wi-Fi band.
+#[inline]
 fn frequency_to_band(freq: u32) -> WifiBand {
     match freq {
         2400..=2500 => WifiBand::Band2_4Ghz,
@@ -1813,6 +2002,7 @@ fn frequency_to_band(freq: u32) -> WifiBand {
 }
 
 /// Approximate RSSI (dBm) from NM signal quality (0-100).
+#[inline]
 fn quality_to_rssi(quality: u8) -> i32 {
     -90 + (quality as i32 * 60 / 100)
 }
@@ -1851,6 +2041,7 @@ impl NmPropExtract for i64 {
 }
 
 /// Generic D-Bus property lookup from a `HashMap<String, OwnedValue>`.
+#[inline]
 fn prop<T: NmPropExtract>(props: &HashMap<String, OwnedValue>, key: &str) -> Option<T> {
     props.get(key).and_then(T::extract)
 }
@@ -1871,6 +2062,7 @@ fn prop_u8(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u8> {
     prop::<u8>(props, key)
 }
 
+#[inline]
 fn prop_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec<u8>> {
     props.get(key).and_then(|v| {
         let arr = v.downcast_ref::<&zbus::zvariant::Array>().ok()?;
@@ -1886,6 +2078,7 @@ fn prop_byte_array(props: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec
     })
 }
 
+#[inline]
 fn prop_object_path(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     props.get(key).and_then(|v| {
         v.downcast_ref::<&ObjectPath<'_>>()
@@ -1897,12 +2090,14 @@ fn prop_object_path(props: &HashMap<String, OwnedValue>, key: &str) -> Option<St
 /// Look up a key in a zvariant Dict by iterating entries.
 ///
 /// `Dict::get` has complex lifetime constraints; iteration is O(n) but NM dicts are tiny.
+#[inline]
 fn dict_lookup_str(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<String> {
     dict.iter()
         .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
         .and_then(|(_, v)| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
 }
 
+#[inline]
 fn dict_lookup_u32(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<u32> {
     dict.iter()
         .find(|(k, _)| k.downcast_ref::<&str>().ok() == Some(key))
@@ -1915,13 +2110,14 @@ fn dict_lookup_u32(dict: &zbus::zvariant::Dict<'_, '_>, key: &str) -> Option<u32
 fn parse_nm_ip4_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv4AddressInfo> {
     let mut result = Vec::new();
 
-    if let Some(addr_data) = props.get("AddressData") {
+    if let Some(addr_data) = props.get(nm_dbus::prop::ADDRESS_DATA) {
         if let Ok(arr) = addr_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
-                    let address =
-                        dict_lookup_str(dict, "address").and_then(|s| s.parse::<IpAddr>().ok());
-                    let prefix = dict_lookup_u32(dict, "prefix").unwrap_or(24) as u8;
+                    let address = dict_lookup_str(dict, nm_dbus::prop::ADDR_KEY_ADDRESS)
+                        .and_then(|s| s.parse::<IpAddr>().ok());
+                    let prefix =
+                        dict_lookup_u32(dict, nm_dbus::prop::ADDR_KEY_PREFIX).unwrap_or(24) as u8;
 
                     if let Some(addr) = address {
                         result.push(Ipv4AddressInfo {
@@ -1938,15 +2134,16 @@ fn parse_nm_ip4_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv4Addres
 }
 
 /// Parse NM IP4Config NameserverData property.
+#[inline]
 fn parse_nm_ip4_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> {
     let mut result = Vec::new();
 
-    if let Some(ns_data) = props.get("NameserverData") {
+    if let Some(ns_data) = props.get(nm_dbus::prop::NAMESERVER_DATA) {
         if let Ok(arr) = ns_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
-                    if let Some(addr) =
-                        dict_lookup_str(dict, "address").and_then(|s| s.parse::<IpAddr>().ok())
+                    if let Some(addr) = dict_lookup_str(dict, nm_dbus::prop::ADDR_KEY_ADDRESS)
+                        .and_then(|s| s.parse::<IpAddr>().ok())
                     {
                         result.push(addr);
                     }
@@ -1959,16 +2156,18 @@ fn parse_nm_ip4_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> 
 }
 
 /// Parse NM IP6Config AddressData property.
+#[inline]
 fn parse_nm_ip6_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv6AddressInfo> {
     let mut result = Vec::new();
 
-    if let Some(addr_data) = props.get("AddressData") {
+    if let Some(addr_data) = props.get(nm_dbus::prop::ADDRESS_DATA) {
         if let Ok(arr) = addr_data.downcast_ref::<&zbus::zvariant::Array>() {
             for item in arr.iter() {
                 if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
-                    let address =
-                        dict_lookup_str(dict, "address").and_then(|s| s.parse::<IpAddr>().ok());
-                    let prefix = dict_lookup_u32(dict, "prefix").unwrap_or(64) as u8;
+                    let address = dict_lookup_str(dict, nm_dbus::prop::ADDR_KEY_ADDRESS)
+                        .and_then(|s| s.parse::<IpAddr>().ok());
+                    let prefix =
+                        dict_lookup_u32(dict, nm_dbus::prop::ADDR_KEY_PREFIX).unwrap_or(64) as u8;
 
                     if let Some(addr) = address {
                         result.push(Ipv6AddressInfo {
@@ -1985,35 +2184,39 @@ fn parse_nm_ip6_addresses(props: &HashMap<String, OwnedValue>) -> Vec<Ipv6Addres
 }
 
 /// Parse NM IP6Config NameserverData / Nameservers property.
+#[inline]
 fn parse_nm_ip6_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> {
     // Try NameserverData first (NM >= 1.14), fallback to Nameservers.
     parse_nm_ip4_nameservers(props) // Same format
 }
 
 /// Read a single sysfs statistic for an interface (async, non-blocking).
+#[inline]
 async fn read_sysfs_stat(iface: &str, stat: &str) -> Option<u64> {
-    tokio::fs::read_to_string(format!("/sys/class/net/{iface}/statistics/{stat}"))
+    tokio::fs::read_to_string(sysfs::stat_path(iface, stat))
         .await
         .ok()
         .and_then(|s| s.trim().parse().ok())
 }
 
 /// Read Rx/Tx byte counters from `/sys/class/net/<iface>/statistics/`.
+#[inline]
 async fn read_sysfs_traffic(iface: &str) -> (Option<u64>, Option<u64>) {
     let (rx, tx) = tokio::join!(
-        read_sysfs_stat(iface, "rx_bytes"),
-        read_sysfs_stat(iface, "tx_bytes"),
+        read_sysfs_stat(iface, sysfs::RX_BYTES),
+        read_sysfs_stat(iface, sysfs::TX_BYTES),
     );
     (rx, tx)
 }
 
 /// Read packet counters from `/sys/class/net/<iface>/statistics/`.
+#[inline]
 async fn read_sysfs_counters(iface: &str) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
     let (rx_packets, tx_packets, rx_errors, tx_errors) = tokio::join!(
-        read_sysfs_stat(iface, "rx_packets"),
-        read_sysfs_stat(iface, "tx_packets"),
-        read_sysfs_stat(iface, "rx_errors"),
-        read_sysfs_stat(iface, "tx_errors"),
+        read_sysfs_stat(iface, sysfs::RX_PACKETS),
+        read_sysfs_stat(iface, sysfs::TX_PACKETS),
+        read_sysfs_stat(iface, sysfs::RX_ERRORS),
+        read_sysfs_stat(iface, sysfs::TX_ERRORS),
     );
     (rx_packets, tx_packets, rx_errors, tx_errors)
 }
@@ -2021,6 +2224,7 @@ async fn read_sysfs_counters(iface: &str) -> (Option<u64>, Option<u64>, Option<u
 // ─── Configuration File Parsing Helpers ───
 
 /// Parse a `key=value` line from an INI-style config file (hostapd.conf).
+#[inline]
 fn parse_conf_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
@@ -2037,6 +2241,7 @@ fn parse_conf_value(content: &str, key: &str) -> Option<String> {
 }
 
 /// Parse a `KEY="value"` line from a shell env file (ap-env).
+#[inline]
 fn parse_env_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
@@ -2053,6 +2258,7 @@ fn parse_env_value(content: &str, key: &str) -> Option<String> {
 }
 
 /// Derive the Wi-Fi security type from hostapd.conf content.
+#[inline]
 fn parse_hostapd_security(conf_content: &str) -> WifiSecurity {
     let wpa_val = parse_conf_value(conf_content, "wpa");
     let key_mgmt = parse_conf_value(conf_content, "wpa_key_mgmt");
@@ -2071,22 +2277,29 @@ fn parse_hostapd_security(conf_content: &str) -> WifiSecurity {
 ///
 /// Sends the `STA-FIRST` / `STA-NEXT` commands to the UNIX socket at
 /// `/var/run/hostapd/<iface>`. Returns `None` if the socket is unavailable.
+#[inline]
 async fn count_hostapd_clients(iface: &str) -> Option<u32> {
     use tokio::net::UnixDatagram;
 
-    let ctrl_path = format!("/var/run/hostapd/{iface}");
+    let ctrl_path = format!("{}/{iface}", hostapd_ctrl::CTRL_DIR);
     if !std::path::Path::new(&ctrl_path).exists() {
         return None;
     }
 
-    let client_path = format!("/tmp/ng-gw-hapd-{}-{}", iface, std::process::id());
+    let client_path = format!(
+        "{}-{}-{}",
+        hostapd_ctrl::CLIENT_PATH_PREFIX,
+        iface,
+        std::process::id()
+    );
     let _ = std::fs::remove_file(&client_path);
 
     let sock = UnixDatagram::bind(&client_path).ok()?;
     sock.connect(&ctrl_path).ok()?;
 
-    // "STA-FIRST" returns the first associated station's MAC, or "FAIL" / empty.
-    sock.send(b"STA-FIRST").await.ok()?;
+    sock.send(hostapd_ctrl::CMD_STA_FIRST.as_bytes())
+        .await
+        .ok()?;
 
     let mut buf = [0u8; 4096];
     let mut count: u32 = 0;
@@ -2099,7 +2312,7 @@ async fn count_hostapd_clients(iface: &str) -> Option<u32> {
             .ok()?;
 
         let resp = std::str::from_utf8(&buf[..n]).unwrap_or("");
-        if resp.is_empty() || resp.starts_with("FAIL") {
+        if resp.is_empty() || resp.starts_with(hostapd_ctrl::RESP_FAIL) {
             break;
         }
 
@@ -2114,7 +2327,7 @@ async fn count_hostapd_clients(iface: &str) -> Option<u32> {
             break;
         }
 
-        let next_cmd = format!("STA-NEXT {mac}");
+        let next_cmd = format!("{} {mac}", hostapd_ctrl::CMD_STA_NEXT);
         if sock.send(next_cmd.as_bytes()).await.is_err() {
             break;
         }

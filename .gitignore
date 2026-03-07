@@ -50,6 +50,9 @@ dist/
 # Roadmap documents (local only)
 /roadmap/
 
+# Local docs (deployment guides, etc.)
+/docs/
+
 # By default, don't ignore .github directory!
 !.github/
 !.github/**

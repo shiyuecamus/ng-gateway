@@ -104,18 +104,81 @@ get_phy_name() {
 }
 
 # Check if a phy supports AP mode.
+#
+# Looks for "AP" in `Supported interface modes:` section only. We must avoid
+# matching "AP" strings elsewhere (e.g. "HE Iftypes: AP", "Supported TX
+# frame types: ... AP"). The reliable approach is to parse line-by-line,
+# entering the section on "Supported interface modes:" and exiting on
+# the next non-"* ..." line.
 phy_supports_ap() {
   local phy="$1"
-  iw phy "$phy" info 2>/dev/null | grep -qE "^\s+\* AP$"
+  local info
+  info=$(iw phy "$phy" info 2>/dev/null) || return 1
+
+  local in_section=0
+  while IFS= read -r line; do
+    local trimmed="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$trimmed" == "Supported interface modes:"* ]]; then
+      in_section=1
+      continue
+    fi
+    if [[ $in_section -eq 1 ]]; then
+      if [[ "$trimmed" == "* "* ]]; then
+        local mode="${trimmed#\* }"
+        [[ "$mode" == "AP" ]] && return 0
+      else
+        break
+      fi
+    fi
+  done <<< "$info"
+
+  return 1
 }
 
-# Check if a phy supports STA+AP concurrency via `valid interface combinations`.
+# Check if a phy supports STA+AP concurrency.
+#
+# Strategy (ordered by reliability):
+#   1. Parse `valid interface combinations:` — if both `managed` and `AP`
+#      appear in the same combination block, concurrent mode is confirmed.
+#   2. If the driver reports `interface combinations are not supported`
+#      (common with Realtek RTL8852BE and similar), try to **probe** by
+#      actually creating a temporary virtual AP interface and immediately
+#      removing it. This is the only reliable way to detect concurrency
+#      for drivers that don't advertise it via nl80211.
 phy_supports_sta_ap() {
   local phy="$1"
+  local sta_iface="${2:-}"
   local info
-  info=$(iw phy "$phy" info 2>/dev/null)
-  echo "$info" | awk '/valid interface combinations:/,/^[^ \t]/' | grep -q "managed" &&
-  echo "$info" | awk '/valid interface combinations:/,/^[^ \t]/' | grep -q "AP"
+  info=$(iw phy "$phy" info 2>/dev/null) || return 1
+
+  # Method 1: parse `valid interface combinations`.
+  if echo "$info" | grep -q "valid interface combinations:"; then
+    local combo_section
+    combo_section=$(echo "$info" | awk '/valid interface combinations:/,/^[^ \t]/')
+    if echo "$combo_section" | grep -q "managed" &&
+       echo "$combo_section" | grep -q "AP"; then
+      return 0
+    fi
+    # Combinations section present but no managed+AP combo — not supported.
+    return 1
+  fi
+
+  # Method 2: `interface combinations are not supported` or no section at all.
+  # Probe by creating a temporary virtual AP interface.
+  if [[ -n "$sta_iface" ]]; then
+    log "No interface combinations advertised — probing virtual AP support..."
+    local probe_iface="${sta_iface}_ap_probe"
+    if iw dev "$sta_iface" interface add "$probe_iface" type __ap 2>/dev/null; then
+      iw dev "$probe_iface" del 2>/dev/null || true
+      log "  Probe succeeded: virtual AP interface creation supported"
+      return 0
+    else
+      log "  Probe failed: virtual AP interface creation not supported"
+      return 1
+    fi
+  fi
+
+  return 1
 }
 
 # Get the last 4 hex digits of a MAC address (e.g. "E708").
@@ -203,7 +266,7 @@ main() {
   # 3. Determine AP interface name and mode.
   local ap_iface
   local ap_exclusive
-  if phy_supports_sta_ap "$phy_name"; then
+  if phy_supports_sta_ap "$phy_name" "$wifi_iface"; then
     ap_iface="${wifi_iface}_ap"
     ap_exclusive="false"
     log "STA+AP concurrent supported — will use virtual interface: ${ap_iface}"

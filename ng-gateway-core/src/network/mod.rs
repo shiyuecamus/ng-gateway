@@ -15,6 +15,7 @@
 pub mod ap_config;
 #[cfg(target_os = "linux")]
 pub mod ap_manager;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 pub mod capability;
 pub mod platform;
 pub mod service;

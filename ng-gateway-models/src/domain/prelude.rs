@@ -31,8 +31,9 @@ pub use crate::domain::{
         ConfigureInterfaceRequest, ControlApRequest, DnsConfig, InterfaceKind, InterfaceNamePath,
         IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config, LinkState,
         NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary, PlatformSupport,
-        StaApCapability, WifiAccessPoint, WifiBand, WifiConnectRequest, WifiInterfaceQuery,
-        WifiMode, WifiSecurity, WifiStaStatus, WiredStatus, WirelessInterfaceCapability,
+        StaApCapability, WifiAccessPoint, WifiBand, WifiConnectPreflight, WifiConnectRequest,
+        WifiInterfaceQuery, WifiMode, WifiSecurity, WifiStaStatus, WiredStatus,
+        WirelessInterfaceCapability,
     },
     plugin::{NewPlugin, PluginInfo, PluginPageParams, UpdatePlugin},
     point::{

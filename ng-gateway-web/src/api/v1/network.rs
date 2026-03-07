@@ -35,6 +35,7 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/dns", web::put().to(configure_dns))
         // Phase 3: Wi-Fi
         .route("/wifi/scan", web::get().to(scan_wifi))
+        .route("/wifi/preflight", web::post().to(wifi_connect_preflight))
         .route("/wifi/connect", web::post().to(connect_wifi))
         .route("/wifi/disconnect", web::post().to(disconnect_wifi))
         .route("/wifi/status", web::get().to(wifi_status))
@@ -54,7 +55,7 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing network module RBAC rules...");
 
-    let rules: [(Method, String, Box<dyn PermRule>); 15] = [
+    let rules: [(Method, String, Box<dyn PermRule>); 16] = [
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/interfaces"),
@@ -93,6 +94,11 @@ pub(crate) async fn init_rbac_rules(
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/wifi/scan"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
+            Method::POST,
+            format!("{router_prefix}{ROUTER_PREFIX}/wifi/preflight"),
             Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
         ),
         (
@@ -260,7 +266,27 @@ async fn scan_wifi(
     Ok(WebResponse::ok(aps))
 }
 
+/// `POST /network/wifi/preflight` — Pre-flight check for Wi-Fi connect.
+///
+/// Returns side-effect information (AP stop, connection loss) so the frontend
+/// can display an appropriate confirmation dialog before calling `/wifi/connect`.
+#[instrument(name = "network-wifi-preflight", skip(_ctx, network, payload))]
+async fn wifi_connect_preflight(
+    _ctx: RequestContext,
+    network: web::Data<Arc<NetworkService>>,
+    payload: Json<WifiConnectRequest>,
+) -> WebResult<WebResponse<WifiConnectPreflight>> {
+    let result = network
+        .wifi_connect_preflight(&payload.into_inner())
+        .await
+        .map_err(|e| WebError::InternalError(format!("Wi-Fi preflight failed: {e}")))?;
+    Ok(WebResponse::ok(result))
+}
+
 /// `POST /network/wifi/connect` — Connect to a Wi-Fi network.
+///
+/// When AP is running in exclusive mode, this orchestrates: stop AP → connect STA →
+/// optionally restore AP on a virtual interface if concurrent mode is supported.
 #[instrument(name = "network-wifi-connect", skip(_ctx, network, payload))]
 async fn connect_wifi(
     _ctx: RequestContext,

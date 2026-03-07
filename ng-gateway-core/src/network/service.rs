@@ -11,7 +11,7 @@ use ng_gateway_error::NGResult;
 use ng_gateway_models::domain::prelude::{
     ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
     InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
-    WifiAccessPoint, WifiConnectRequest, WifiStaStatus, WiredStatus,
+    WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest, WifiStaStatus, WiredStatus,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -175,7 +175,19 @@ impl NetworkService {
         self.manager.scan_wifi(interface_name).await
     }
 
+    /// Pre-flight check for Wi-Fi connect — returns side-effect info for the frontend.
+    #[inline]
+    pub async fn wifi_connect_preflight(
+        &self,
+        request: &WifiConnectRequest,
+    ) -> NGResult<WifiConnectPreflight> {
+        self.manager.wifi_connect_preflight(request).await
+    }
+
     /// Connect to a Wi-Fi network.
+    ///
+    /// If AP is running in exclusive mode, this will orchestrate the full
+    /// stop-AP → connect-STA → (optionally restore-AP) sequence.
     #[inline]
     pub async fn connect_wifi(&self, request: &WifiConnectRequest) -> NGResult<WifiStaStatus> {
         self.manager.connect_wifi(request).await

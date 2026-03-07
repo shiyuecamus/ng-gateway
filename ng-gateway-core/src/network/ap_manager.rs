@@ -10,6 +10,7 @@
 //! via the systemd1 D-Bus interface, keeping the gateway process decoupled from
 //! the AP lifecycle.
 
+use crate::network::platform::nm_dbus;
 use ng_gateway_error::{network::NetworkError, NGResult};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -128,7 +129,7 @@ impl ApServiceManager {
             .map_err(|e| NetworkError::DBusError(format!("Props proxy failed: {e}")))?;
 
         let val = props_proxy
-            .get("org.freedesktop.systemd1.Unit", "ActiveState")
+            .get(nm_dbus::systemd::UNIT_IFACE, nm_dbus::systemd::ACTIVE_STATE)
             .await
             .map_err(|e| NetworkError::ApError(format!("Failed to read ActiveState: {e}")))?;
 
@@ -156,9 +157,10 @@ impl ApServiceManager {
 
         Ok(ApServiceStatus {
             // oneshot is "inactive" after successful run, so check for "active" or completed state
-            setup_active: setup == "active" || setup == "inactive",
-            hostapd_active: hostapd == "active",
-            dnsmasq_active: dnsmasq == "active",
+            setup_active: setup == nm_dbus::systemd::STATE_ACTIVE
+                || setup == nm_dbus::systemd::STATE_INACTIVE,
+            hostapd_active: hostapd == nm_dbus::systemd::STATE_ACTIVE,
+            dnsmasq_active: dnsmasq == nm_dbus::systemd::STATE_ACTIVE,
         })
     }
 
@@ -168,7 +170,7 @@ impl ApServiceManager {
         let sd = self.systemd_proxy().await?;
 
         for unit in AP_UNITS {
-            sd.start_unit(unit, "replace")
+            sd.start_unit(unit, nm_dbus::unit_mode::REPLACE)
                 .await
                 .map_err(|e| NetworkError::ApError(format!("Failed to start {unit}: {e}")))?;
             debug!(unit = unit, "Started");
@@ -188,7 +190,7 @@ impl ApServiceManager {
         let sd = self.systemd_proxy().await?;
 
         for unit in AP_UNITS.iter().rev() {
-            if let Err(e) = sd.stop_unit(unit, "replace").await {
+            if let Err(e) = sd.stop_unit(unit, nm_dbus::unit_mode::REPLACE).await {
                 warn!(unit = unit, error = %e, "Failed to stop unit (may already be stopped)");
             }
         }
@@ -208,7 +210,7 @@ impl ApServiceManager {
     pub async fn restart_hostapd(&self) -> NGResult<()> {
         info!("Restarting hostapd...");
         let sd = self.systemd_proxy().await?;
-        sd.restart_unit(HOSTAPD_UNIT, "replace")
+        sd.restart_unit(HOSTAPD_UNIT, nm_dbus::unit_mode::REPLACE)
             .await
             .map_err(|e| NetworkError::ApError(format!("Failed to restart hostapd: {e}")))?;
         self.wait_unit_active(HOSTAPD_UNIT, Duration::from_secs(10))
@@ -222,10 +224,10 @@ impl ApServiceManager {
         let start = std::time::Instant::now();
         loop {
             let state = self.unit_active_state(unit_name).await.unwrap_or_default();
-            if state == "active" {
+            if state == nm_dbus::systemd::STATE_ACTIVE {
                 return Ok(());
             }
-            if state == "failed" {
+            if state == nm_dbus::systemd::STATE_FAILED {
                 return Err(NetworkError::ApError(format!(
                     "Unit {unit_name} entered 'failed' state"
                 ))

@@ -12,7 +12,8 @@ use ng_gateway_models::domain::prelude::{
     ApMode, ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest,
     DnsConfig, InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config,
     LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
-    PlatformSupport, StaApCapability, WifiAccessPoint, WifiConnectRequest, WifiStaStatus,
+    PlatformSupport, StaApCapability, WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest,
+    WifiStaStatus,
 };
 use std::{collections::BTreeMap, net::IpAddr};
 use tokio::process::Command;
@@ -215,6 +216,19 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         scan_wifi_native().await
     }
 
+    async fn wifi_connect_preflight(
+        &self,
+        request: &WifiConnectRequest,
+    ) -> NGResult<WifiConnectPreflight> {
+        Ok(WifiConnectPreflight {
+            ssid: request.ssid.clone(),
+            ap_will_stop: false,
+            connection_will_be_lost: false,
+            ap_can_restore: false,
+            warnings: vec!["Wi-Fi connection is not supported on Windows".to_string()],
+        })
+    }
+
     async fn connect_wifi(&self, _: &WifiConnectRequest) -> NGResult<WifiStaStatus> {
         Err(NetworkError::PlatformNotSupported(
             "Wi-Fi connection is not supported on Windows from gateway".into(),
@@ -273,6 +287,7 @@ impl PlatformNetworkManager for WindowsNetworkManager {
             prefix_length: None,
             ap_mode: ApMode::Unavailable,
             sta_will_disconnect: false,
+            sta_restore_failed: false,
         })
     }
 
