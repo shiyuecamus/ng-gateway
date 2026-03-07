@@ -39,6 +39,8 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/wifi/connect", web::post().to(connect_wifi))
         .route("/wifi/disconnect", web::post().to(disconnect_wifi))
         .route("/wifi/status", web::get().to(wifi_status))
+        .route("/wifi/saved", web::get().to(list_saved_wifi))
+        .route("/wifi/saved/{uuid}", web::delete().to(forget_wifi))
         // Phase 4: AP Hotspot
         .route("/ap", web::get().to(get_ap_status))
         .route("/ap", web::put().to(configure_ap))
@@ -55,7 +57,7 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing network module RBAC rules...");
 
-    let rules: [(Method, String, Box<dyn PermRule>); 16] = [
+    let rules: [(Method, String, Box<dyn PermRule>); 18] = [
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/interfaces"),
@@ -114,6 +116,16 @@ pub(crate) async fn init_rbac_rules(
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/wifi/status"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
+            Method::GET,
+            format!("{router_prefix}{ROUTER_PREFIX}/wifi/saved"),
+            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
+        ),
+        (
+            Method::DELETE,
+            format!("{router_prefix}{ROUTER_PREFIX}/wifi/saved/*"),
             Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
         ),
         (
@@ -301,14 +313,17 @@ async fn connect_wifi(
 }
 
 /// `POST /network/wifi/disconnect` — Disconnect Wi-Fi STA.
-#[instrument(name = "network-wifi-disconnect", skip(_ctx, network))]
+///
+/// Accepts a JSON body with optional `interfaceName` and `disableAutoconnect`.
+/// After disconnection, evaluates AP restore as a fallback management channel.
+#[instrument(name = "network-wifi-disconnect", skip(_ctx, network, payload))]
 async fn disconnect_wifi(
     _ctx: RequestContext,
     network: web::Data<Arc<NetworkService>>,
-    query: web::Query<WifiInterfaceQuery>,
+    payload: web::Json<WifiDisconnectRequest>,
 ) -> WebResult<WebResponse<bool>> {
     network
-        .disconnect_wifi(query.interface.as_deref())
+        .disconnect_wifi(&payload.into_inner())
         .await
         .map_err(|e| WebError::InternalError(format!("Wi-Fi disconnect failed: {e}")))?;
     Ok(WebResponse::ok(true))
@@ -326,6 +341,35 @@ async fn wifi_status(
         .await
         .map_err(|e| WebError::InternalError(format!("Failed to get Wi-Fi status: {e}")))?;
     Ok(WebResponse::ok(status))
+}
+
+/// `GET /network/wifi/saved` — List saved Wi-Fi connection profiles.
+#[instrument(name = "network-wifi-saved", skip_all)]
+async fn list_saved_wifi(
+    _ctx: RequestContext,
+    network: web::Data<Arc<NetworkService>>,
+) -> WebResult<WebResponse<Vec<SavedWifiConnection>>> {
+    let saved = network
+        .list_saved_wifi_connections()
+        .await
+        .map_err(|e| WebError::InternalError(format!("Failed to list saved Wi-Fi: {e}")))?;
+    Ok(WebResponse::ok(saved))
+}
+
+/// `DELETE /network/wifi/saved/{uuid}` — Forget a saved Wi-Fi connection.
+#[instrument(name = "network-wifi-forget", skip(_ctx, network), fields(uuid = %path.uuid))]
+async fn forget_wifi(
+    _ctx: RequestContext,
+    network: web::Data<Arc<NetworkService>>,
+    path: web::Path<WifiUuidPath>,
+) -> WebResult<WebResponse<bool>> {
+    network
+        .forget_wifi(&ForgetWifiRequest {
+            uuid: path.uuid.clone(),
+        })
+        .await
+        .map_err(|e| WebError::InternalError(format!("Failed to forget Wi-Fi: {e}")))?;
+    Ok(WebResponse::ok(true))
 }
 
 // ─── Phase 4: AP Hotspot ───

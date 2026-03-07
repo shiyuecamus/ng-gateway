@@ -18,12 +18,74 @@ pub enum InterfaceKind {
 }
 
 /// IP configuration method.
+///
+/// Used in read-only contexts (e.g. [`Ipv4Config`], [`DnsConfig`]) to describe
+/// the current method. For write operations, prefer [`IpConfig`] which carries
+/// the associated static configuration data as a tagged enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IpMethod {
     Dhcp,
     Static,
     Disabled,
+}
+
+/// Unified IP configuration using tagged enum for type safety.
+///
+/// DHCP variant carries no extra fields; Static variant enforces required fields
+/// at compile time. Used by both wired interface configuration and Wi-Fi
+/// connection requests, eliminating duplicated Option-field patterns.
+///
+/// # Serde Format
+///
+/// Internally tagged via `"method"`:
+/// - `{ "method": "dhcp" }`
+/// - `{ "method": "static", "ipAddress": "...", "prefixLength": 24, ... }`
+/// - `{ "method": "disabled" }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "camelCase")]
+pub enum IpConfig {
+    /// Obtain IP configuration automatically via DHCP.
+    #[serde(rename = "dhcp")]
+    Dhcp,
+    /// Manual static IP configuration.
+    #[serde(rename = "static")]
+    Static {
+        ip_address: IpAddr,
+        prefix_length: u8,
+        gateway: Option<IpAddr>,
+        dns: Option<Vec<IpAddr>>,
+    },
+    /// IP stack disabled on this interface.
+    #[serde(rename = "disabled")]
+    Disabled,
+}
+
+impl Validate for IpConfig {
+    fn validate(&self) -> Result<(), validator::ValidationErrors> {
+        if let Self::Static { prefix_length, .. } = self {
+            if *prefix_length < 1 || *prefix_length > 32 {
+                let mut errors = validator::ValidationErrors::new();
+                let mut err = validator::ValidationError::new("range");
+                err.message = Some("prefix must be in [1, 32]".into());
+                errors.add("prefix_length", err);
+                return Err(errors);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl IpConfig {
+    /// Return the corresponding [`IpMethod`] discriminant.
+    #[inline]
+    pub fn method(&self) -> IpMethod {
+        match self {
+            Self::Dhcp => IpMethod::Dhcp,
+            Self::Static { .. } => IpMethod::Static,
+            Self::Disabled => IpMethod::Disabled,
+        }
+    }
 }
 
 /// Interface operational state derived from kernel link flags.
@@ -274,6 +336,29 @@ pub struct WifiStaStatus {
     pub connected_secs: Option<u64>,
 }
 
+/// Saved Wi-Fi connection profile from NetworkManager.
+///
+/// Represents a persistent NM connection of type `802-11-wireless`.
+/// Returned by `list_saved_wifi_connections` for the "saved networks" UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedWifiConnection {
+    /// NetworkManager connection UUID (stable identifier).
+    pub uuid: String,
+    /// SSID of the saved network.
+    pub ssid: String,
+    /// Whether this connection is currently active.
+    pub is_active: bool,
+    /// Whether NetworkManager will auto-connect to this network.
+    pub autoconnect: bool,
+    /// Security type configured for this connection.
+    pub security: WifiSecurity,
+    /// IPv4 configuration (DHCP/Static/Disabled) saved in the profile.
+    pub ip_config: IpConfig,
+    /// Unix timestamp (seconds) of the last successful connection, if known.
+    pub last_connected: Option<u64>,
+}
+
 /// Pre-flight check result for Wi-Fi connect operations.
 ///
 /// Returned by the preflight endpoint so the frontend can display appropriate
@@ -401,20 +486,21 @@ pub struct WifiInterfaceQuery {
 // ─────────────────── Requests ───────────────────
 
 /// Request to configure an interface's IP settings.
+///
+/// Uses the unified [`IpConfig`] tagged enum to enforce type-safe IP configuration:
+/// the `Static` variant requires IP address and prefix length at the type level.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureInterfaceRequest {
-    pub method: IpMethod,
-    /// Required if method = static.
-    pub ip_address: Option<IpAddr>,
-    /// Required if method = static. CIDR prefix (e.g. 24 for /24).
-    #[validate(range(min = 1, max = 32, message = "prefix must be in [1, 32]"))]
-    pub prefix_length: Option<u8>,
-    pub gateway: Option<IpAddr>,
-    pub dns: Option<Vec<IpAddr>>,
+    /// IP configuration (DHCP, Static, or Disabled).
+    #[validate(nested)]
+    pub ip_config: IpConfig,
 }
 
 /// Request to connect to a Wi-Fi network.
+///
+/// Supports optional static IP configuration via [`IpConfig`]. When `ip_config`
+/// is `None` or omitted, DHCP is used (backward-compatible default).
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct WifiConnectRequest {
@@ -428,6 +514,37 @@ pub struct WifiConnectRequest {
     pub hidden: Option<bool>,
     /// Which wireless interface to use (defaults to first available STA interface).
     pub interface_name: Option<String>,
+    /// IP configuration for this Wi-Fi connection. Defaults to DHCP when absent.
+    #[validate(nested)]
+    pub ip_config: Option<IpConfig>,
+}
+
+/// Request to disconnect from the current Wi-Fi STA connection.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiDisconnectRequest {
+    /// Specific wireless interface to disconnect (defaults to first available).
+    pub interface_name: Option<String>,
+    /// When true, sets `autoconnect=false` on the NM connection profile to prevent
+    /// NetworkManager from automatically reconnecting. The flag is restored when the
+    /// user manually reconnects via `connect_wifi`.
+    #[serde(default)]
+    pub disable_autoconnect: bool,
+}
+
+/// Request to forget (delete) a saved Wi-Fi connection profile.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetWifiRequest {
+    /// NetworkManager connection UUID to delete.
+    pub uuid: String,
+}
+
+/// Path parameter for Wi-Fi connection UUID in REST routes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WifiUuidPath {
+    /// NetworkManager connection UUID.
+    pub uuid: String,
 }
 
 /// Request to modify AP hotspot configuration.

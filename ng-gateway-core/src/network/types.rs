@@ -5,8 +5,9 @@
 
 pub use ng_gateway_models::domain::prelude::{
     ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config, LinkState,
-    NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary, PlatformSupport,
-    StaApCapability, WifiAccessPoint, WifiBand, WifiConnectRequest, WifiMode, WifiSecurity,
+    ForgetWifiRequest, InterfaceKind, IpConfig, IpMethod, Ipv4AddressInfo, Ipv4Config,
+    Ipv6AddressInfo, Ipv6Config, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
+    NetworkInterfaceSummary, PlatformSupport, SavedWifiConnection, StaApCapability,
+    WifiAccessPoint, WifiBand, WifiConnectRequest, WifiDisconnectRequest, WifiMode, WifiSecurity,
     WifiStaStatus, WirelessInterfaceCapability,
 };

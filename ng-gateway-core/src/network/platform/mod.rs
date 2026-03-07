@@ -24,8 +24,9 @@ use async_trait::async_trait;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::domain::prelude::{
     ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary, WifiAccessPoint,
-    WifiBand, WifiConnectPreflight, WifiConnectRequest, WifiSecurity, WifiStaStatus,
+    ForgetWifiRequest, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
+    SavedWifiConnection, WifiAccessPoint, WifiBand, WifiConnectPreflight, WifiConnectRequest,
+    WifiDisconnectRequest, WifiSecurity, WifiStaStatus,
 };
 
 /// Platform-abstracted network management interface.
@@ -85,10 +86,26 @@ pub trait PlatformNetworkManager: Send + Sync {
     async fn connect_wifi(&self, request: &WifiConnectRequest) -> NGResult<WifiStaStatus>;
 
     /// Disconnect Wi-Fi STA on the given (or default) interface.
-    async fn disconnect_wifi(&self, interface_name: Option<&str>) -> NGResult<()>;
+    ///
+    /// When `disable_autoconnect` is set, updates the NM connection profile to
+    /// prevent automatic reconnection. After disconnection, evaluates whether the
+    /// AP hotspot should be restored as a fallback management channel.
+    async fn disconnect_wifi(&self, request: &WifiDisconnectRequest) -> NGResult<()>;
 
     /// Get current Wi-Fi STA connection status.
     async fn wifi_sta_status(&self, interface_name: Option<&str>) -> NGResult<WifiStaStatus>;
+
+    /// List all saved Wi-Fi connection profiles known to NetworkManager.
+    ///
+    /// Returns connection metadata including UUID, SSID, autoconnect flag,
+    /// security type, IP configuration, and last-connected timestamp.
+    async fn list_saved_wifi_connections(&self) -> NGResult<Vec<SavedWifiConnection>>;
+
+    /// Delete (forget) a saved Wi-Fi connection profile by UUID.
+    ///
+    /// If the connection is currently active, deactivates it first, then deletes
+    /// the profile from NetworkManager. After deletion, evaluates AP restore.
+    async fn forget_wifi(&self, request: &ForgetWifiRequest) -> NGResult<()>;
 
     // ─── AP Hotspot ───
 

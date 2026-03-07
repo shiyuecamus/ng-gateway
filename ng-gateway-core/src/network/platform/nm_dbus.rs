@@ -24,6 +24,8 @@ pub mod iface {
     pub const DEVICE_WIRELESS: &str = "org.freedesktop.NetworkManager.Device.Wireless";
     /// Active connection properties.
     pub const ACTIVE_CONN: &str = "org.freedesktop.NetworkManager.Connection.Active";
+    /// Settings root — manages all saved connection profiles.
+    pub const SETTINGS: &str = "org.freedesktop.NetworkManager.Settings";
     /// Settings (saved) connection profile.
     pub const SETTINGS_CONN: &str = "org.freedesktop.NetworkManager.Settings.Connection";
     /// IPv4 configuration object.
@@ -112,6 +114,9 @@ pub mod conn {
     pub const METHOD: &str = "method";
     pub const ADDRESS_DATA: &str = "address-data";
     pub const DNS_DATA: &str = "dns-data";
+
+    // ─── "connection" group keys (continued) ───
+    pub const TIMESTAMP: &str = "timestamp";
 }
 
 /// NM IPv4/IPv6 method string values.
@@ -138,6 +143,12 @@ pub mod dbus_method {
     pub const UPDATE: &str = "Update";
     pub const REQUEST_SCAN: &str = "RequestScan";
     pub const GET_ALL_ACCESS_POINTS: &str = "GetAllAccessPoints";
+    pub const LIST_CONNECTIONS: &str = "ListConnections";
+}
+
+/// NM Settings D-Bus path.
+pub mod settings_path {
+    pub const ROOT: &str = "/org/freedesktop/NetworkManager/Settings";
 }
 
 /// `NM_DEVICE_TYPE_*` constants.

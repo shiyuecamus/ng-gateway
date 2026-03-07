@@ -10,9 +10,10 @@ use network_interface::{Addr, NetworkInterfaceConfig};
 use ng_gateway_error::{network::NetworkError, NGResult};
 use ng_gateway_models::domain::prelude::{
     ApMode, ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest,
-    DnsConfig, InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config,
-    LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
-    PlatformSupport, StaApCapability, WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest,
+    DnsConfig, ForgetWifiRequest, InterfaceKind, IpMethod, Ipv4AddressInfo, Ipv4Config,
+    Ipv6AddressInfo, Ipv6Config, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
+    NetworkInterfaceSummary, PlatformSupport, SavedWifiConnection, StaApCapability,
+    WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest, WifiDisconnectRequest,
     WifiStaStatus,
 };
 use std::{collections::BTreeMap, net::IpAddr};
@@ -236,9 +237,23 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         .into())
     }
 
-    async fn disconnect_wifi(&self, _: Option<&str>) -> NGResult<()> {
+    async fn disconnect_wifi(&self, _request: &WifiDisconnectRequest) -> NGResult<()> {
         Err(NetworkError::PlatformNotSupported(
             "Wi-Fi disconnect is not supported on Windows from gateway".into(),
+        )
+        .into())
+    }
+
+    async fn list_saved_wifi_connections(&self) -> NGResult<Vec<SavedWifiConnection>> {
+        Err(NetworkError::PlatformNotSupported(
+            "Saved Wi-Fi connection listing is not supported on Windows from gateway".into(),
+        )
+        .into())
+    }
+
+    async fn forget_wifi(&self, _request: &ForgetWifiRequest) -> NGResult<()> {
+        Err(NetworkError::PlatformNotSupported(
+            "Wi-Fi forget is not supported on Windows from gateway".into(),
         )
         .into())
     }

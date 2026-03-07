@@ -10,8 +10,9 @@ use crate::network::platform::{self, PlatformNetworkManager};
 use ng_gateway_error::NGResult;
 use ng_gateway_models::domain::prelude::{
     ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
-    WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest, WifiStaStatus, WiredStatus,
+    ForgetWifiRequest, InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
+    NetworkInterfaceSummary, SavedWifiConnection, WifiAccessPoint, WifiConnectPreflight,
+    WifiConnectRequest, WifiDisconnectRequest, WifiStaStatus, WiredStatus,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -194,15 +195,29 @@ impl NetworkService {
     }
 
     /// Disconnect Wi-Fi STA.
+    ///
+    /// Optionally disables autoconnect on the profile and evaluates AP restore.
     #[inline]
-    pub async fn disconnect_wifi(&self, interface_name: Option<&str>) -> NGResult<()> {
-        self.manager.disconnect_wifi(interface_name).await
+    pub async fn disconnect_wifi(&self, request: &WifiDisconnectRequest) -> NGResult<()> {
+        self.manager.disconnect_wifi(request).await
     }
 
     /// Get Wi-Fi STA connection status.
     #[inline]
     pub async fn wifi_sta_status(&self, interface_name: Option<&str>) -> NGResult<WifiStaStatus> {
         self.manager.wifi_sta_status(interface_name).await
+    }
+
+    /// List all saved Wi-Fi connection profiles.
+    #[inline]
+    pub async fn list_saved_wifi_connections(&self) -> NGResult<Vec<SavedWifiConnection>> {
+        self.manager.list_saved_wifi_connections().await
+    }
+
+    /// Forget (delete) a saved Wi-Fi connection profile.
+    #[inline]
+    pub async fn forget_wifi(&self, request: &ForgetWifiRequest) -> NGResult<()> {
+        self.manager.forget_wifi(request).await
     }
 
     // ─── AP Hotspot ───

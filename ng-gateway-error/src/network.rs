@@ -53,6 +53,12 @@ pub enum NetworkError {
 
     #[error("Network operation timed out: {0}")]
     Timeout(String),
+
+    #[error("Wi-Fi connection profile not found: {0}")]
+    WifiConnectionNotFound(String),
+
+    #[error("Cannot forget Wi-Fi connection '{ssid}': deactivation failed — {reason}")]
+    WifiForgetFailed { ssid: String, reason: String },
 }
 
 impl From<NetworkError> for crate::NGError {
