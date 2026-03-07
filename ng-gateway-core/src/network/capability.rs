@@ -109,8 +109,13 @@ fn has_ap_mode(cap: &WirelessInterfaceCapability) -> bool {
         .any(|m| m.eq_ignore_ascii_case(iw_tokens::MODE_AP))
 }
 
-/// Probe concurrent STA+AP by creating and immediately removing a virtual AP
-/// interface. Returns `true` if the driver allows it.
+/// Probe concurrent STA+AP by creating a virtual AP interface, verifying it
+/// can actually be brought up, then tearing it down.
+///
+/// Some drivers (notably Realtek RTL8852BE / rtw89) allow *creating* a virtual
+/// AP interface (`iw dev ... interface add ... type __ap`) but refuse to bring
+/// it up (`ip link set ... up` → `EBUSY`).  Only testing both operations gives
+/// a reliable answer.
 #[cfg(target_os = "linux")]
 async fn probe_virtual_ap(sta_iface: &str) -> bool {
     let probe_name = format!("{sta_iface}_probe");
@@ -129,13 +134,36 @@ async fn probe_virtual_ap(sta_iface: &str) -> bool {
         .await;
 
     let created = matches!(&create, Ok(out) if out.status.success());
+    if !created {
+        return false;
+    }
 
+    // The interface was created — now verify it can actually be activated.
+    // Drivers that fake concurrency support will fail here with EBUSY.
+    let up = Command::new("ip")
+        .args(["link", "set", &probe_name, "up"])
+        .output()
+        .await;
+    let can_activate = matches!(&up, Ok(out) if out.status.success());
+
+    if !can_activate {
+        debug!(
+            iface = probe_name,
+            "Virtual AP created but cannot be brought up — driver does not truly support concurrency"
+        );
+    }
+
+    // Always clean up: down + delete.
+    let _ = Command::new("ip")
+        .args(["link", "set", &probe_name, "down"])
+        .output()
+        .await;
     let _ = Command::new("iw")
         .args(["dev", &probe_name, "del"])
         .output()
         .await;
 
-    created
+    can_activate
 }
 
 /// Resolve the phy name for a wireless interface via `/sys/class/net/<iface>/phy80211/name`.

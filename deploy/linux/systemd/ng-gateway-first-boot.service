@@ -1,0 +1,31 @@
+# ng-gateway first-boot initialization (partition resize + identity setup)
+#
+# Runs once on the very first boot after a factory image has been flashed
+# to eMMC. Expands the root partition to fill the disk, regenerates unique
+# machine identity (machine-id, SSH keys), and re-initializes the AP
+# hotspot with a device-specific SSID.
+#
+# The script creates /var/lib/ng-gateway/.first-boot-done on success.
+# Subsequent boots skip execution via ConditionPathExists.
+#
+# Must run very early — before local-fs-pre.target — because resize2fs
+# can operate on an online ext4 filesystem but growpart needs the kernel
+# to re-read the partition table.
+
+[Unit]
+Description=NG-Gateway First-Boot Initialization (partition resize + identity)
+DefaultDependencies=no
+Before=local-fs-pre.target
+After=systemd-remount-fs.service
+ConditionPathExists=!/var/lib/ng-gateway/.first-boot-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/ng-gateway/scripts/first-boot-resize.sh
+TimeoutStartSec=300
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target

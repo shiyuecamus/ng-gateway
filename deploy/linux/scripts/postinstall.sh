@@ -21,8 +21,6 @@ if [[ ! -f "${config_dir}/gateway.toml" && -f "${opt_dir}/gateway.toml" ]]; then
 fi
 
 # Create an optional environment override file.
-# Users can put overrides like:
-# - NG__GENERAL__RUNTIME_DIR=/var/lib/ng-gateway
 if [[ ! -f "${config_dir}/env" ]]; then
   {
     printf "%s\n" "# NG Gateway environment overrides (optional)"
@@ -32,7 +30,6 @@ if [[ ! -f "${config_dir}/env" ]]; then
 fi
 
 # Ensure builtin drivers/plugins are available under runtime working directory.
-# We keep builtin copies in runtime dir to match the working directory layout.
 if [[ -d "${opt_dir}/drivers/builtin" ]]; then
   cp -af "${opt_dir}/drivers/builtin/." "${runtime_dir}/drivers/builtin/" 2>/dev/null || true
 fi
@@ -45,31 +42,16 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
 fi
 
-# ─── System Service Sanitization (defensive) ───
-#
-# Disable and mask conflicting system services that may interfere with our AP stack.
-# This runs on every install/upgrade as a defensive measure.
-if command -v systemctl >/dev/null 2>&1; then
-  for svc in dnsmasq.service hostapd.service; do
-    if systemctl is-enabled "$svc" 2>/dev/null | grep -q enabled; then
-      systemctl disable --now "$svc" 2>/dev/null || true
-      systemctl mask "$svc" 2>/dev/null || true
-      echo "[postinstall] Disabled and masked conflicting ${svc}"
-    fi
-  done
-fi
-
 # ─── AP Hotspot Network Initialization ───
 #
-# On first install, run init-network.sh to:
-# 1. Detect wireless hardware
-# 2. Generate default AP configuration (hostapd.conf, dnsmasq-ap.conf, ap-env)
-# 3. Sanitize conflicting system services
-# 4. Deploy AP systemd units and enable/start AP services
+# Run init-network.sh which handles:
+# - Service sanitization (disable/mask conflicting dnsmasq/hostapd)
+# - Wireless hardware detection
+# - AP configuration generation
+# - AP systemd unit deployment and enablement
 #
-# The AP stack (hostapd + dnsmasq) runs as independent systemd services.
-# They survive ng-gateway restarts/stops — this is by design.
-# In exclusive mode (single card, no STA+AP), AP is NOT auto-started.
+# NOTE: Service sanitization was previously duplicated here AND inside
+# init-network.sh. It is now consolidated inside init-network.sh only.
 init_script="${opt_dir}/scripts/init-network.sh"
 if [[ -f "${init_script}" ]]; then
   echo "[postinstall] Running network initialization..."
@@ -81,20 +63,28 @@ else
   echo "[postinstall] WARN: init-network.sh not found, skipping AP setup."
 fi
 
-# ─── Enable and start the gateway service ───
+# ─── First-Boot Service (factory image support) ───
 #
-# The gateway process must be running for AP auto-management, Web UI, and API
-# to function. We enable (persist across reboots) and start immediately.
+# Deploy and enable the first-boot service for factory-flashed devices.
+# On normal DEB installs (not from golden image), the service detects the
+# marker file already exists and exits immediately.
+if command -v systemctl >/dev/null 2>&1; then
+  fb_unit="${opt_dir}/systemd/ng-gateway-first-boot.service"
+  fb_dst="/lib/systemd/system/ng-gateway-first-boot.service"
+  if [[ -f "$fb_unit" ]]; then
+    cp -f "$fb_unit" "$fb_dst"
+    systemctl daemon-reload || true
+    systemctl enable ng-gateway-first-boot.service 2>/dev/null || true
+    echo "[postinstall] First-boot service deployed and enabled"
+  fi
+fi
+
+# ─── Enable and start the gateway service ───
 if command -v systemctl >/dev/null 2>&1; then
   systemctl enable ng-gateway.service 2>/dev/null || true
   systemctl start ng-gateway.service 2>/dev/null || true
 fi
 
-# User-friendly post-install hints (printed for both deb and rpm).
-#
-# Note:
-# - This runs on both fresh install and upgrade.
-# - We intentionally print operational hints to reduce time-to-first-run.
 cat <<EOF
 
 ============================================================
@@ -147,4 +137,3 @@ Manual run (without systemd):
 EOF
 
 exit 0
-

@@ -17,6 +17,10 @@ set -euo pipefail
 # Configuration directory: /etc/ng-gateway/
 # Runtime directory:       /var/lib/ng-gateway/
 
+LOG_TAG="[init-network]"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_common.sh"
+
 CONFIG_DIR="/etc/ng-gateway"
 OPT_DIR="/opt/ng-gateway"
 SYSTEMD_DIR="/lib/systemd/system"
@@ -32,60 +36,8 @@ DEFAULT_AP_DHCP_START="10.47.0.10"
 DEFAULT_AP_DHCP_END="10.47.0.200"
 DEFAULT_AP_DHCP_LEASE="12h"
 
-# ─── Helper Functions ───
+# ─── Wi-Fi Detection Helpers ───
 
-log() { echo "[init-network] $*"; }
-
-# Detect the available package manager for runtime dependency installation.
-detect_package_manager() {
-  if command -v apt-get >/dev/null 2>&1; then
-    echo "apt"
-    return 0
-  fi
-  if command -v dnf >/dev/null 2>&1; then
-    echo "dnf"
-    return 0
-  fi
-  if command -v yum >/dev/null 2>&1; then
-    echo "yum"
-    return 0
-  fi
-  if command -v zypper >/dev/null 2>&1; then
-    echo "zypper"
-    return 0
-  fi
-  return 1
-}
-
-# Best-effort package installation across major Linux distributions.
-install_packages() {
-  local manager="$1"
-  shift
-  local packages=("$@")
-
-  [[ ${#packages[@]} -gt 0 ]] || return 0
-
-  case "$manager" in
-    apt)
-      apt-get update -qq &&
-      apt-get install -y -qq "${packages[@]}"
-      ;;
-    dnf)
-      dnf install -y "${packages[@]}"
-      ;;
-    yum)
-      yum install -y "${packages[@]}"
-      ;;
-    zypper)
-      zypper --non-interactive install --no-confirm "${packages[@]}"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-# Find the primary Wi-Fi interface using `iw dev` (reliable across naming schemes).
 find_wifi_interface() {
   local iface
   iface=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
@@ -96,7 +48,6 @@ find_wifi_interface() {
   return 1
 }
 
-# Get the phy name for a wireless interface.
 get_phy_name() {
   local iface="$1"
   local phy_path="/sys/class/net/${iface}/phy80211/name"
@@ -143,15 +94,13 @@ phy_supports_ap() {
 #   2. If the driver reports `interface combinations are not supported`
 #      (common with Realtek RTL8852BE and similar), try to **probe** by
 #      actually creating a temporary virtual AP interface and immediately
-#      removing it. This is the only reliable way to detect concurrency
-#      for drivers that don't advertise it via nl80211.
+#      removing it.
 phy_supports_sta_ap() {
   local phy="$1"
   local sta_iface="${2:-}"
   local info
   info=$(iw phy "$phy" info 2>/dev/null) || return 1
 
-  # Method 1: parse `valid interface combinations`.
   if echo "$info" | grep -q "valid interface combinations:"; then
     local combo_section
     combo_section=$(echo "$info" | awk '/valid interface combinations:/,/^[^ \t]/')
@@ -159,19 +108,26 @@ phy_supports_sta_ap() {
        echo "$combo_section" | grep -q "AP"; then
       return 0
     fi
-    # Combinations section present but no managed+AP combo — not supported.
     return 1
   fi
 
-  # Method 2: `interface combinations are not supported` or no section at all.
-  # Probe by creating a temporary virtual AP interface.
   if [[ -n "$sta_iface" ]]; then
     log "No interface combinations advertised — probing virtual AP support..."
     local probe_iface="${sta_iface}_ap_probe"
     if iw dev "$sta_iface" interface add "$probe_iface" type __ap 2>/dev/null; then
-      iw dev "$probe_iface" del 2>/dev/null || true
-      log "  Probe succeeded: virtual AP interface creation supported"
-      return 0
+      # The interface was created — now verify it can actually be brought up.
+      # Some drivers (Realtek RTL8852BE / rtw89) allow creation but refuse
+      # activation with EBUSY, making concurrent STA+AP impossible.
+      if ip link set "$probe_iface" up 2>/dev/null; then
+        ip link set "$probe_iface" down 2>/dev/null || true
+        iw dev "$probe_iface" del 2>/dev/null || true
+        log "  Probe succeeded: virtual AP create + bring-up confirmed"
+        return 0
+      else
+        iw dev "$probe_iface" del 2>/dev/null || true
+        log "  Probe partial: interface created but bring-up failed (EBUSY) — exclusive mode only"
+        return 1
+      fi
     else
       log "  Probe failed: virtual AP interface creation not supported"
       return 1
@@ -181,7 +137,6 @@ phy_supports_sta_ap() {
   return 1
 }
 
-# Get the last 4 hex digits of a MAC address (e.g. "E708").
 mac_suffix() {
   local iface="$1"
   local mac
@@ -189,40 +144,10 @@ mac_suffix() {
   echo "$mac" | tr -d ':' | grep -oE '.{4}$' | tr '[:lower:]' '[:upper:]'
 }
 
-# Find the interface carrying the default route (uplink for NAT).
-find_uplink_interface() {
-  ip route show default 2>/dev/null | awk '{print $5; exit}'
-}
-
-# Disable and mask conflicting system services.
-#
-# System-wide dnsmasq.service conflicts with systemd-resolved (port 53) and with
-# our ng-gateway-dnsmasq.service. System hostapd.service conflicts with ours.
-# We mask them to prevent accidental re-enablement by package upgrades.
-sanitize_system_services() {
-  log "Sanitizing conflicting system services..."
-
-  if systemctl is-enabled dnsmasq.service 2>/dev/null | grep -q enabled; then
-    systemctl disable --now dnsmasq.service 2>/dev/null || true
-    systemctl mask dnsmasq.service 2>/dev/null || true
-    log "  Disabled and masked system dnsmasq.service"
-  fi
-
-  if systemctl is-enabled hostapd.service 2>/dev/null | grep -q enabled; then
-    systemctl disable --now hostapd.service 2>/dev/null || true
-    systemctl mask hostapd.service 2>/dev/null || true
-    log "  Disabled and masked system hostapd.service"
-  fi
-}
-
 # ─── Main Logic ───
 
 main() {
-  # Root check.
-  if [[ $EUID -ne 0 ]]; then
-    log "ERROR: This script must be run as root"
-    exit 1
-  fi
+  require_root
 
   log "Starting network initialization..."
 
@@ -230,12 +155,12 @@ main() {
   if ! command -v iw >/dev/null 2>&1; then
     local pkg_manager
     pkg_manager=$(detect_package_manager) || {
-      log "WARN: 'iw' missing and no supported package manager detected. Skipping AP setup."
+      warn "'iw' missing and no supported package manager detected. Skipping AP setup."
       exit 0
     }
     log "WARN: 'iw' not installed. Installing via ${pkg_manager}..."
     install_packages "$pkg_manager" iw >/dev/null 2>&1 || {
-      log "ERROR: Failed to install 'iw' with ${pkg_manager}. Skipping AP setup."
+      warn "Failed to install 'iw' with ${pkg_manager}. Skipping AP setup."
       exit 0
     }
   fi
@@ -251,14 +176,14 @@ main() {
 
   local phy_name
   phy_name=$(get_phy_name "$wifi_iface") || {
-    log "WARN: Cannot determine phy for ${wifi_iface}. Skipping AP setup."
+    warn "Cannot determine phy for ${wifi_iface}. Skipping AP setup."
     exit 0
   }
   log "PHY: ${phy_name}"
 
   # 2. Check AP mode support.
   if ! phy_supports_ap "$phy_name"; then
-    log "WARN: ${phy_name} does not support AP mode. Skipping AP setup."
+    warn "${phy_name} does not support AP mode. Skipping AP setup."
     exit 0
   fi
   log "AP mode supported on ${phy_name}"
@@ -278,10 +203,10 @@ main() {
 
   # 4. Detect uplink interface for NAT.
   local uplink_iface
-  uplink_iface=$(find_uplink_interface) || true
+  uplink_iface=$(find_uplink_iface) || true
   if [[ -z "$uplink_iface" ]]; then
     uplink_iface="$wifi_iface"
-    log "WARN: No default route found, using ${wifi_iface} as uplink fallback"
+    warn "No default route found, using ${wifi_iface} as uplink fallback"
   else
     log "Uplink interface: ${uplink_iface}"
   fi
@@ -376,20 +301,20 @@ DNSMASQ
 
   if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
     pkg_manager=$(detect_package_manager) || {
-      log "WARN: Missing AP packages (${missing_pkgs[*]}) and no supported package manager detected."
-      log "WARN: Please install required packages manually. AP hotspot may not work."
+      warn "Missing AP packages (${missing_pkgs[*]}) and no supported package manager detected."
+      warn "Please install required packages manually. AP hotspot may not work."
       pkg_manager=""
     }
     if [[ -n "$pkg_manager" ]]; then
       log "Installing missing packages via ${pkg_manager}: ${missing_pkgs[*]}"
       install_packages "$pkg_manager" "${missing_pkgs[@]}" >/dev/null 2>&1 || {
-        log "WARN: Failed to install ${missing_pkgs[*]} via ${pkg_manager}. AP hotspot may not work."
+        warn "Failed to install ${missing_pkgs[*]} via ${pkg_manager}. AP hotspot may not work."
       }
     fi
   fi
 
   # 8. Sanitize conflicting system services.
-  sanitize_system_services
+  sanitize_conflicting_services
 
   # 9. Deploy systemd unit files.
   for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service; do
@@ -399,33 +324,18 @@ DNSMASQ
       cp -f "$src" "$dst"
       log "Deployed ${dst}"
     else
-      log "WARN: ${src} not found, skipping"
+      warn "${src} not found, skipping"
     fi
   done
 
   systemctl daemon-reload || true
 
   # 10. Enable and start AP services.
-  #
-  # EXCLUSIVE mode: The single wireless interface is shared between STA and AP.
-  #   - Do NOT enable (would auto-start on boot and fight NetworkManager).
-  #   - Do NOT start (would disconnect the current Wi-Fi / SSH session).
-  #   - The user starts/stops AP on demand via the Web UI, which calls
-  #     `systemctl start/stop` directly without enabling the units.
-  #
-  # CONCURRENT mode: A dedicated virtual AP interface coexists with STA.
-  #   - Enable all three units so the AP survives reboots.
-  #   - Start them immediately.
   if [[ "$ap_exclusive" == "true" ]]; then
-    # Ensure the manual AP units are *not* enabled — a previous install or
-    # mode change may have enabled them.
     systemctl disable ng-gateway-ap-setup.service 2>/dev/null || true
     systemctl disable ng-gateway-hostapd.service 2>/dev/null || true
     systemctl disable ng-gateway-dnsmasq.service 2>/dev/null || true
 
-    # Enable the boot-time auto-provision service instead.
-    # It probes network state on every boot and starts AP only when needed
-    # (WiFi module present + no active WiFi connection).
     systemctl enable ng-gateway-ap-auto.service 2>/dev/null || true
 
     log ""
@@ -439,13 +349,13 @@ DNSMASQ
 
     log "Starting AP services..."
     systemctl start ng-gateway-ap-setup.service 2>/dev/null || {
-      log "WARN: ap-setup failed (virtual interface may not be available). Continuing..."
+      warn "ap-setup failed (virtual interface may not be available). Continuing..."
     }
     systemctl start ng-gateway-hostapd.service 2>/dev/null || {
-      log "WARN: hostapd failed to start. Check: journalctl -u ng-gateway-hostapd -n 20"
+      warn "hostapd failed to start. Check: journalctl -u ng-gateway-hostapd -n 20"
     }
     systemctl start ng-gateway-dnsmasq.service 2>/dev/null || {
-      log "WARN: dnsmasq failed to start. Check: journalctl -u ng-gateway-dnsmasq -n 20"
+      warn "dnsmasq failed to start. Check: journalctl -u ng-gateway-dnsmasq -n 20"
     }
   fi
 

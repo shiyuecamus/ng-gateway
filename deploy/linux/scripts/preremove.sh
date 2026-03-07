@@ -26,7 +26,7 @@ runtime_dir="/var/lib/ng-gateway"
 if command -v systemctl >/dev/null 2>&1; then
   # Stop and disable AP services first (reverse dependency order).
   # ap-setup's / ap-auto's ExecStop handles interface teardown and iptables NAT cleanup.
-  for unit in ng-gateway-dnsmasq.service ng-gateway-hostapd.service ng-gateway-ap-setup.service ng-gateway-ap-auto.service; do
+  for unit in ng-gateway-dnsmasq.service ng-gateway-hostapd.service ng-gateway-ap-setup.service ng-gateway-ap-auto.service ng-gateway-first-boot.service; do
     systemctl stop "$unit" >/dev/null 2>&1 || true
     systemctl disable "$unit" >/dev/null 2>&1 || true
   done
@@ -35,10 +35,10 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl stop ng-gateway.service >/dev/null 2>&1 || true
   systemctl disable ng-gateway.service >/dev/null 2>&1 || true
 
-  # Clean up AP systemd unit files deployed by init-network.sh.
+  # Clean up systemd unit files deployed by init-network.sh and postinstall.sh.
   # These are copied to the system directory at install time, not managed by nfpm.
   # Check both deb (/lib/systemd/system) and rpm (/usr/lib/systemd/system) paths.
-  for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service ng-gateway-ap-auto.service; do
+  for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service ng-gateway-ap-auto.service ng-gateway-first-boot.service; do
     rm -f "/lib/systemd/system/${unit}" 2>/dev/null || true
     rm -f "/usr/lib/systemd/system/${unit}" 2>/dev/null || true
   done

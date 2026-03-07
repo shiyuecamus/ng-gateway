@@ -97,13 +97,13 @@ cp -f "${REPO_ROOT}/plugins/builtin/"*.so "${opt_dir}/plugins/builtin/" 2>/dev/n
 # AP hotspot systemd units + init script.
 echo "[stage] AP hotspot resources"
 mkdir -p "${opt_dir}/systemd" "${opt_dir}/scripts"
-for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service ng-gateway-ap-auto.service; do
+for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service ng-gateway-ap-auto.service ng-gateway-first-boot.service; do
   src="${REPO_ROOT}/deploy/linux/systemd/${unit}"
   if [[ -f "$src" ]]; then
     cp -f "$src" "${opt_dir}/systemd/${unit}"
   fi
 done
-for script in init-network.sh ap-setup.sh ap-teardown.sh ap-auto-provision.sh; do
+for script in _common.sh init-network.sh ap-setup.sh ap-teardown.sh ap-auto-provision.sh first-boot-resize.sh create-golden-image.sh flash-image.sh verify-image.sh; do
   src="${REPO_ROOT}/deploy/linux/scripts/${script}"
   if [[ -f "$src" ]]; then
     cp -f "$src" "${opt_dir}/scripts/${script}"

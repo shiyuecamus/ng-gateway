@@ -295,22 +295,17 @@ jobs:
 
       - name: Build .deb
         env:
-          # e.g. v1.2.3
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
-          # e.g. 1.2.3
           PKG_VERSION: ${{ env.RELEASE_TAG }}
           TARGET_TRIPLE: ${{ matrix.target }}
-          DEB_ARCH: ${{ matrix.deb_arch }}
-          # Let xtask use cross for the actual build.
+          PKG_ARCH: ${{ matrix.deb_arch }}
           XTASK_CARGO: cross
-          # Do NOT export cross compiler vars globally (it breaks `go install nfpm` via cgo).
-          # If any build script consults pkg-config in cross mode, allow it here (scoped).
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
           export PKG_VERSION
-          bash deploy/linux/scripts/package-deb.sh
+          bash deploy/linux/scripts/package.sh --format deb
 
       - name: Upload .deb
         env:
@@ -387,14 +382,14 @@ jobs:
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
           PKG_VERSION: ${{ env.RELEASE_TAG }}
           TARGET_TRIPLE: ${{ matrix.target }}
-          RPM_ARCH: ${{ matrix.rpm_arch }}
+          PKG_ARCH: ${{ matrix.rpm_arch }}
           XTASK_CARGO: cross
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
         run: |
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
           export PKG_VERSION
-          bash deploy/linux/scripts/package-rpm.sh
+          bash deploy/linux/scripts/package.sh --format rpm
 
       - name: Upload .rpm
         env:

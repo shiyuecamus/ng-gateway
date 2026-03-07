@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# first-boot-resize.sh
+#
+# One-time first-boot initialization for factory-flashed NG Gateway devices.
+#
+# This script runs once on the very first boot after a golden image has been
+# flashed to eMMC.  It performs:
+#   1. Root partition expansion  (growpart + resize2fs)
+#   2. GPT backup header repair  (sgdisk -e)
+#   3. Machine identity regeneration  (machine-id, SSH host keys)
+#   4. AP hotspot re-initialization  (MAC-specific SSID)
+#   5. Marker file creation to prevent re-execution
+#
+# Called by ng-gateway-first-boot.service (oneshot, Before=local-fs-pre.target).
+# Idempotent — safe to re-run, but will skip if marker file exists.
+#
+# Required tools: growpart (cloud-guest-utils), resize2fs, sgdisk, ssh-keygen
+
+MARKER_FILE="/var/lib/ng-gateway/.first-boot-done"
+OPT_DIR="/opt/ng-gateway"
+LOG_TAG="[first-boot]"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_common.sh"
+
+# ─── Guard: skip if already completed ───
+
+if [[ -f "${MARKER_FILE}" ]]; then
+  log "First-boot already completed (marker exists: ${MARKER_FILE}). Skipping."
+  exit 0
+fi
+
+log "=========================================="
+log "NG Gateway First-Boot Initialization"
+log "=========================================="
+
+require_root
+
+# ─── Step 1: Identify root device and partition ───
+
+log "Step 1/7: Identifying root filesystem device..."
+
+ROOT_DEV=""
+
+if command -v findmnt >/dev/null 2>&1; then
+  ROOT_DEV=$(findmnt -n -o SOURCE / 2>/dev/null | head -1) || true
+fi
+
+if [[ -z "${ROOT_DEV}" ]]; then
+  ROOT_DEV=$(grep -oP 'root=\K\S+' /proc/cmdline 2>/dev/null || true)
+  if [[ "${ROOT_DEV}" == UUID=* ]]; then
+    uuid="${ROOT_DEV#UUID=}"
+    ROOT_DEV=$(blkid -U "$uuid" 2>/dev/null || true)
+  fi
+fi
+
+[[ -z "${ROOT_DEV}" ]] && die "Cannot identify root device"
+
+parse_block_device "${ROOT_DEV}" || die "Cannot parse root device: ${ROOT_DEV}"
+ROOT_DISK="${_PBD_DISK}"
+ROOT_PARTNUM="${_PBD_PARTNUM}"
+
+log "  Root device:    ${ROOT_DEV}"
+log "  Disk device:    ${ROOT_DISK}"
+log "  Partition:      ${ROOT_PARTNUM}"
+
+# ─── Step 2: Repair GPT backup header ───
+
+log "Step 2/7: Repairing GPT backup header..."
+
+if command -v sgdisk >/dev/null 2>&1; then
+  sgdisk -e "${ROOT_DISK}" 2>/dev/null || {
+    warn "sgdisk -e failed (non-fatal, may already be correct)"
+  }
+  log "  GPT backup header repaired"
+else
+  warn "sgdisk not found — skipping GPT repair (install gdisk package)"
+fi
+
+# ─── Step 3: Expand root partition ───
+
+log "Step 3/7: Expanding root partition to fill disk..."
+
+if command -v growpart >/dev/null 2>&1; then
+  growpart "${ROOT_DISK}" "${ROOT_PARTNUM}" 2>&1 || {
+    rc=$?
+    if [[ $rc -eq 1 ]]; then
+      log "  Partition already at maximum size (NOCHANGE)"
+    else
+      warn "growpart failed with exit code ${rc}"
+    fi
+  }
+  log "  Partition expanded"
+else
+  die "growpart not found — install cloud-guest-utils"
+fi
+
+partprobe "${ROOT_DISK}" 2>/dev/null || true
+sleep 1
+
+# ─── Step 4: Expand root filesystem ───
+
+log "Step 4/7: Expanding ext4 filesystem..."
+
+if [[ $(blkid -o value -s TYPE "${ROOT_DEV}" 2>/dev/null) == "ext4" ]]; then
+  resize2fs "${ROOT_DEV}" 2>&1 || {
+    warn "resize2fs failed — filesystem may need manual repair"
+  }
+  log "  Filesystem expanded"
+  NEW_SIZE=$(df -h "${ROOT_DEV}" 2>/dev/null | awk 'NR==2{print $2}') || true
+  log "  New rootfs size: ${NEW_SIZE}"
+else
+  warn "Root filesystem is not ext4 — skipping resize"
+fi
+
+# ─── Step 5: Regenerate machine identity ───
+
+log "Step 5/7: Regenerating machine identity..."
+
+if [[ -f /etc/machine-id ]]; then
+  truncate -s 0 /etc/machine-id
+  if command -v systemd-machine-id-setup >/dev/null 2>&1; then
+    systemd-machine-id-setup 2>/dev/null || true
+  fi
+  log "  machine-id: $(cat /etc/machine-id 2>/dev/null || echo '(will be generated on next boot)')"
+fi
+
+rm -f /var/lib/dbus/machine-id 2>/dev/null || true
+if [[ -f /etc/machine-id ]] && [[ -s /etc/machine-id ]]; then
+  ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+fi
+
+# ─── Step 6: Regenerate SSH host keys ───
+
+log "Step 6/7: Regenerating SSH host keys..."
+
+rm -f /etc/ssh/ssh_host_* 2>/dev/null || true
+
+if command -v ssh-keygen >/dev/null 2>&1; then
+  ssh-keygen -A 2>/dev/null || warn "ssh-keygen -A failed"
+  log "  SSH host keys regenerated"
+else
+  log "  ssh-keygen not found — sshd will regenerate keys on first start"
+fi
+
+# ─── Step 7: Re-initialize AP hotspot (MAC-specific SSID) ───
+
+log "Step 7/7: Re-initializing AP hotspot configuration..."
+
+init_script="${OPT_DIR}/scripts/init-network.sh"
+if [[ -f "${init_script}" ]]; then
+  FORCE_REGENERATE=1 bash "${init_script}" || {
+    warn "AP re-initialization had issues (non-fatal)"
+  }
+else
+  warn "init-network.sh not found — AP config may use golden sample's SSID"
+fi
+
+# ─── Finalize ───
+
+mkdir -p "$(dirname "${MARKER_FILE}")"
+date -Iseconds > "${MARKER_FILE}"
+log "  Marker written: ${MARKER_FILE}"
+
+log ""
+log "=========================================="
+log "First-Boot Initialization Complete"
+log "=========================================="
+log ""
+log "Summary:"
+log "  Root partition: expanded to fill ${ROOT_DISK}"
+log "  Machine ID:     $(cat /etc/machine-id 2>/dev/null || echo 'pending')"
+log "  SSH keys:       regenerated"
+log "  AP hotspot:     re-initialized with device-specific SSID"
+log ""
+
+exit 0

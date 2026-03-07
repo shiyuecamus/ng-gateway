@@ -16,7 +16,9 @@ set -euo pipefail
 # Environment variables (from /etc/ng-gateway/ap-env via systemd EnvironmentFile):
 #   AP_IFACE, STA_IFACE, AP_EXCLUSIVE, AP_IP, AP_PREFIX, etc.
 
-log() { echo "[ap-auto] $*"; }
+LOG_TAG="[ap-auto]"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_common.sh"
 
 # ─── Gate: only run in exclusive mode ───
 
@@ -26,10 +28,6 @@ if [ "${AP_EXCLUSIVE:-}" != "true" ]; then
 fi
 
 # ─── Allow NM time to auto-connect to known WiFi networks ───
-#
-# NetworkManager.service may be "active" but the WiFi supplicant hasn't
-# finished scanning/connecting yet.  A short grace period avoids false
-# negatives on slow-to-connect networks.
 sleep 5
 
 # ─── Check: WiFi module exists? ───
@@ -49,7 +47,6 @@ log "WiFi module detected: ${wifi_iface}"
 # ─── Check: WiFi already connected via NM? ───
 
 if command -v nmcli >/dev/null 2>&1; then
-  # nmcli -t -f TYPE,STATE device: "wifi:connected" if STA is active.
   wifi_state=$(nmcli -t -f TYPE,STATE device 2>/dev/null | grep '^wifi:' | head -1)
   if echo "$wifi_state" | grep -q "connected"; then
     log "WiFi is connected — not starting AP"
@@ -61,35 +58,15 @@ fi
 
 log "WiFi module present but not connected — starting AP hotspot"
 
-# Release the wireless interface from NetworkManager so hostapd can use it.
-if command -v nmcli >/dev/null 2>&1; then
-  nmcli device set "${AP_IFACE}" managed no 2>/dev/null || true
-  nmcli device disconnect "${AP_IFACE}" 2>/dev/null || true
-  log "Released ${AP_IFACE} from NetworkManager"
-fi
+setup_ap_interface_exclusive "${AP_IFACE}" "${AP_IP}" "${AP_PREFIX}"
+setup_nat_rules "${AP_IFACE}" "${UPLINK_IFACE:-}"
 
-# Switch the interface to AP mode and assign the static IP.
-ip link set "${AP_IFACE}" down 2>/dev/null || true
-iw dev "${AP_IFACE}" set type __ap 2>/dev/null || true
-sleep 0.5
-ip link set "${AP_IFACE}" up
-ip addr flush dev "${AP_IFACE}"
-ip addr add "${AP_IP}/${AP_PREFIX}" dev "${AP_IFACE}"
-
-# Best-effort NAT setup (may not have an uplink in exclusive mode).
-sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1 || true
-UPLINK=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
-if [ -n "$UPLINK" ]; then
-  iptables -t nat -C POSTROUTING -o "$UPLINK" -j MASQUERADE 2>/dev/null ||
-    iptables -t nat -A POSTROUTING -o "$UPLINK" -j MASQUERADE 2>/dev/null || true
-fi
-
-# Start hostapd and dnsmasq (they depend on this unit via Requires=).
+# Start hostapd and dnsmasq.
 systemctl start ng-gateway-hostapd.service 2>/dev/null || {
-  log "WARN: hostapd failed to start. Check: journalctl -u ng-gateway-hostapd -n 20"
+  warn "hostapd failed to start. Check: journalctl -u ng-gateway-hostapd -n 20"
 }
 systemctl start ng-gateway-dnsmasq.service 2>/dev/null || {
-  log "WARN: dnsmasq failed to start. Check: journalctl -u ng-gateway-dnsmasq -n 20"
+  warn "dnsmasq failed to start. Check: journalctl -u ng-gateway-dnsmasq -n 20"
 }
 
 log "AP hotspot started on ${AP_IFACE} at ${AP_IP}/${AP_PREFIX}"

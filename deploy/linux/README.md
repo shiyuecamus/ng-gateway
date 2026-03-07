@@ -123,13 +123,17 @@
 
 | 脚本 | 触发时机 | 职责 |
 |------|---------|------|
+| `_common.sh` | 被其他脚本 source | 公共函数库（log/die、设备解析、NAT 规则、包管理器检测等） |
 | `stage-rootfs.sh` | CI 打包时 | 编译二进制 + 暂存文件系统布局（含 AP unit + init-network.sh） |
-| `package-deb.sh` | CI 打包时 | 调用 stage-rootfs → 渲染 nfpm 模板 → 生成 `.deb` |
-| `package-rpm.sh` | CI 打包时 | 同上，生成 `.rpm` |
+| `package.sh` | CI 打包时 | 调用 stage-rootfs → 渲染 nfpm 模板 → 生成 `.deb` 或 `.rpm`（`--format deb\|rpm`） |
 | `render-nfpm-config.sh` | CI 打包时 | 模板变量替换 |
 | `postinstall.sh` | `deb/rpm` 安装后 | 创建目录 + 复制配置 + 调用 `init-network.sh` |
 | `preremove.sh` | `dpkg -r` 前 | stop + disable 所有服务 + 清理 AP unit 文件 |
 | `init-network.sh` | 首次安装时 | 探测硬件 → 生成 AP 配置 → 安装依赖 → 部署 unit → enable+start AP |
+| `first-boot-resize.sh` | 首次启动 | 扩展分区 + 重生成 machine-id/SSH keys + AP 重新初始化 |
+| `create-golden-image.sh` | 手动执行 | 从黄金样机 eMMC 制作最小化压缩镜像 |
+| `flash-image.sh` | 产线工位 | 将镜像烧录到目标 eMMC |
+| `verify-image.sh` | 产线 QA | 烧录后自动化验证（启动/服务/网络/数据/唯一性） |
 
 ## 手动操作指南
 
