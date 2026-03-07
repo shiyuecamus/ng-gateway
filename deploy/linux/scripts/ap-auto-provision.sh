@@ -44,6 +44,25 @@ if [ -z "$wifi_iface" ]; then
 fi
 log "WiFi module detected: ${wifi_iface}"
 
+# ─── Safety: ensure interface is in managed mode ───
+#
+# If a previous AP start failed and left the interface in __ap mode,
+# NM cannot manage it and WiFi autoconnect will never happen.
+# Restore to managed mode before checking WiFi state.
+
+iface_type=$(iw dev "$wifi_iface" info 2>/dev/null | awk '/type/{print $2}')
+if [ "$iface_type" = "__ap" ] || [ "$iface_type" = "AP" ]; then
+  log "Interface ${wifi_iface} stuck in ${iface_type} mode — restoring to managed"
+  ip link set "$wifi_iface" down 2>/dev/null || true
+  iw dev "$wifi_iface" set type managed 2>/dev/null || true
+  ip link set "$wifi_iface" up 2>/dev/null || true
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli device set "$wifi_iface" managed yes 2>/dev/null || true
+  fi
+  # Give NM time to recognize the restored interface and attempt autoconnect.
+  sleep 8
+fi
+
 # ─── Check: WiFi already connected via NM? ───
 
 if command -v nmcli >/dev/null 2>&1; then

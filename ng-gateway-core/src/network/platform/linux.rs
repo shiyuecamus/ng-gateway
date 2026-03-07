@@ -775,6 +775,58 @@ impl LinuxNetworkManager {
         }
     }
 
+    /// Force-restore the WiFi interface to managed mode after a failed AP start.
+    ///
+    /// When `ap-setup.sh` runs in exclusive mode, it converts the interface to
+    /// `__ap` type and removes it from NM control. If hostapd then fails to start,
+    /// the interface is stuck in `__ap` mode and the device is unreachable.
+    /// This method runs the equivalent of `ap-teardown.sh` to restore the interface
+    /// to managed mode so NM can reconnect.
+    async fn force_restore_wifi_interface(&self) {
+        let env_path = format!("{}/{}", AP_CONFIG_DIR, AP_ENV_FILE);
+        let env_content = tokio::fs::read_to_string(&env_path)
+            .await
+            .unwrap_or_default();
+
+        let ap_iface = parse_env_value(&env_content, "AP_IFACE").unwrap_or_default();
+        if ap_iface.is_empty() {
+            warn!("Cannot restore interface: AP_IFACE not found in ap-env");
+            return;
+        }
+
+        info!(iface = %ap_iface, "Force-restoring WiFi interface to managed mode");
+
+        // Down → set type managed → up → hand back to NM
+        let commands: &[&[&str]] = &[
+            &["ip", "link", "set", &ap_iface, "down"],
+            &["iw", "dev", &ap_iface, "set", "type", "managed"],
+            &["ip", "link", "set", &ap_iface, "up"],
+        ];
+
+        for cmd in commands {
+            let result = tokio::process::Command::new(cmd[0])
+                .args(&cmd[1..])
+                .output()
+                .await;
+            if let Err(e) = result {
+                warn!(cmd = ?cmd, error = %e, "Force-restore command failed");
+            }
+        }
+
+        // Hand interface back to NetworkManager
+        let nmcli_result = tokio::process::Command::new("nmcli")
+            .args(["device", "set", &ap_iface, "managed", "yes"])
+            .output()
+            .await;
+        if let Err(e) = nmcli_result {
+            warn!(error = %e, "Failed to set interface managed via nmcli");
+        }
+
+        // Give NM time to recognize the restored interface
+        sleep(Duration::from_millis(2000)).await;
+        info!(iface = %ap_iface, "WiFi interface restored to managed mode");
+    }
+
     /// Core Wi-Fi disconnect logic without AP restore evaluation.
     ///
     /// Separated from the trait method so that internal callers (e.g. `start_ap`)
@@ -1041,7 +1093,10 @@ impl LinuxNetworkManager {
         let devices = nm.get_devices().await.unwrap_or_default();
 
         for dev_path in &devices {
-            let dev_path_ref = ObjectPath::try_from(dev_path.as_str()).ok()?;
+            let dev_path_ref = match ObjectPath::try_from(dev_path.as_str()) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             let dev_props = self
                 .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
                 .await
@@ -1051,7 +1106,10 @@ impl LinuxNetworkManager {
                 .filter(|p| !p.is_empty() && p != "/");
 
             if let Some(ref active_path) = active_conn_path {
-                let active_ref = ObjectPath::try_from(active_path.as_str()).ok()?;
+                let active_ref = match ObjectPath::try_from(active_path.as_str()) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
                 let active_props = self
                     .get_all_properties(&active_ref, nm_dbus::iface::ACTIVE_CONN)
                     .await
@@ -1428,6 +1486,20 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .await
             .map_err(|_| NetworkError::InterfaceNotFound(name.to_string()))?;
 
+        // Detect device type to set the correct connection.type.
+        let dev_path_ref = ObjectPath::try_from(device_path.as_str())
+            .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
+        let dev_props = self
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
+            .await
+            .unwrap_or_default();
+        let device_type = prop_u32(&dev_props, nm_dbus::prop::DEVICE_TYPE).unwrap_or(0);
+        let conn_type = if device_type == nm_dbus::device_type::WIFI {
+            nm_dbus::conn::WIFI
+        } else {
+            nm_dbus::conn::ETHERNET
+        };
+
         let conn_id = format!("{name}-config");
         let ip_strings = IpConfigStrings::from_config(&config.ip_config);
 
@@ -1436,7 +1508,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
             let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
             connection.insert(nm_dbus::conn::ID, Value::from(conn_id.as_str()));
-            connection.insert(nm_dbus::conn::TYPE, Value::from(nm_dbus::conn::ETHERNET));
+            connection.insert(nm_dbus::conn::TYPE, Value::from(conn_type));
             connection.insert(nm_dbus::conn::INTERFACE_NAME, Value::from(name));
             connection.insert(nm_dbus::conn::AUTOCONNECT, Value::from(true));
             conn_settings.insert(nm_dbus::conn::CONNECTION, connection);
@@ -1492,6 +1564,18 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             }
         }
 
+        // For WiFi interfaces, we must have an existing connection to update
+        // (the one that originally connected). Creating a bare WiFi connection
+        // without SSID/security would fail.
+        if device_type == nm_dbus::device_type::WIFI {
+            return Err(NetworkError::ConfigError(format!(
+                "No existing connection profile found for WiFi interface '{name}'. \
+                 Connect to a WiFi network first, then configure its IP settings."
+            ))
+            .into());
+        }
+
+        // Fallback: create a new connection (first time configuration for wired interfaces).
         let settings = build_settings();
         let device_path_ref = ObjectPath::try_from(device_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
@@ -1952,9 +2036,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 continue;
             }
 
-            let uuid = match settings_str(conn_section, nm_dbus::prop::UUID.to_lowercase().as_str())
-                .or_else(|| settings_str(conn_section, "uuid"))
-            {
+            let uuid = match settings_str(conn_section, nm_dbus::conn::UUID) {
                 Some(u) => u,
                 None => continue,
             };
@@ -2094,8 +2176,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 continue;
             }
 
-            let uuid = settings_str(conn_section, nm_dbus::prop::UUID.to_lowercase().as_str())
-                .or_else(|| settings_str(conn_section, "uuid"));
+            let uuid = settings_str(conn_section, nm_dbus::conn::UUID);
 
             if uuid.as_deref() == Some(&request.uuid) {
                 target_path = Some(conn_path.to_string());
@@ -2345,25 +2426,24 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .into());
         }
 
-        // Synchronize ap-env and hostapd.conf with the runtime-detected AP mode
-        // and ensure the hostapd band/channel settings match the hardware.
         self.sync_ap_config_with_mode(&caps).await?;
 
         let is_exclusive = caps.ap_mode == ApMode::Exclusive;
 
-        // In exclusive mode, stash STA connection for restore after stop_ap, then disconnect.
-        // Persist to disk so gateway restarts don't lose the restore info.
+        // In exclusive mode, stash the current STA connection info so we can
+        // restore it when the user stops AP later. We do NOT disconnect STA
+        // here — ap-setup.sh handles the full interface lifecycle:
+        //   release from NM → down → set type __ap → up → assign IP
+        // Doing a D-Bus DeactivateConnection here would race with the shell
+        // script's nmcli operations and leave the interface in an inconsistent
+        // state.
         if is_exclusive {
-            info!("Exclusive mode: stashing STA connection and disconnecting");
+            info!("Exclusive mode: stashing STA connection for later restore");
             if let Some(stashed) = self.stash_active_sta_connection().await {
                 stashed.persist().await;
                 let mut guard = self.stashed_sta_for_restore.write().await;
                 *guard = Some(stashed);
             }
-            if let Err(e) = self.disconnect_wifi_inner(None, false).await {
-                warn!(error = %e, "Failed to disconnect STA (may already be disconnected)");
-            }
-            sleep(Duration::from_millis(500)).await;
         }
 
         let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
@@ -2373,15 +2453,15 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 self.ap_status().await
             }
             Err(e) => {
-                // AP services failed to start. In exclusive mode the STA is already
-                // disconnected and the device is unreachable — we MUST restore the
-                // previous network connectivity.
                 tracing::error!(error = %e, "AP service stack failed to start");
                 if is_exclusive {
                     warn!("Rolling back: stopping failed AP services and restoring STA");
                     if let Err(stop_err) = mgr.stop_all().await {
                         warn!(error = %stop_err, "Failed to stop partially-started AP services");
                     }
+                    // Force interface back to managed mode via the teardown script,
+                    // then restore the previous STA connection.
+                    self.force_restore_wifi_interface().await;
                     self.restore_stashed_sta_connection().await;
                 }
                 Err(e)

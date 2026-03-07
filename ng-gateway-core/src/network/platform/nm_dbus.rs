@@ -116,6 +116,7 @@ pub mod conn {
     pub const DNS_DATA: &str = "dns-data";
 
     // ─── "connection" group keys (continued) ───
+    pub const UUID: &str = "uuid";
     pub const TIMESTAMP: &str = "timestamp";
 }
 
