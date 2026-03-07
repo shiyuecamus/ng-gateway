@@ -775,6 +775,64 @@ impl LinuxNetworkManager {
         }
     }
 
+    /// Core Wi-Fi disconnect logic without AP restore evaluation.
+    ///
+    /// Separated from the trait method so that internal callers (e.g. `start_ap`)
+    /// can disconnect STA without triggering `evaluate_and_restore_ap`, which would
+    /// race with the AP startup sequence.
+    async fn disconnect_wifi_inner(
+        &self,
+        interface_name: Option<&str>,
+        disable_autoconnect: bool,
+    ) -> NGResult<()> {
+        let dev_path = self.find_wireless_device(interface_name).await?;
+        let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
+            .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
+
+        let dev_props = self
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
+            .await?;
+
+        let active_conn =
+            prop_object_path(&dev_props, nm_dbus::prop::ACTIVE_CONNECTION).filter(|p| p != "/");
+
+        if let Some(conn_path) = &active_conn {
+            let settings_path = {
+                let active_ref = ObjectPath::try_from(conn_path.as_str()).ok();
+                if let Some(ref active_ref) = active_ref {
+                    let active_props = self
+                        .get_all_properties(active_ref, nm_dbus::iface::ACTIVE_CONN)
+                        .await
+                        .ok();
+                    active_props.and_then(|p| {
+                        prop_object_path(&p, nm_dbus::prop::CONNECTION)
+                            .filter(|s| !s.is_empty() && s != "/")
+                    })
+                } else {
+                    None
+                }
+            };
+
+            let nm = self.nm_proxy().await?;
+            let conn_path_ref = ObjectPath::try_from(conn_path.as_str())
+                .map_err(|e| NetworkError::DBusError(format!("Invalid connection path: {e}")))?;
+            nm.deactivate_connection(&conn_path_ref)
+                .await
+                .map_err(|e| NetworkError::WifiError(format!("Failed to deactivate: {e}")))?;
+            info!("Wi-Fi disconnected");
+
+            if disable_autoconnect {
+                if let Some(ref sp) = settings_path {
+                    self.set_connection_autoconnect(sp, false).await;
+                }
+            }
+        } else {
+            debug!("No active Wi-Fi connection to disconnect");
+        }
+
+        Ok(())
+    }
+
     /// Update the `autoconnect` flag on a saved NM connection profile.
     ///
     /// Reads current settings via `GetSettings`, modifies `connection.autoconnect`,
@@ -1839,55 +1897,14 @@ impl PlatformNetworkManager for LinuxNetworkManager {
     async fn disconnect_wifi(&self, request: &WifiDisconnectRequest) -> NGResult<()> {
         info!("Disconnecting Wi-Fi STA");
 
-        let dev_path = self
-            .find_wireless_device(request.interface_name.as_deref())
-            .await?;
-        let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
-            .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
+        self.disconnect_wifi_inner(
+            request.interface_name.as_deref(),
+            request.disable_autoconnect,
+        )
+        .await?;
 
-        let dev_props = self
-            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
-            .await?;
-
-        let active_conn =
-            prop_object_path(&dev_props, nm_dbus::prop::ACTIVE_CONNECTION).filter(|p| p != "/");
-
-        if let Some(conn_path) = &active_conn {
-            // Resolve the settings (saved profile) path before deactivating,
-            // so we can update autoconnect if requested.
-            let settings_path = {
-                let active_ref = ObjectPath::try_from(conn_path.as_str()).ok();
-                if let Some(ref active_ref) = active_ref {
-                    let active_props = self
-                        .get_all_properties(active_ref, nm_dbus::iface::ACTIVE_CONN)
-                        .await
-                        .ok();
-                    active_props.and_then(|p| {
-                        prop_object_path(&p, nm_dbus::prop::CONNECTION)
-                            .filter(|s| !s.is_empty() && s != "/")
-                    })
-                } else {
-                    None
-                }
-            };
-
-            let nm = self.nm_proxy().await?;
-            let conn_path_ref = ObjectPath::try_from(conn_path.as_str())
-                .map_err(|e| NetworkError::DBusError(format!("Invalid connection path: {e}")))?;
-            nm.deactivate_connection(&conn_path_ref)
-                .await
-                .map_err(|e| NetworkError::WifiError(format!("Failed to deactivate: {e}")))?;
-            info!("Wi-Fi disconnected");
-
-            if request.disable_autoconnect {
-                if let Some(ref sp) = settings_path {
-                    self.set_connection_autoconnect(sp, false).await;
-                }
-            }
-        } else {
-            debug!("No active Wi-Fi connection to disconnect");
-        }
-
+        // Evaluate AP restore only for user-initiated disconnects (via API).
+        // Internal callers (e.g. start_ap) manage AP lifecycle themselves.
         self.evaluate_and_restore_ap().await;
 
         Ok(())
@@ -2343,13 +2360,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 let mut guard = self.stashed_sta_for_restore.write().await;
                 *guard = Some(stashed);
             }
-            if let Err(e) = self
-                .disconnect_wifi(&WifiDisconnectRequest {
-                    interface_name: None,
-                    disable_autoconnect: false,
-                })
-                .await
-            {
+            if let Err(e) = self.disconnect_wifi_inner(None, false).await {
                 warn!(error = %e, "Failed to disconnect STA (may already be disconnected)");
             }
             sleep(Duration::from_millis(500)).await;
