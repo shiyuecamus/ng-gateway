@@ -32,20 +32,30 @@ fi
 
 # ─── Restore STA connection (exclusive mode) ───
 #
-# In exclusive mode, hostapd changes the interface to AP mode, breaking any
-# existing STA (managed) connection. After teardown, we must bring the
-# interface back to managed mode so the system can rejoin the previous
-# Wi-Fi network (via NetworkManager, wpa_supplicant, or netplan).
+# In exclusive mode, hostapd changed the interface to AP mode, breaking any
+# existing STA (managed) connection. We must:
+#   1. Switch the interface back to managed type
+#   2. Return it to NetworkManager control
+#   3. Trigger NM to auto-connect to the previously-known Wi-Fi network
 if [ "${AP_EXCLUSIVE}" = "true" ]; then
   echo "[ap-teardown] Exclusive mode — restoring STA (managed) mode on ${AP_IFACE}"
   iw dev "${AP_IFACE}" set type managed 2>/dev/null || true
   ip link set "${AP_IFACE}" up 2>/dev/null || true
 
   if command -v nmcli >/dev/null 2>&1; then
+    # Hand the interface back to NetworkManager and let it reconnect.
     nmcli device set "${AP_IFACE}" managed yes 2>/dev/null || true
-    nmcli networking off 2>/dev/null || true
+
+    # A targeted rescan + auto-connect is less disruptive than toggling
+    # all networking off/on (which would drop ethernet connections too).
+    nmcli device wifi rescan ifname "${AP_IFACE}" 2>/dev/null || true
     sleep 1
-    nmcli networking on 2>/dev/null || true
+    nmcli device connect "${AP_IFACE}" 2>/dev/null || {
+      # Fallback: full networking restart if targeted connect fails.
+      nmcli networking off 2>/dev/null || true
+      sleep 1
+      nmcli networking on 2>/dev/null || true
+    }
   elif command -v wpa_supplicant >/dev/null 2>&1 && [ -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
     wpa_supplicant -B -i "${AP_IFACE}" -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null || true
   fi

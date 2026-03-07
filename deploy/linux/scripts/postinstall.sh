@@ -81,6 +81,15 @@ else
   echo "[postinstall] WARN: init-network.sh not found, skipping AP setup."
 fi
 
+# ─── Enable and start the gateway service ───
+#
+# The gateway process must be running for AP auto-management, Web UI, and API
+# to function. We enable (persist across reboots) and start immediately.
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl enable ng-gateway.service 2>/dev/null || true
+  systemctl start ng-gateway.service 2>/dev/null || true
+fi
+
 # User-friendly post-install hints (printed for both deb and rpm).
 #
 # Note:

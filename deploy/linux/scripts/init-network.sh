@@ -406,17 +406,37 @@ DNSMASQ
   systemctl daemon-reload || true
 
   # 10. Enable and start AP services.
-  #     In exclusive mode, do NOT auto-start (it would disconnect the STA).
-  systemctl enable ng-gateway-ap-setup.service 2>/dev/null || true
-  systemctl enable ng-gateway-hostapd.service 2>/dev/null || true
-  systemctl enable ng-gateway-dnsmasq.service 2>/dev/null || true
-
+  #
+  # EXCLUSIVE mode: The single wireless interface is shared between STA and AP.
+  #   - Do NOT enable (would auto-start on boot and fight NetworkManager).
+  #   - Do NOT start (would disconnect the current Wi-Fi / SSH session).
+  #   - The user starts/stops AP on demand via the Web UI, which calls
+  #     `systemctl start/stop` directly without enabling the units.
+  #
+  # CONCURRENT mode: A dedicated virtual AP interface coexists with STA.
+  #   - Enable all three units so the AP survives reboots.
+  #   - Start them immediately.
   if [[ "$ap_exclusive" == "true" ]]; then
+    # Ensure the manual AP units are *not* enabled — a previous install or
+    # mode change may have enabled them.
+    systemctl disable ng-gateway-ap-setup.service 2>/dev/null || true
+    systemctl disable ng-gateway-hostapd.service 2>/dev/null || true
+    systemctl disable ng-gateway-dnsmasq.service 2>/dev/null || true
+
+    # Enable the boot-time auto-provision service instead.
+    # It probes network state on every boot and starts AP only when needed
+    # (WiFi module present + no active WiFi connection).
+    systemctl enable ng-gateway-ap-auto.service 2>/dev/null || true
+
     log ""
-    log "EXCLUSIVE MODE: AP services are enabled but NOT started automatically."
-    log "Starting the AP would disconnect the current Wi-Fi connection."
-    log "Use the NG Gateway Web UI to start/stop the AP hotspot."
+    log "EXCLUSIVE MODE: AP auto-provision enabled (ng-gateway-ap-auto.service)."
+    log "On boot: if WiFi module exists and no WiFi is connected, AP starts automatically."
+    log "Manual control: use the NG Gateway Web UI to start/stop the AP hotspot."
   else
+    systemctl enable ng-gateway-ap-setup.service 2>/dev/null || true
+    systemctl enable ng-gateway-hostapd.service 2>/dev/null || true
+    systemctl enable ng-gateway-dnsmasq.service 2>/dev/null || true
+
     log "Starting AP services..."
     systemctl start ng-gateway-ap-setup.service 2>/dev/null || {
       log "WARN: ap-setup failed (virtual interface may not be available). Continuing..."

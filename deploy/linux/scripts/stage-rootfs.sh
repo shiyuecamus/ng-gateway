@@ -67,14 +67,10 @@ fi
 opt_dir="${ROOTFS_DIR}/opt/ng-gateway"
 mkdir -p "${opt_dir}/bin" "${opt_dir}/data" "${opt_dir}/drivers/builtin" "${opt_dir}/plugins/builtin"
 
-# Stage empty config/runtime directories as part of the package payload.
-# The actual files will be created/copied in postinstall on first install.
-etc_dir="${ROOTFS_DIR}/etc/ng-gateway"
-var_dir="${ROOTFS_DIR}/var/lib/ng-gateway"
-mkdir -p "${etc_dir}"
-mkdir -p "${var_dir}/data" "${var_dir}/certs" "${var_dir}/pki/own" "${var_dir}/pki/private"
-mkdir -p "${var_dir}/drivers/builtin" "${var_dir}/drivers/custom"
-mkdir -p "${var_dir}/plugins/builtin" "${var_dir}/plugins/custom"
+# Config and runtime directories (/etc/ng-gateway, /var/lib/ng-gateway) are
+# created by postinstall.sh at install time — NOT included in the package
+# payload.  This avoids dpkg claiming ownership of parent directories like
+# /opt and /etc, which causes "not empty" warnings on purge.
 
 echo "[stage] binary"
 cp -f "${bin_path}" "${opt_dir}/bin/ng-gateway-bin"
@@ -101,13 +97,13 @@ cp -f "${REPO_ROOT}/plugins/builtin/"*.so "${opt_dir}/plugins/builtin/" 2>/dev/n
 # AP hotspot systemd units + init script.
 echo "[stage] AP hotspot resources"
 mkdir -p "${opt_dir}/systemd" "${opt_dir}/scripts"
-for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service; do
+for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service ng-gateway-ap-auto.service; do
   src="${REPO_ROOT}/deploy/linux/systemd/${unit}"
   if [[ -f "$src" ]]; then
     cp -f "$src" "${opt_dir}/systemd/${unit}"
   fi
 done
-for script in init-network.sh ap-setup.sh ap-teardown.sh; do
+for script in init-network.sh ap-setup.sh ap-teardown.sh ap-auto-provision.sh; do
   src="${REPO_ROOT}/deploy/linux/scripts/${script}"
   if [[ -f "$src" ]]; then
     cp -f "$src" "${opt_dir}/scripts/${script}"

@@ -72,9 +72,9 @@ impl NetworkService {
             }
         }
 
-        // Verify AP service status on Linux.
+        // Check AP service status on Linux (may already be running via boot-time auto-provision).
         #[cfg(target_os = "linux")]
-        service.verify_ap_services().await;
+        service.check_ap_state().await;
 
         info!("Network service initialized");
         Ok(service)
@@ -245,21 +245,27 @@ impl NetworkService {
         self.manager.configure_dns(config).await
     }
 
-    /// Verify AP systemd service status on startup (Linux only).
+    /// Check AP service status on startup (Linux only).
     ///
-    /// This is a best-effort check — if AP services are not running but should be,
-    /// we log a warning. The gateway does NOT attempt to start them (that's systemd's job).
+    /// The AP hotspot may have been started by `ng-gateway-ap-auto.service`
+    /// (boot-time auto-provision for exclusive-mode hardware) before the gateway
+    /// process launched.  We log the current state for operational visibility
+    /// but do not attempt to start or stop AP — that is handled by the systemd
+    /// unit (boot-time) or by the user via the Web UI / API (runtime).
     #[cfg(target_os = "linux")]
-    async fn verify_ap_services(&self) {
+    async fn check_ap_state(&self) {
         match ApServiceManager::new().await {
             Ok(mgr) => match mgr.status().await {
                 Ok(status) => {
                     if status.ap_broadcasting() {
-                        info!("AP hotspot is active (hostapd running)");
+                        info!(
+                            "AP hotspot is active (started by boot-time auto-provision \
+                             or previous manual action)"
+                        );
                     } else {
-                        warn!(
-                            "AP hotspot is not broadcasting. \
-                             Check: systemctl status ng-gateway-hostapd"
+                        info!(
+                            "AP hotspot is not broadcasting — normal when a WiFi or \
+                             wired management channel is available"
                         );
                     }
                 }
