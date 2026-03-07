@@ -40,6 +40,13 @@ fi
 if [ "${AP_EXCLUSIVE}" = "true" ]; then
   log "Exclusive mode — restoring STA (managed) mode on ${AP_IFACE}"
   iw dev "${AP_IFACE}" set type managed 2>/dev/null || true
+
+  # Flush all IP addresses assigned during AP mode (e.g. 10.47.0.1/24).
+  # Without this, the AP static IP lingers as a secondary address after NM
+  # re-activates the STA connection via DHCP, causing the backend to report
+  # the stale AP IP instead of the real DHCP-assigned address.
+  ip addr flush dev "${AP_IFACE}" 2>/dev/null || true
+
   ip link set "${AP_IFACE}" up 2>/dev/null || true
 
   if command -v nmcli >/dev/null 2>&1; then

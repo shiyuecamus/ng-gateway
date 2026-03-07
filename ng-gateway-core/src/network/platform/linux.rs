@@ -23,9 +23,9 @@ use ng_gateway_models::domain::prelude::{
     ApMode, ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest,
     DnsConfig, ForgetWifiRequest, InterfaceKind, IpConfig, IpMethod, Ipv4AddressInfo, Ipv4Config,
     Ipv6AddressInfo, Ipv6Config, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
-    NetworkInterfaceSummary, PlatformSupport, SavedWifiConnection, WifiAccessPoint, WifiBand,
-    WifiConnectPreflight, WifiConnectRequest, WifiDisconnectRequest, WifiMode, WifiSecurity,
-    WifiStaStatus, WirelessInterfaceCapability,
+    NetworkInterfaceSummary, PlatformSupport, SavedWifiConnection, StaticIpConfig, WifiAccessPoint,
+    WifiBand, WifiConnectPreflight, WifiConnectRequest, WifiDisconnectRequest, WifiMode,
+    WifiSecurity, WifiStaStatus, WirelessInterfaceCapability,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -2141,10 +2141,12 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                             .map(|ipv4_s| parse_settings_dns_data(ipv4_s))
                             .filter(|d| !d.is_empty());
                         IpConfig::Static {
-                            ip_address,
-                            prefix_length,
-                            gateway,
-                            dns,
+                            config: StaticIpConfig {
+                                ip_address,
+                                prefix_length,
+                                gateway,
+                                dns,
+                            },
                         }
                     }
                     nm_dbus::method::DISABLED => IpConfig::Disabled,
@@ -2735,13 +2737,15 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                     .unwrap_or(24);
                 let gw = current_ip4.as_ref().and_then(|c| c.gateway);
                 IpConfig::Static {
-                    ip_address: addr,
-                    prefix_length: prefix,
-                    gateway: gw,
-                    dns: if dns_list.is_empty() {
-                        None
-                    } else {
-                        Some(dns_list)
+                    config: StaticIpConfig {
+                        ip_address: addr,
+                        prefix_length: prefix,
+                        gateway: gw,
+                        dns: if dns_list.is_empty() {
+                            None
+                        } else {
+                            Some(dns_list)
+                        },
                     },
                 }
             } else {
@@ -2779,15 +2783,11 @@ struct IpConfigStrings {
 impl IpConfigStrings {
     fn from_config(config: &IpConfig) -> Self {
         match config {
-            IpConfig::Static {
-                ip_address,
-                gateway,
-                dns,
-                ..
-            } => Self {
-                addr_str: Some(ip_address.to_string()),
-                gw_str: gateway.as_ref().map(|g| g.to_string()),
-                dns_strings: dns
+            IpConfig::Static { config: sc } => Self {
+                addr_str: Some(sc.ip_address.to_string()),
+                gw_str: sc.gateway.as_ref().map(|g| g.to_string()),
+                dns_strings: sc
+                    .dns
                     .as_ref()
                     .map(|list| list.iter().map(|d| d.to_string()).collect())
                     .unwrap_or_default(),
@@ -2819,14 +2819,14 @@ fn build_ipv4_settings_owned(
                 OwnedValue::try_from(Value::from(nm_dbus::method::AUTO)).unwrap(),
             );
         }
-        IpConfig::Static { prefix_length, .. } => {
+        IpConfig::Static { config: sc } => {
             ipv4.insert(
                 nm_dbus::conn::METHOD.to_string(),
                 OwnedValue::try_from(Value::from(nm_dbus::method::MANUAL)).unwrap(),
             );
 
             if let Some(ip_s) = strings.addr_str.as_deref() {
-                let prefix_u32 = *prefix_length as u32;
+                let prefix_u32 = sc.prefix_length as u32;
                 let mut addr_dict: HashMap<&str, Value<'_>> = HashMap::new();
                 addr_dict.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(ip_s));
                 addr_dict.insert(nm_dbus::prop::ADDR_KEY_PREFIX, Value::from(prefix_u32));
@@ -2882,11 +2882,11 @@ fn build_nm_ipv4_settings<'a>(
         IpConfig::Dhcp => {
             ipv4.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
         }
-        IpConfig::Static { prefix_length, .. } => {
+        IpConfig::Static { config: sc } => {
             ipv4.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::MANUAL));
 
             if let Some(ip_s) = strings.addr_str.as_deref() {
-                let prefix_u32 = *prefix_length as u32;
+                let prefix_u32 = sc.prefix_length as u32;
                 let mut addr_dict: HashMap<&str, Value<'_>> = HashMap::new();
                 addr_dict.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(ip_s));
                 addr_dict.insert(nm_dbus::prop::ADDR_KEY_PREFIX, Value::from(prefix_u32));

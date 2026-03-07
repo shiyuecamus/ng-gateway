@@ -30,6 +30,21 @@ pub enum IpMethod {
     Disabled,
 }
 
+/// Static IP configuration fields.
+///
+/// Extracted as a standalone struct so `#[serde(rename_all = "camelCase")]` applies
+/// correctly to all fields. Serde's internally-tagged enum `rename_all` only affects
+/// variant name matching, **not** variant-interior field names — placing the fields
+/// in a separate struct with its own `rename_all` attribute is the canonical fix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaticIpConfig {
+    pub ip_address: IpAddr,
+    pub prefix_length: u8,
+    pub gateway: Option<IpAddr>,
+    pub dns: Option<Vec<IpAddr>>,
+}
+
 /// Unified IP configuration using tagged enum for type safety.
 ///
 /// DHCP variant carries no extra fields; Static variant enforces required fields
@@ -42,8 +57,14 @@ pub enum IpMethod {
 /// - `{ "method": "dhcp" }`
 /// - `{ "method": "static", "ipAddress": "...", "prefixLength": 24, ... }`
 /// - `{ "method": "disabled" }`
+///
+/// # Note on `rename_all`
+///
+/// The enum-level `rename_all` only renames variant discriminants in the tag.
+/// The `Static` variant's fields live in [`StaticIpConfig`] which carries its
+/// own `rename_all = "camelCase"`, ensuring correct JSON field names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "method", rename_all = "camelCase")]
+#[serde(tag = "method")]
 pub enum IpConfig {
     /// Obtain IP configuration automatically via DHCP.
     #[serde(rename = "dhcp")]
@@ -51,10 +72,10 @@ pub enum IpConfig {
     /// Manual static IP configuration.
     #[serde(rename = "static")]
     Static {
-        ip_address: IpAddr,
-        prefix_length: u8,
-        gateway: Option<IpAddr>,
-        dns: Option<Vec<IpAddr>>,
+        /// Flattened static IP fields — keeps the JSON shape flat
+        /// (`{ "method": "static", "ipAddress": "...", ... }`).
+        #[serde(flatten)]
+        config: StaticIpConfig,
     },
     /// IP stack disabled on this interface.
     #[serde(rename = "disabled")]
@@ -63,8 +84,8 @@ pub enum IpConfig {
 
 impl Validate for IpConfig {
     fn validate(&self) -> Result<(), validator::ValidationErrors> {
-        if let Self::Static { prefix_length, .. } = self {
-            if *prefix_length < 1 || *prefix_length > 32 {
+        if let Self::Static { config } = self {
+            if config.prefix_length < 1 || config.prefix_length > 32 {
                 let mut errors = validator::ValidationErrors::new();
                 let mut err = validator::ValidationError::new("range");
                 err.message = Some("prefix must be in [1, 32]".into());

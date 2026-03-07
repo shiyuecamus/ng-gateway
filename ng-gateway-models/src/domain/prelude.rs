@@ -32,9 +32,9 @@ pub use crate::domain::{
         InterfaceNamePath, IpConfig, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo,
         Ipv6Config, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
         NetworkInterfaceSummary, PlatformSupport, SavedWifiConnection, StaApCapability,
-        WifiAccessPoint, WifiBand, WifiConnectPreflight, WifiConnectRequest, WifiDisconnectRequest,
-        WifiInterfaceQuery, WifiMode, WifiSecurity, WifiStaStatus, WifiUuidPath, WiredStatus,
-        WirelessInterfaceCapability,
+        StaticIpConfig, WifiAccessPoint, WifiBand, WifiConnectPreflight, WifiConnectRequest,
+        WifiDisconnectRequest, WifiInterfaceQuery, WifiMode, WifiSecurity, WifiStaStatus,
+        WifiUuidPath, WiredStatus, WirelessInterfaceCapability,
     },
     plugin::{NewPlugin, PluginInfo, PluginPageParams, UpdatePlugin},
     point::{
