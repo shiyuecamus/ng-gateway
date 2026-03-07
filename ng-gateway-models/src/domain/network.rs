@@ -51,7 +51,7 @@ pub enum WifiSecurity {
 }
 
 /// Wi-Fi frequency band.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WifiBand {
     #[serde(rename = "2.4ghz")]
@@ -441,7 +441,8 @@ pub struct ConfigureApRequest {
     /// WPA2 password (8-63 chars).
     #[validate(length(min = 8, max = 63, message = "password length must be in [8, 63]"))]
     pub password: Option<String>,
-    /// 0 = auto channel selection. Valid 2.4 GHz channels: 1-13.
+    /// Wi-Fi channel number. 0 = auto (picks a sensible default based on hardware).
+    /// 2.4 GHz: 1-13, 5 GHz: 36-165 (availability depends on regulatory domain).
     pub channel: Option<u32>,
     /// ISO 3166-1 alpha-2 Wi-Fi regulatory country code (e.g. "CN", "US", "JP").
     ///

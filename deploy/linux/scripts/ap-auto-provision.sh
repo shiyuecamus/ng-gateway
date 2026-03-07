@@ -61,10 +61,21 @@ log "WiFi module present but not connected — starting AP hotspot"
 setup_ap_interface_exclusive "${AP_IFACE}" "${AP_IP}" "${AP_PREFIX}"
 setup_nat_rules "${AP_IFACE}" "${UPLINK_IFACE:-}"
 
-# Start hostapd and dnsmasq.
-systemctl start ng-gateway-hostapd.service 2>/dev/null || {
-  warn "hostapd failed to start. Check: journalctl -u ng-gateway-hostapd -n 20"
-}
+# Start hostapd and dnsmasq. If hostapd fails, the interface is already
+# released from NM in __ap mode — we must restore it or WiFi is unusable.
+if ! systemctl start ng-gateway-hostapd.service 2>/dev/null; then
+  warn "hostapd failed to start — rolling back interface to managed mode"
+  warn "Check: journalctl -u ng-gateway-hostapd -n 20"
+  remove_nat_rules "${AP_IFACE}" "${UPLINK_IFACE:-}"
+  ip link set "${AP_IFACE}" down 2>/dev/null || true
+  iw dev "${AP_IFACE}" set type managed 2>/dev/null || true
+  ip link set "${AP_IFACE}" up 2>/dev/null || true
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli device set "${AP_IFACE}" managed yes 2>/dev/null || true
+  fi
+  exit 1
+fi
+
 systemctl start ng-gateway-dnsmasq.service 2>/dev/null || {
   warn "dnsmasq failed to start. Check: journalctl -u ng-gateway-dnsmasq -n 20"
 }

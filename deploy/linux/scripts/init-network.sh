@@ -28,7 +28,7 @@ SYSTEMD_DIR="/lib/systemd/system"
 # ─── Defaults (can be overridden via /etc/ng-gateway/gateway.toml in future) ───
 DEFAULT_AP_SSID_TEMPLATE="NG-Gateway-{MAC4}"
 DEFAULT_AP_PASSWORD="ng-gateway"
-DEFAULT_AP_CHANNEL=6
+DEFAULT_AP_CHANNEL=0          # 0 = auto-select based on hardware (5 GHz preferred)
 DEFAULT_AP_COUNTRY_CODE="CN"
 DEFAULT_AP_IP="10.47.0.1"
 DEFAULT_AP_PREFIX=24
@@ -144,6 +144,45 @@ mac_suffix() {
   echo "$mac" | tr -d ':' | grep -oE '.{4}$' | tr '[:lower:]' '[:upper:]'
 }
 
+# Check if a phy supports 5 GHz band (5150–5850 MHz).
+phy_supports_5ghz() {
+  local phy="$1"
+  iw phy "$phy" info 2>/dev/null | grep -qE '^\s+\*\s+5[1-8][0-9]{2}(\.[0-9]+)?\s+MHz'
+}
+
+# Resolve channel and hw_mode based on hardware capabilities.
+#   - If channel=0 (auto): pick 5 GHz ch 36 if supported, else 2.4 GHz ch 6.
+#   - Returns via globals: RESOLVED_CHANNEL, RESOLVED_HW_MODE, RESOLVED_BAND_CAPS.
+resolve_channel_and_band() {
+  local phy="$1"
+  local requested_channel="$2"
+
+  local has_5g=false
+  if phy_supports_5ghz "$phy"; then
+    has_5g=true
+  fi
+
+  if [[ "$requested_channel" -eq 0 ]]; then
+    if [[ "$has_5g" == "true" ]]; then
+      RESOLVED_CHANNEL=36
+    else
+      RESOLVED_CHANNEL=6
+    fi
+  else
+    RESOLVED_CHANNEL="$requested_channel"
+  fi
+
+  if [[ "$RESOLVED_CHANNEL" -ge 32 ]]; then
+    RESOLVED_HW_MODE="a"
+    # 5 GHz: 802.11n + 802.11ac, WMM required
+    RESOLVED_BAND_CAPS="ieee80211n=1\nieee80211ac=1\nwmm_enabled=1"
+  else
+    RESOLVED_HW_MODE="g"
+    # 2.4 GHz: 802.11n, WMM off for IoT compatibility
+    RESOLVED_BAND_CAPS="ieee80211n=1\nwmm_enabled=0"
+  fi
+}
+
 # ─── Main Logic ───
 
 main() {
@@ -217,6 +256,10 @@ main() {
   local ssid="${DEFAULT_AP_SSID_TEMPLATE/\{MAC4\}/$mac4}"
   log "AP SSID: ${ssid}"
 
+  # 5b. Resolve channel and band based on hardware capabilities.
+  resolve_channel_and_band "$phy_name" "$DEFAULT_AP_CHANNEL"
+  log "Resolved channel: ${RESOLVED_CHANNEL} (hw_mode=${RESOLVED_HW_MODE})"
+
   # 6. Generate configuration files.
   mkdir -p "${CONFIG_DIR}"
 
@@ -248,9 +291,9 @@ driver=nl80211
 ssid=${ssid}
 country_code=${DEFAULT_AP_COUNTRY_CODE}
 ieee80211d=1
-hw_mode=g
-channel=${DEFAULT_AP_CHANNEL}
-wmm_enabled=0
+hw_mode=${RESOLVED_HW_MODE}
+channel=${RESOLVED_CHANNEL}
+$(echo -e "${RESOLVED_BAND_CAPS}")
 macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
@@ -317,7 +360,7 @@ DNSMASQ
   sanitize_conflicting_services
 
   # 9. Deploy systemd unit files.
-  for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service; do
+  for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service ng-gateway-ap-auto.service; do
     local src="${OPT_DIR}/systemd/${unit}"
     local dst="${SYSTEMD_DIR}/${unit}"
     if [[ -f "$src" ]]; then
