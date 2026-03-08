@@ -2,10 +2,15 @@
 # _common.sh
 #
 # Shared utility library for NG Gateway deployment scripts.
-# Source this file at the top of any script that needs common helpers:
+# Source this file at the top of any script that needs common helpers.
 #
+# Runtime scripts example:
 #   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-#   source "${SCRIPT_DIR}/_common.sh"
+#   source "${SCRIPT_DIR}/../shared/_common.sh"
+#
+# Factory scripts example:
+#   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+#   source "${SCRIPT_DIR}/../shared/_common.sh"
 #
 # The caller MUST set LOG_TAG before sourcing (or it defaults to the script name).
 #
@@ -176,15 +181,36 @@ remove_nat_rules() {
 # Systemd helpers
 # ─────────────────────────────────────────────
 
+systemd_unit_dir() {
+  if [[ -d /usr/lib/systemd/system ]]; then
+    echo "/usr/lib/systemd/system"
+  else
+    echo "/lib/systemd/system"
+  fi
+}
+
 # Disable and mask conflicting system services (dnsmasq, hostapd).
+# Handles both:
+#   - enabled units that would auto-start later
+#   - already-active units that are currently occupying ports/interfaces
 sanitize_conflicting_services() {
   command -v systemctl >/dev/null 2>&1 || return 0
 
   for svc in dnsmasq.service hostapd.service; do
-    if systemctl is-enabled "${svc}" 2>/dev/null | grep -q enabled; then
+    local is_enabled="false"
+    local is_active="false"
+
+    if systemctl is-enabled "${svc}" 2>/dev/null | grep -q '^enabled$'; then
+      is_enabled="true"
+    fi
+    if systemctl is-active "${svc}" 2>/dev/null | grep -q '^active$'; then
+      is_active="true"
+    fi
+
+    if [[ "${is_enabled}" == "true" || "${is_active}" == "true" ]]; then
       systemctl disable --now "${svc}" 2>/dev/null || true
       systemctl mask "${svc}" 2>/dev/null || true
-      log "Disabled and masked conflicting ${svc}"
+      log "Disabled and masked conflicting ${svc} (enabled=${is_enabled}, active=${is_active})"
     fi
   done
 }

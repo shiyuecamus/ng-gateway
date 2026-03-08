@@ -14,7 +14,11 @@ set -euo pipefail
 
 LOG_TAG="[ap-teardown]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_common.sh"
+if [[ -f "${SCRIPT_DIR}/_common.sh" ]]; then
+  source "${SCRIPT_DIR}/_common.sh"
+else
+  source "${SCRIPT_DIR}/../shared/_common.sh"
+fi
 
 # ─── Remove NAT rules ───
 

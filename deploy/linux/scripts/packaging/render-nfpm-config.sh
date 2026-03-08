@@ -47,4 +47,3 @@ if grep -q "{{RPM_ARCH}}" "${out}"; then
 fi
 
 echo "[ok] rendered: ${out}"
-

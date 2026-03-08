@@ -9,6 +9,11 @@ set -euo pipefail
 runtime_dir="/var/lib/ng-gateway"
 config_dir="/etc/ng-gateway"
 opt_dir="/opt/ng-gateway"
+systemd_dir="/lib/systemd/system"
+
+if [[ -d /usr/lib/systemd/system ]]; then
+  systemd_dir="/usr/lib/systemd/system"
+fi
 
 mkdir -p "${runtime_dir}" "${config_dir}"
 mkdir -p "${runtime_dir}/data" "${runtime_dir}/certs" "${runtime_dir}/pki/own" "${runtime_dir}/pki/private"
@@ -70,13 +75,22 @@ fi
 # marker file already exists and exits immediately.
 if command -v systemctl >/dev/null 2>&1; then
   fb_unit="${opt_dir}/systemd/ng-gateway-first-boot.service"
-  fb_dst="/lib/systemd/system/ng-gateway-first-boot.service"
+  fb_dst="${systemd_dir}/ng-gateway-first-boot.service"
   if [[ -f "$fb_unit" ]]; then
     cp -f "$fb_unit" "$fb_dst"
     systemctl daemon-reload || true
     systemctl enable ng-gateway-first-boot.service 2>/dev/null || true
     echo "[postinstall] First-boot service deployed and enabled"
   fi
+fi
+
+# On normal package installs we mark first-boot as already satisfied.
+# Factory images explicitly remove this marker during golden-sample sanitization,
+# so cloned devices still execute first-boot on their actual first power-on.
+mkdir -p "${runtime_dir}"
+if [[ ! -f "${runtime_dir}/.first-boot-done" ]]; then
+  date -Iseconds > "${runtime_dir}/.first-boot-done"
+  echo "[postinstall] First-boot marker initialized for non-factory installs"
 fi
 
 # ─── Enable and start the gateway service ───

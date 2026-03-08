@@ -19,11 +19,15 @@ set -euo pipefail
 
 LOG_TAG="[init-network]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_common.sh"
+if [[ -f "${SCRIPT_DIR}/_common.sh" ]]; then
+  source "${SCRIPT_DIR}/_common.sh"
+else
+  source "${SCRIPT_DIR}/../shared/_common.sh"
+fi
 
 CONFIG_DIR="/etc/ng-gateway"
 OPT_DIR="/opt/ng-gateway"
-SYSTEMD_DIR="/lib/systemd/system"
+SYSTEMD_DIR="$(systemd_unit_dir)"
 
 # ─── Defaults (can be overridden via /etc/ng-gateway/gateway.toml in future) ───
 DEFAULT_AP_SSID_TEMPLATE="NG-Gateway-{MAC4}"

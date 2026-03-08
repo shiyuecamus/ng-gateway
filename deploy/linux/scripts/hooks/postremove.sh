@@ -12,7 +12,7 @@ set -euo pipefail
 #   "disappear" — package overwritten by another; treat like remove.
 #
 # NOTE: The `prerm` script (preremove.sh) always receives $1="remove"
-# regardless of whether the user ran `dpkg -r` or `dpkg -P`.  The purge
+# regardless of whether the user ran `dpkg -r` or `dpkg -P`. The purge
 # signal is ONLY delivered here via `postrm purge`, which dpkg calls in
 # a second pass after the package metadata has been removed.
 
@@ -32,7 +32,7 @@ case "$action" in
 
   remove|upgrade|disappear)
     # Nothing extra to do — prerm already stopped services and cleaned up
-    # AP resources.  User data is preserved.
+    # AP resources. User data is preserved.
     ;;
 
   *)

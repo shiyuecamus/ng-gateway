@@ -18,7 +18,7 @@ set -euo pipefail
 #   OUT_DIR        - output directory (default: deploy/linux/dist)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 # ─── Argument Parsing ───
 
@@ -75,14 +75,14 @@ rootfs="${workdir}/rootfs"
 mkdir -p "${rootfs}"
 
 ROOTFS_DIR="${rootfs}" TARGET_TRIPLE="${TARGET_TRIPLE}" PROFILE="release" \
-  bash "${REPO_ROOT}/deploy/linux/scripts/stage-rootfs.sh"
+  bash "${SCRIPT_DIR}/stage-rootfs.sh"
 
 mkdir -p "${OUT_DIR}"
 
 SYSTEMD_UNIT="${REPO_ROOT}/deploy/linux/systemd/ng-gateway.service"
-POSTINSTALL="${REPO_ROOT}/deploy/linux/scripts/postinstall.sh"
-PREREMOVE="${REPO_ROOT}/deploy/linux/scripts/preremove.sh"
-POSTREMOVE="${REPO_ROOT}/deploy/linux/scripts/postremove.sh"
+POSTINSTALL="${REPO_ROOT}/deploy/linux/scripts/hooks/postinstall.sh"
+PREREMOVE="${REPO_ROOT}/deploy/linux/scripts/hooks/preremove.sh"
+POSTREMOVE="${REPO_ROOT}/deploy/linux/scripts/hooks/postremove.sh"
 
 chmod +x "${POSTINSTALL}" "${PREREMOVE}" "${POSTREMOVE}" || true
 
@@ -95,7 +95,7 @@ TMPL="${nfpm_tmpl}" OUT="${nfpm_cfg}" \
 PKG_VERSION="${PKG_VERSION}" ROOTFS_DIR="${rootfs}" \
 SYSTEMD_UNIT="${SYSTEMD_UNIT}" POSTINSTALL="${POSTINSTALL}" PREREMOVE="${PREREMOVE}" \
 POSTREMOVE="${POSTREMOVE}" \
-  bash "${REPO_ROOT}/deploy/linux/scripts/render-nfpm-config.sh"
+  bash "${SCRIPT_DIR}/render-nfpm-config.sh"
 
 out_path="${OUT_DIR}/${pkg_name}"
 

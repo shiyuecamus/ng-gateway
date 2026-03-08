@@ -10,7 +10,7 @@ set -euo pipefail
 #   "upgrade" — old package prerm before upgrade to a new version.
 #
 # NOTE: The purge signal ($1="purge") is NOT sent to prerm; it is only
-# delivered to postrm (postremove.sh).  All purge-specific cleanup
+# delivered to postrm (postremove.sh). All purge-specific cleanup
 # (removing /etc/ng-gateway and /var/lib/ng-gateway) is handled there.
 #
 # Cleanup scope (prerm — always):

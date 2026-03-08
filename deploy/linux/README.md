@@ -1,204 +1,211 @@
-# Linux Packaging & AP Hotspot Deployment
+# Linux Packaging And Factory Flow
 
-## 端到端生命周期（完整闭环）
+`deploy/linux/` 负责 Linux 平台的三类事情：
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        全新 Ubuntu 设备                                  │
-│  (香橙派 RK3588 / Jetson Orin / x86 工控机)                              │
-└──────────────────────────────┬──────────────────────────────────────────┘
-                               │
-                     sudo dpkg -i ng-gateway_*.deb
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  postinstall.sh                                                        │
-│  ├── 创建运行目录 (/var/lib/ng-gateway, /etc/ng-gateway)                │
-│  ├── 复制默认配置 (gateway.toml → /etc/ng-gateway/)                     │
-│  ├── 复制驱动/插件 → 运行目录                                            │
-│  ├── systemctl daemon-reload                                           │
-│  └── 调用 init-network.sh ←─── 核心：AP 首次初始化                       │
-│       ├── iw dev / iw phy → 检测 Wi-Fi 硬件                             │
-│       ├── 无 Wi-Fi → 静默退出（纯有线网关）                               │
-│       ├── 有 Wi-Fi:                                                     │
-│       │   ├── 检测 AP 模式支持 + STA+AP 并发能力                         │
-│       │   ├── 生成 /etc/ng-gateway/ap-env                               │
-│       │   ├── 生成 /etc/ng-gateway/hostapd.conf                         │
-│       │   ├── 生成 /etc/ng-gateway/dnsmasq-ap.conf                      │
-│       │   ├── 按发行版包管理器安装 hostapd/dnsmasq/iw/iptables (如缺失)   │
-│       │   ├── 部署 3 个 systemd unit → /lib/systemd/system/             │
-│       │   ├── systemctl enable + start AP 服务                           │
-│       │   └── AP 热点开始广播 ✅                                         │
-│       └── 输出 SSID / 密码 / IP 信息                                    │
-└──────────────────────────────┬──────────────────────────────────────────┘
-                               │
-                     systemctl start ng-gateway
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  NG Gateway 进程启动                                                     │
-│  ├── NetworkService::new() → 检测 AP systemd 状态                       │
-│  ├── Web UI 可用 (http://10.47.0.1:5678)                                │
-│  ├── 用户通过手机连接 AP 热点 → 访问 Web UI                               │
-│  └── Web UI「网络配置」→ 修改 AP/Wi-Fi/有线网络                           │
-│       └── configure_ap() → 重写配置 → restart hostapd                    │
-└──────────────────────────────┬──────────────────────────────────────────┘
-                               │
-                     systemctl stop ng-gateway
-                     (或进程崩溃)
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  AP 热点仍在广播 ✅ (hostapd 由 systemd 独立管理，Restart=always)         │
-│  手机仍可连接热点 (但 Web UI 不可用，因为网关进程停了)                      │
-└─────────────────────────────────────────────────────────────────────────┘
+1. **打包**：把 `ng-gateway` 构造成 `.deb` / `.rpm`
+2. **运行时安装**：定义设备安装后的 `/opt/ng-gateway`、`/etc/ng-gateway`、`/var/lib/ng-gateway` 布局
+3. **工厂量产**：黄金样机封板、镜像导出、烧录、QA 校验
+
+这三类职责的生命周期不同，所以脚本目录按职责做了分层，但**不会为了分层而增加设备运行时路径复杂度**：
+
+- `packaging/`：CI / 发布入口
+- `factory/`：工厂 / 量产工具
+- `runtime/`：仓库中的运行时脚本源码
+- `shared/`：运行时 / 工厂共享函数
+- `hooks/`：包管理器 hook
+
+## 目录分层
+
+```text
+deploy/linux/
+├── README.md
+├── nfpm/                        # nfpm 模板
+├── resources/                   # 默认配置资源
+├── systemd/                     # systemd unit 模板
+└── scripts/
+    ├── packaging/               # 打包入口（仓库/CI 使用）
+    │   ├── package.sh
+    │   ├── stage-rootfs.sh
+    │   └── render-nfpm-config.sh
+    ├── factory/                 # 工厂/量产工具（样机/工位使用）
+    │   ├── golden-sanitize.sh
+    │   ├── create-golden-image.sh
+    │   └── flash-image.sh
+    ├── hooks/                   # 包管理器 hook
+    │   ├── postinstall.sh
+    │   ├── preremove.sh
+    │   └── postremove.sh
+    ├── runtime/                 # 运行时脚本源码（仓库内）
+    │   ├── init-network.sh
+    │   ├── ap-setup.sh
+    │   ├── ap-teardown.sh
+    │   ├── ap-auto-provision.sh
+    │   ├── first-boot-resize.sh
+    │   └── verify-image.sh
+    └── shared/
+        └── _common.sh
 ```
 
-## 关键设计原则
+## 分层原则
 
-| 原则 | 说明 |
-|------|------|
-| **AP 独立于网关进程** | hostapd/dnsmasq 由 systemd 管理，`Restart=always`。杀掉网关进程不影响 AP |
-| **配置生成与服务控制分离** | `init-network.sh` 在安装时生成初始配置；网关进程只做运行时配置更新 |
-| **无 Wi-Fi 优雅降级** | 纯有线设备上 `init-network.sh` 静默退出，不部署 AP 服务，不报错 |
-| **幂等可重入** | 所有脚本可安全重复执行。已存在的配置文件不覆盖（除非 `FORCE_REGENERATE=1`） |
-| **配置回滚保护** | `configure_ap()` 先 backup → 写入 → restart → 失败则 restore + restart |
+| 层级 | 典型脚本 | 谁来执行 | 是否进入最终设备安装产物 |
+| --- | --- | --- | --- |
+| `packaging/` | `package.sh`、`stage-rootfs.sh` | CI / 发布工程师 | 否 |
+| `factory/` | `golden-sanitize.sh`、`create-golden-image.sh`、`flash-image.sh` | 工厂 / 工位 / 样机制作人员 | 否 |
+| `runtime/` | `init-network.sh`、`first-boot-resize.sh`、`verify-image.sh` | 安装脚本 / systemd / QA | 其产物会进入设备 |
+| `shared/` | `_common.sh` | 运行时 / 工厂脚本共享 | 会以 `_common.sh` 名称进入设备 |
+| `hooks/` | `postinstall.sh`、`preremove.sh`、`postremove.sh` | `dpkg` / `rpm` / `nfpm` | 以 hook 形式引用 |
 
-## 产物布局
+关键规则：
 
+- **只有设备运行真正依赖的脚本**才会被 `stage-rootfs.sh` 复制到 `/opt/ng-gateway/scripts`
+- **工厂工具**保留在仓库、SD 制作系统或工位环境，不默认塞进最终设备
+- **不保留兼容 wrapper**，仓库内统一使用 canonical 路径
+
+## Canonical 入口
+
+推荐以后优先使用这些路径：
+
+### 打包
+
+```bash
+bash deploy/linux/scripts/packaging/package.sh --format deb
+bash deploy/linux/scripts/packaging/package.sh --format rpm
 ```
-/opt/ng-gateway/                      ← 只读安装区
-├── bin/ng-gateway-bin                 ← 网关二进制
-├── gateway.toml                       ← 默认配置（首次安装时复制到 /etc）
-├── drivers/builtin/*.so               ← 内置南向驱动
-├── plugins/builtin/*.so               ← 内置北向插件
-├── systemd/                           ← AP systemd unit 模板
+
+### 工厂工具
+
+```bash
+bash deploy/linux/scripts/factory/golden-sanitize.sh
+bash deploy/linux/scripts/factory/create-golden-image.sh --help
+bash deploy/linux/scripts/factory/flash-image.sh --help
+```
+
+### 运行时/设备侧
+
+```bash
+/opt/ng-gateway/scripts/init-network.sh
+/opt/ng-gateway/scripts/first-boot-resize.sh
+/opt/ng-gateway/scripts/verify-image.sh
+```
+
+## 设备安装后的实际布局
+
+包安装完成后，运行时关注的是这套目录，而不是仓库里的 `deploy/linux/scripts/`：
+
+```text
+/opt/ng-gateway/
+├── bin/ng-gateway-bin
+├── gateway.toml
+├── drivers/builtin/
+├── plugins/builtin/
+├── systemd/
+│   ├── ng-gateway.service
 │   ├── ng-gateway-ap-setup.service
 │   ├── ng-gateway-hostapd.service
-│   └── ng-gateway-dnsmasq.service
+│   ├── ng-gateway-dnsmasq.service
+│   ├── ng-gateway-ap-auto.service
+│   └── ng-gateway-first-boot.service
 └── scripts/
-    └── init-network.sh                ← 首次网络初始化脚本
-
-/etc/ng-gateway/                       ← 配置目录
-├── gateway.toml                       ← 网关主配置
-├── env                                ← 环境变量覆盖
-├── ap-env                             ← AP 接口/IP 变量 (init-network.sh 生成)
-├── hostapd.conf                       ← hostapd 配置 (init-network.sh 生成)
-└── dnsmasq-ap.conf                    ← dnsmasq AP 配置 (init-network.sh 生成)
-
-/var/lib/ng-gateway/                   ← 运行时可写目录 (WorkingDirectory)
-├── data/ng-gateway.db                 ← SQLite 数据库
-├── certs/                             ← TLS 证书
-├── drivers/{builtin,custom}/          ← 驱动
-├── plugins/{builtin,custom}/          ← 插件
-└── logs/                              ← 日志文件
-
-/lib/systemd/system/                   ← systemd units
-├── ng-gateway.service                 ← 主网关服务
-├── ng-gateway-ap-setup.service        ← AP 接口初始化 (oneshot)
-├── ng-gateway-hostapd.service         ← AP 热点 (simple, Restart=always)
-└── ng-gateway-dnsmasq.service         ← AP DHCP/DNS (simple, Restart=always)
+    ├── _common.sh
+    ├── init-network.sh
+    ├── ap-setup.sh
+    ├── ap-teardown.sh
+    ├── ap-auto-provision.sh
+    ├── first-boot-resize.sh
+    └── verify-image.sh
 ```
 
-## systemd 服务依赖关系
+运行期不会默认携带这些工厂工具：
 
+- `golden-sanitize.sh`
+- `create-golden-image.sh`
+- `flash-image.sh`
+
+## 打包链路
+
+### `.deb` / `.rpm` 生成
+
+```text
+release-publish.yml
+  └─ deploy/linux/scripts/packaging/package.sh
+      ├─ deploy/linux/scripts/packaging/stage-rootfs.sh
+      ├─ deploy/linux/scripts/packaging/render-nfpm-config.sh
+      ├─ nfpm/*.tmpl
+      ├─ deploy/linux/scripts/hooks/postinstall.sh
+      ├─ deploy/linux/scripts/hooks/preremove.sh
+      └─ deploy/linux/scripts/hooks/postremove.sh
 ```
-                    multi-user.target
-                    ┌───────┴───────┐
-                    │               │
-            ng-gateway.service   ng-gateway-ap-setup.service (oneshot)
-            After=hostapd        │
-            Wants=hostapd        ├─ 创建虚拟 AP 接口
-                                 ├─ 分配 IP
-                                 └─ 配置 iptables NAT
-                                         │
-                              ┌──────────┴──────────┐
-                              │                     │
-                    ng-gateway-hostapd       ng-gateway-dnsmasq
-                    (simple, Restart=always) (simple, Restart=always)
-                    广播 AP 热点              DHCP + DNS for AP clients
+
+### `stage-rootfs.sh` 负责什么
+
+- 构建 Linux 目标二进制
+- 暂存 `/opt/ng-gateway` 安装区内容
+- 拷贝内置 drivers/plugins
+- 拷贝运行时 systemd unit
+- 只拷贝运行期脚本到 `/opt/ng-gateway/scripts`
+
+## 运行时链路
+
+### 正常安装
+
+```text
+apt install ./ng-gateway_*.deb
+  └─ postinstall.sh
+      ├─ 初始化 /etc/ng-gateway 和 /var/lib/ng-gateway
+      ├─ 调用 /opt/ng-gateway/scripts/init-network.sh
+      ├─ 部署并 enable first-boot service
+      └─ enable/start ng-gateway.service
 ```
 
-## 脚本说明
+### 首次启动
 
-| 脚本 | 触发时机 | 职责 |
-|------|---------|------|
-| `_common.sh` | 被其他脚本 source | 公共函数库（log/die、设备解析、NAT 规则、包管理器检测等） |
-| `stage-rootfs.sh` | CI 打包时 | 编译二进制 + 暂存文件系统布局（含 AP unit + init-network.sh） |
-| `package.sh` | CI 打包时 | 调用 stage-rootfs → 渲染 nfpm 模板 → 生成 `.deb` 或 `.rpm`（`--format deb\|rpm`） |
-| `render-nfpm-config.sh` | CI 打包时 | 模板变量替换 |
-| `postinstall.sh` | `deb/rpm` 安装后 | 创建目录 + 复制配置 + 调用 `init-network.sh` |
-| `preremove.sh` | `dpkg -r` 前 | stop + disable 所有服务 + 清理 AP unit 文件 |
-| `init-network.sh` | 首次安装时 | 探测硬件 → 生成 AP 配置 → 安装依赖 → 部署 unit → enable+start AP |
-| `first-boot-resize.sh` | 首次启动 | 扩展分区 + 重生成 machine-id/SSH keys + AP 重新初始化 |
-| `create-golden-image.sh` | 手动执行 | 从黄金样机 eMMC 制作最小化压缩镜像 |
-| `flash-image.sh` | 产线工位 | 将镜像烧录到目标 eMMC |
-| `verify-image.sh` | 产线 QA | 烧录后自动化验证（启动/服务/网络/数据/唯一性） |
+```text
+ng-gateway-first-boot.service
+  └─ /opt/ng-gateway/scripts/first-boot-resize.sh
+      ├─ growpart + resize2fs
+      ├─ regenerate machine-id / SSH host keys
+      └─ FORCE_REGENERATE=1 init-network.sh
+```
 
-## 手动操作指南
+### QA
 
-### 全新设备首次部署
+```text
+目标设备首启完成后
+  └─ /opt/ng-gateway/scripts/verify-image.sh
+```
+
+## 工厂链路
+
+### 黄金样机封板
 
 ```bash
-# 1. 安装 DEB 包（自动执行 postinstall → init-network）
-sudo dpkg -i ng-gateway_1.0.0_arm64.deb
-
-# 2. 检查 AP 服务状态
-systemctl status ng-gateway-hostapd --no-pager
-systemctl status ng-gateway-dnsmasq --no-pager
-
-# 3. 启动网关
-systemctl enable --now ng-gateway
-
-# 4. 验证
-# 手机搜索 Wi-Fi → 连接 NG-Gateway-XXXX → 浏览器访问 http://10.47.0.1:5678
+sudo bash deploy/linux/scripts/factory/golden-sanitize.sh
+sudo shutdown -h now
 ```
 
-### 重新初始化 AP（排障/重置）
+### 导出黄金镜像
 
 ```bash
-# 强制重新生成配置（覆盖已有文件）
-sudo FORCE_REGENERATE=1 bash /opt/ng-gateway/scripts/init-network.sh
-
-# 或手动编辑后重启
-sudo vim /etc/ng-gateway/hostapd.conf
-sudo systemctl restart ng-gateway-hostapd
+sudo bash deploy/linux/scripts/factory/create-golden-image.sh \
+  --device /dev/mmcblk1 \
+  --output /mnt/usb/ng-gateway-v1.0.0 \
+  --version v1.0.0
 ```
 
-### 验证 AP 独立性
+### 烧录目标板
 
 ```bash
-# 停止网关进程 → AP 应仍在广播
-sudo systemctl stop ng-gateway
-# 用手机确认仍可连接 AP 热点
-
-# 重启网关 → AP 不中断
-sudo systemctl start ng-gateway
+sudo bash deploy/linux/scripts/factory/flash-image.sh \
+  --image /mnt/usb/ng-gateway-v1.0.0.img.zst \
+  --device /dev/mmcblk1
 ```
 
-### 完全卸载
+## 当前终态原则
 
-```bash
-sudo dpkg -r ng-gateway
-# 配置和数据保留在 /etc/ng-gateway 和 /var/lib/ng-gateway
-# 如需彻底清除：
-sudo rm -rf /etc/ng-gateway /var/lib/ng-gateway
-```
+这版目录整理后，统一遵循下面的终态原则：
 
-## 依赖
-
-| 工具 | 用途 | 安装方式 |
-|------|------|---------|
-| `cross` | CI 多架构编译 | `cargo install cross` |
-| `nfpm` | 生成 deb/rpm | `go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest` |
-| `hostapd` | AP 热点 | `init-network.sh` 自动安装（apt/dnf/yum/zypper） |
-| `dnsmasq(-base)` | DHCP/DNS | Debian 用 `dnsmasq-base`，RPM 系常见为 `dnsmasq` |
-| `iw` | 无线能力检测 | `init-network.sh` 自动安装（apt/dnf/yum/zypper） |
-| `iptables` | NAT 规则 | `init-network.sh` 自动安装（apt/dnf/yum/zypper） |
-
-## 已知约束
-
-- AP 固定 2.4GHz（`hw_mode=g`），不支持 5GHz AP
-- 首次安装时需要网络连接以安装 hostapd/dnsmasq（如离线部署需预装）
-- `init-network.sh` 会自动识别包管理器（apt/dnf/yum/zypper）；若都不存在则跳过自动安装并给出告警
-- STA+AP 共存是否可用取决于具体 Wi-Fi 芯片（RTL8852BE 可能有驱动问题）
+1. `packaging/` 和 `factory/` 使用子目录
+2. `runtime/` 只影响仓库源码组织，不改变设备内 `/opt/ng-gateway/scripts/*.sh` 路径
+3. 不再保留兼容 wrapper
+4. 仓库内文档、CI、脚本引用全部指向 canonical 路径

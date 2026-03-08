@@ -4,22 +4,23 @@ set -euo pipefail
 # create-golden-image.sh
 #
 # Create a minimal, compressed eMMC golden image from a fully configured
-# NG Gateway device.  The resulting image is safe to flash onto any eMMC
+# NG Gateway device. The resulting image is safe to flash onto any eMMC
 # capacity (32GB / 64GB / 256GB) because the rootfs partition is shrunk
 # to its minimum size. The first-boot service will expand it at runtime.
 #
 # Usage:
-#   sudo bash create-golden-image.sh --device /dev/mmcblk1 --output /mnt/usb/ng-gateway-v1.0.0.img --version v1.0.0
+#   sudo bash create-golden-image.sh --device /dev/mmcblk1 --output /mnt/usb/ng-gateway-v1.0.0 --version v1.0.0
 #   sudo bash create-golden-image.sh --device /dev/mmcblk1 --output - --version v1.0.0 | ssh server "cat > image.img.zst"
 #
 # Prerequisites:
 #   - Must run from an SD-card-booted system (eMMC must be fully unmounted)
-#   - Required tools: parted, resize2fs, e2fsck, sgdisk, dd, zstd, jq
+#   - Required tools: parted, partprobe, resize2fs, e2fsck, dumpe2fs, sgdisk,
+#                     sfdisk, dd, zstd, jq
 
 SCRIPT_NAME="$(basename "$0")"
 LOG_TAG="[create-image]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_common.sh"
+source "${SCRIPT_DIR}/../shared/_common.sh"
 
 # ─── Argument Parsing ───
 
@@ -71,7 +72,7 @@ done
 # ─── Validate Environment ───
 
 require_root
-require_commands parted resize2fs e2fsck dd jq blkid
+require_commands parted partprobe resize2fs e2fsck dumpe2fs sfdisk sgdisk dd jq blkid findmnt sha256sum
 
 case "${COMPRESSION}" in
   zstd) require_commands zstd; COMP_EXT=".zst" ;;
@@ -178,18 +179,20 @@ log "  Total image size:     ${TOTAL_MB} MB (before compression)"
 
 # ─── Step 5: Fix GPT backup before export ───
 
-if command -v sgdisk >/dev/null 2>&1; then
-  log "  Fixing GPT backup header position..."
-fi
+log "Step 5/6: Repairing GPT backup header before export..."
+sgdisk -e "${DEVICE}" >/dev/null 2>&1 || die "Failed to relocate GPT backup header with sgdisk -e"
+partprobe "${DEVICE}" 2>/dev/null || true
+sleep 1
+log "  GPT backup header relocated to current disk end"
 
 # ─── Step 6: Export image ───
 
-log "Step 5/6: Exporting image..."
+log "Step 6/6: Exporting image..."
 
 RAW_SHA256_FILE=$(mktemp)
 
 if [[ "${OUTPUT}" == "-" ]]; then
-  dd if="${DEVICE}" bs=1M count="${TOTAL_MB}" iflag=count_bytes status=progress 2>/dev/null \
+  dd if="${DEVICE}" bs=1M count="${TOTAL_BYTES}" iflag=count_bytes status=progress 2>/dev/null \
     | tee >(sha256sum | awk '{print $1}' > "${RAW_SHA256_FILE}") \
     | case "${COMPRESSION}" in
         zstd) zstd -T0 -3 ;;
@@ -201,7 +204,7 @@ else
   COMP_PATH="${OUTPUT}.img${COMP_EXT}"
   MANIFEST_PATH="${OUTPUT}.manifest.json"
 
-  dd if="${DEVICE}" bs=1M count="${TOTAL_MB}" iflag=count_bytes status=progress 2>/dev/null \
+  dd if="${DEVICE}" bs=1M count="${TOTAL_BYTES}" iflag=count_bytes status=progress 2>/dev/null \
     | tee >(sha256sum | awk '{print $1}' > "${RAW_SHA256_FILE}") \
     | case "${COMPRESSION}" in
         zstd) zstd -T0 -3 -o "${COMP_PATH}" ;;
@@ -211,7 +214,7 @@ else
 
   log "  Image written: ${COMP_PATH:-${IMG_PATH}}"
 
-  log "Step 6/6: Generating checksums and manifest..."
+  log "  Generating checksums and manifest..."
 
   FINAL_PATH="${COMP_PATH:-${IMG_PATH}}"
   COMP_SHA256=$(sha256sum "${FINAL_PATH}" | awk '{print $1}')
@@ -284,5 +287,3 @@ log "Do NOT resize it back on the golden sample. If you need to boot"
 log "the golden sample again, run:"
 log "  sudo resize2fs ${ROOT_PART}"
 log ""
-
-exit 0

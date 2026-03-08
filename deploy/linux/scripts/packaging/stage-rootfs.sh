@@ -12,7 +12,7 @@ set -euo pipefail
 # This script is intended to be called from CI packaging jobs (deb/rpm).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 TARGET_TRIPLE="${TARGET_TRIPLE:-}"
 PROFILE="${PROFILE:-release}"
@@ -69,7 +69,7 @@ mkdir -p "${opt_dir}/bin" "${opt_dir}/data" "${opt_dir}/drivers/builtin" "${opt_
 
 # Config and runtime directories (/etc/ng-gateway, /var/lib/ng-gateway) are
 # created by postinstall.sh at install time — NOT included in the package
-# payload.  This avoids dpkg claiming ownership of parent directories like
+# payload. This avoids dpkg claiming ownership of parent directories like
 # /opt and /etc, which causes "not empty" warnings on purge.
 
 echo "[stage] binary"
@@ -94,8 +94,8 @@ echo "[stage] builtin drivers/plugins"
 cp -f "${REPO_ROOT}/drivers/builtin/"*.so "${opt_dir}/drivers/builtin/" 2>/dev/null || true
 cp -f "${REPO_ROOT}/plugins/builtin/"*.so "${opt_dir}/plugins/builtin/" 2>/dev/null || true
 
-# AP hotspot systemd units + init script.
-echo "[stage] AP hotspot resources"
+# Runtime scripts required by postinstall/systemd on the installed device.
+echo "[stage] runtime scripts"
 mkdir -p "${opt_dir}/systemd" "${opt_dir}/scripts"
 for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service ng-gateway-ap-auto.service ng-gateway-first-boot.service; do
   src="${REPO_ROOT}/deploy/linux/systemd/${unit}"
@@ -103,8 +103,10 @@ for unit in ng-gateway-ap-setup.service ng-gateway-hostapd.service ng-gateway-dn
     cp -f "$src" "${opt_dir}/systemd/${unit}"
   fi
 done
-for script in _common.sh init-network.sh ap-setup.sh ap-teardown.sh ap-auto-provision.sh first-boot-resize.sh create-golden-image.sh flash-image.sh verify-image.sh; do
-  src="${REPO_ROOT}/deploy/linux/scripts/${script}"
+cp -f "${REPO_ROOT}/deploy/linux/scripts/shared/_common.sh" "${opt_dir}/scripts/_common.sh"
+chmod +x "${opt_dir}/scripts/_common.sh"
+for script in init-network.sh ap-setup.sh ap-teardown.sh ap-auto-provision.sh first-boot-resize.sh verify-image.sh; do
+  src="${REPO_ROOT}/deploy/linux/scripts/runtime/${script}"
   if [[ -f "$src" ]]; then
     cp -f "$src" "${opt_dir}/scripts/${script}"
     chmod +x "${opt_dir}/scripts/${script}"
@@ -118,4 +120,3 @@ if [[ -f "$main_unit" ]]; then
 fi
 
 echo "[ok] staged rootfs at: ${ROOTFS_DIR}"
-

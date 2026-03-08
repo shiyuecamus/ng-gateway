@@ -16,7 +16,11 @@ set -euo pipefail
 
 LOG_TAG="[ap-setup]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_common.sh"
+if [[ -f "${SCRIPT_DIR}/_common.sh" ]]; then
+  source "${SCRIPT_DIR}/_common.sh"
+else
+  source "${SCRIPT_DIR}/../shared/_common.sh"
+fi
 
 # ─── Step 1: Create / prepare AP interface ───
 
@@ -33,7 +37,7 @@ if [ "${AP_EXCLUSIVE}" != "true" ]; then
 
   # Verify the virtual interface can actually be brought up.
   # Some drivers (Realtek RTL8852BE / rtw89) allow creation but refuse
-  # activation with EBUSY.  Fall back to exclusive mode if bring-up fails.
+  # activation with EBUSY. Fall back to exclusive mode if bring-up fails.
   if ! ip link set "${AP_IFACE}" up 2>/dev/null; then
     warn "Virtual AP interface ${AP_IFACE} created but bring-up failed (EBUSY) — falling back to exclusive mode"
     iw dev "${AP_IFACE}" del 2>/dev/null || true

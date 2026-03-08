@@ -305,7 +305,7 @@ jobs:
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
           export PKG_VERSION
-          bash deploy/linux/scripts/package.sh --format deb
+          bash deploy/linux/scripts/packaging/package.sh --format deb
 
       - name: Upload .deb
         env:
@@ -389,7 +389,7 @@ jobs:
           set -euo pipefail
           PKG_VERSION="${PKG_VERSION#v}"
           export PKG_VERSION
-          bash deploy/linux/scripts/package.sh --format rpm
+          bash deploy/linux/scripts/packaging/package.sh --format rpm
 
       - name: Upload .rpm
         env:

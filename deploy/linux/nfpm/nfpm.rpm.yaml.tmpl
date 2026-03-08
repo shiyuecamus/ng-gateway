@@ -39,6 +39,7 @@ contents:
   - src: {{SYSTEMD_UNIT}}
     dst: /usr/lib/systemd/system/ng-gateway.service
 
+  # AP hotspot resources (init-network.sh deploys units to the systemd directory at install time).
   - src: {{ROOTFS_DIR}}/opt/ng-gateway/systemd/*
     dst: /opt/ng-gateway/systemd/
   - src: {{ROOTFS_DIR}}/opt/ng-gateway/scripts/*

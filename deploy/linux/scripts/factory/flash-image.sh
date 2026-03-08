@@ -16,7 +16,7 @@ set -euo pipefail
 SCRIPT_NAME="$(basename "$0")"
 LOG_TAG="[flash]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_common.sh"
+source "${SCRIPT_DIR}/../shared/_common.sh"
 
 # ─── Argument Parsing ───
 
@@ -183,5 +183,3 @@ log "  3. Wait ~60s for first-boot initialization"
 log "  4. Connect to AP hotspot (NG-Gateway-XXXX)"
 log "  5. Run verify-image.sh for QA validation"
 log ""
-
-exit 0

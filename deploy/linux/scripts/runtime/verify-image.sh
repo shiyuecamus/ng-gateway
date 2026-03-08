@@ -13,7 +13,11 @@ set -euo pipefail
 SCRIPT_NAME="$(basename "$0")"
 LOG_TAG="[verify]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_common.sh"
+if [[ -f "${SCRIPT_DIR}/_common.sh" ]]; then
+  source "${SCRIPT_DIR}/_common.sh"
+else
+  source "${SCRIPT_DIR}/../shared/_common.sh"
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

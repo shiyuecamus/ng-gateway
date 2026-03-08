@@ -6,7 +6,7 @@ set -euo pipefail
 # One-time first-boot initialization for factory-flashed NG Gateway devices.
 #
 # This script runs once on the very first boot after a golden image has been
-# flashed to eMMC.  It performs:
+# flashed to eMMC. It performs:
 #   1. Root partition expansion  (growpart + resize2fs)
 #   2. GPT backup header repair  (sgdisk -e)
 #   3. Machine identity regeneration  (machine-id, SSH host keys)
@@ -22,7 +22,11 @@ MARKER_FILE="/var/lib/ng-gateway/.first-boot-done"
 OPT_DIR="/opt/ng-gateway"
 LOG_TAG="[first-boot]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_common.sh"
+if [[ -f "${SCRIPT_DIR}/_common.sh" ]]; then
+  source "${SCRIPT_DIR}/_common.sh"
+else
+  source "${SCRIPT_DIR}/../shared/_common.sh"
+fi
 
 # ─── Guard: skip if already completed ───
 
