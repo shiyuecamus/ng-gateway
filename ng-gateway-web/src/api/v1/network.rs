@@ -1,7 +1,7 @@
 //! Network configuration REST API handlers.
 //!
 //! Phase 1: interface enumeration and capabilities detection.
-//! Phase 2: interface IP configuration and DNS.
+//! Phase 2: interface IP configuration (DNS is per-interface via `IpConfig`).
 //! Phase 3: Wi-Fi scanning and connection.
 //! Phase 4: AP hotspot management.
 
@@ -29,10 +29,8 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/capabilities", web::get().to(get_capabilities))
         // Aggregated status (best-interface selection by backend)
         .route("/wired/status", web::get().to(wired_status))
-        // Phase 2: Interface configuration & DNS
+        // Phase 2: Interface configuration
         .route("/interfaces/{name}", web::put().to(configure_interface))
-        .route("/dns", web::get().to(get_dns))
-        .route("/dns", web::put().to(configure_dns))
         // Phase 3: Wi-Fi
         .route("/wifi/scan", web::get().to(scan_wifi))
         .route("/wifi/preflight", web::post().to(wifi_connect_preflight))
@@ -57,7 +55,7 @@ pub(crate) async fn init_rbac_rules(
 ) -> WebResult<(), RBACError> {
     info!("Initializing network module RBAC rules...");
 
-    let rules: [(Method, String, Box<dyn PermRule>); 18] = [
+    let rules: [(Method, String, Box<dyn PermRule>); 16] = [
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/interfaces"),
@@ -81,16 +79,6 @@ pub(crate) async fn init_rbac_rules(
         (
             Method::GET,
             format!("{router_prefix}{ROUTER_PREFIX}/wired/status"),
-            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
-        ),
-        (
-            Method::GET,
-            format!("{router_prefix}{ROUTER_PREFIX}/dns"),
-            Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
-        ),
-        (
-            Method::PUT,
-            format!("{router_prefix}{ROUTER_PREFIX}/dns"),
             Box::new(has_any_role(&[SYSTEM_ADMIN_ROLE_CODE])?),
         ),
         (
@@ -213,7 +201,7 @@ async fn wired_status(
     Ok(WebResponse::ok(status))
 }
 
-// ─── Phase 2: Interface Configuration & DNS ───
+// ─── Phase 2: Interface Configuration ───
 
 /// `PUT /network/interfaces/{name}` — Configure interface IP settings.
 #[instrument(name = "network-configure-interface", skip(_ctx, network, payload), fields(name = %path.name))]
@@ -235,33 +223,6 @@ async fn configure_interface(
     Ok(WebResponse::ok(true))
 }
 
-/// `GET /network/dns` — Get current DNS configuration.
-#[instrument(name = "network-get-dns", skip_all)]
-async fn get_dns(
-    _ctx: RequestContext,
-    network: web::Data<Arc<NetworkService>>,
-) -> WebResult<WebResponse<DnsConfig>> {
-    let dns = network
-        .get_dns()
-        .await
-        .map_err(|e| WebError::InternalError(format!("Failed to get DNS config: {e}")))?;
-    Ok(WebResponse::ok(dns))
-}
-
-/// `PUT /network/dns` — Set DNS configuration.
-#[instrument(name = "network-configure-dns", skip(_ctx, network, payload))]
-async fn configure_dns(
-    _ctx: RequestContext,
-    network: web::Data<Arc<NetworkService>>,
-    payload: Json<ConfigureDnsRequest>,
-) -> WebResult<WebResponse<bool>> {
-    network
-        .configure_dns(&payload.into_inner())
-        .await
-        .map_err(|e| WebError::InternalError(format!("Failed to configure DNS: {e}")))?;
-    Ok(WebResponse::ok(true))
-}
-
 // ─── Phase 3: Wi-Fi ───
 
 /// `GET /network/wifi/scan` — Scan for Wi-Fi access points.
@@ -270,12 +231,9 @@ async fn scan_wifi(
     _ctx: RequestContext,
     network: web::Data<Arc<NetworkService>>,
     query: web::Query<WifiInterfaceQuery>,
-) -> WebResult<WebResponse<Vec<WifiAccessPoint>>> {
-    let aps = network
-        .scan_wifi(query.interface.as_deref())
-        .await
-        .map_err(|e| WebError::InternalError(format!("Wi-Fi scan failed: {e}")))?;
-    Ok(WebResponse::ok(aps))
+) -> WebResult<WebResponse<WifiScanResult>> {
+    let result = network.scan_wifi_result(query.interface.as_deref()).await;
+    Ok(WebResponse::ok(result))
 }
 
 /// `POST /network/wifi/preflight` — Pre-flight check for Wi-Fi connect.

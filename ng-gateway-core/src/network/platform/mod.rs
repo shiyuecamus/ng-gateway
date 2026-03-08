@@ -21,20 +21,31 @@ pub use macos::MacosNetworkManager;
 pub use windows::WindowsNetworkManager;
 
 use async_trait::async_trait;
-use ng_gateway_error::{NGError, NGResult};
+#[cfg(target_os = "linux")]
+use ng_gateway_error::NGError;
+use ng_gateway_error::NGResult;
 use ng_gateway_models::domain::prelude::{
-    ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    ForgetWifiRequest, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
-    SavedWifiConnection, WifiAccessPoint, WifiBand, WifiConnectPreflight, WifiConnectRequest,
-    WifiDisconnectRequest, WifiSecurity, WifiStaStatus,
+    ApStatus, ConfigureApRequest, ConfigureInterfaceRequest, ForgetWifiRequest,
+    NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary, SavedWifiConnection,
+    WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest, WifiDisconnectRequest,
+    WifiStaStatus,
 };
+#[cfg(target_os = "linux")]
+use ng_gateway_models::domain::prelude::{WifiBand, WifiSecurity};
 
 /// Platform-abstracted network management interface.
 ///
 /// # Design
-/// - **Linux**: implemented via NetworkManager D-Bus API (`zbus`).
-/// - **macOS**: read-only fallback using `networksetup` / `system_profiler` commands.
-/// - **Windows**: read-only fallback using `netsh` commands.
+/// - **Linux** (`Full`): implemented via NetworkManager D-Bus API (`zbus`).
+///   Supports all operations including AP hotspot management.
+/// - **macOS** (`Partial`): implemented via CoreWLAN + SystemConfiguration native APIs.
+///   CLI (`networksetup`) retained only for IP configuration writes.
+///   Supports interface configuration, Wi-Fi STA connect/disconnect, saved profiles.
+///   AP management is not supported (macOS has no accessible AP mode).
+/// - **Windows** (`Partial`): implemented via Native Wifi API + GetAdaptersAddresses.
+///   CLI (`netsh`) retained only for IP configuration writes.
+///   Supports interface configuration, Wi-Fi STA connect/disconnect, saved profiles.
+///   AP management is not supported (`hostednetwork` is deprecated since Win10).
 ///
 /// All methods are async to accommodate D-Bus I/O and subprocess execution.
 ///
@@ -129,14 +140,6 @@ pub trait PlatformNetworkManager: Send + Sync {
     /// If the AP is running, restarts hostapd to apply changes.
     /// If the AP is stopped, only writes configuration files.
     async fn configure_ap(&self, config: &ConfigureApRequest) -> NGResult<ApStatus>;
-
-    // ─── DNS ───
-
-    /// Get current DNS configuration.
-    async fn get_dns(&self) -> NGResult<DnsConfig>;
-
-    /// Set DNS configuration.
-    async fn configure_dns(&self, config: &ConfigureDnsRequest) -> NGResult<()>;
 }
 
 /// Create the platform-appropriate [`PlatformNetworkManager`] instance.
@@ -166,14 +169,14 @@ pub async fn create_platform_manager() -> NGResult<Box<dyn PlatformNetworkManage
     }
 }
 
-/// Cross-platform Wi-Fi scan using the `wifi_scan` crate.
+/// Cross-platform Wi-Fi scan fallback using the `wifi_scan` crate.
 ///
-/// Uses native APIs on each platform:
-/// - **macOS**: CoreWLAN framework
-/// - **Windows**: win32-wlan (Native Wifi API)
-/// - **Linux**: nl80211 / netlink (used as fallback when NM D-Bus is unavailable)
+/// On macOS and Windows, the platform managers now use their own native scan
+/// implementations (CoreWLAN / Native Wifi API). This function is retained as
+/// a fallback for Linux (nl80211) when the NM D-Bus scan path is unavailable.
 ///
-/// This runs a blocking scan in a `spawn_blocking` task to avoid blocking the async runtime.
+/// Runs a blocking scan in a `spawn_blocking` task to avoid blocking the async runtime.
+#[cfg(target_os = "linux")]
 pub async fn scan_wifi_native() -> NGResult<Vec<WifiAccessPoint>> {
     let result = tokio::task::spawn_blocking(wifi_scan::scan)
         .await
@@ -193,7 +196,6 @@ pub async fn scan_wifi_native() -> NGResult<Vec<WifiAccessPoint>> {
                         5925..=7125 => WifiBand::Band6Ghz,
                         _ => WifiBand::Unknown,
                     };
-
                     let security = if w.is_wpa3() {
                         WifiSecurity::Wpa3Sae
                     } else if w.is_wpa2() && w.is_enterprise() {
@@ -209,13 +211,22 @@ pub async fn scan_wifi_native() -> NGResult<Vec<WifiAccessPoint>> {
                     };
 
                     let signal_quality = rssi_to_quality(w.signal_level);
+                    let channel = w.channel;
+                    let bssid = w.mac;
+                    let ssid = w.ssid;
+                    let redacted_identifiers = ssid.is_empty() && bssid.is_empty();
+                    let ssid = if redacted_identifiers {
+                        format!("<redacted> ch{channel}")
+                    } else {
+                        ssid
+                    };
 
                     WifiAccessPoint {
-                        ssid: w.ssid,
-                        bssid: w.mac,
+                        ssid,
+                        bssid,
                         security,
                         band,
-                        channel: w.channel,
+                        channel,
                         frequency,
                         signal_dbm: w.signal_level,
                         signal_quality,
@@ -225,21 +236,23 @@ pub async fn scan_wifi_native() -> NGResult<Vec<WifiAccessPoint>> {
                 })
                 .collect();
 
-            // Remove empty SSIDs, sort by signal descending, then deduplicate by SSID.
+            // Remove truly empty SSIDs, sort by signal descending, then deduplicate.
             aps.retain(|ap| !ap.ssid.is_empty());
             aps.sort_unstable_by(|a, b| {
                 a.ssid
                     .cmp(&b.ssid)
+                    .then(a.bssid.cmp(&b.bssid))
+                    .then(a.channel.cmp(&b.channel))
                     .then(b.signal_quality.cmp(&a.signal_quality))
             });
-            aps.dedup_by(|a, b| a.ssid == b.ssid);
+            aps.dedup_by(|a, b| a.ssid == b.ssid && a.bssid == b.bssid && a.channel == b.channel);
             aps.sort_unstable_by(|a, b| b.signal_quality.cmp(&a.signal_quality));
 
             Ok(aps)
         }
         Err(e) => {
             tracing::warn!("Wi-Fi scan failed: {e}");
-            Ok(Vec::new())
+            Err(NGError::Error(format!("Wi-Fi scan failed: {e}")))
         }
     }
 }
@@ -249,7 +262,8 @@ pub async fn scan_wifi_native() -> NGResult<Vec<WifiAccessPoint>> {
 /// Handles cross-platform differences: some drivers/platforms report signal
 /// as a percentage (0-100) rather than dBm. Values in [0, 100] are treated
 /// as already-converted quality; negative values are treated as dBm.
-fn rssi_to_quality(rssi: i32) -> u8 {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn rssi_to_quality(rssi: i32) -> u8 {
     if rssi >= 0 {
         // Already a percentage (e.g., macOS CoreWLAN or some Windows drivers).
         (rssi as u8).min(100)

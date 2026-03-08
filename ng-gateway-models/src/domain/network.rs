@@ -19,9 +19,9 @@ pub enum InterfaceKind {
 
 /// IP configuration method.
 ///
-/// Used in read-only contexts (e.g. [`Ipv4Config`], [`DnsConfig`]) to describe
-/// the current method. For write operations, prefer [`IpConfig`] which carries
-/// the associated static configuration data as a tagged enum.
+/// Used in read-only contexts (e.g. [`Ipv4Config`]) to describe the current
+/// method. For write operations, prefer [`IpConfig`] which carries the
+/// associated configuration data as a tagged enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IpMethod {
@@ -43,18 +43,22 @@ pub struct StaticIpConfig {
     pub prefix_length: u8,
     pub gateway: Option<IpAddr>,
     pub dns: Option<Vec<IpAddr>>,
+    /// DNS search domains (e.g. `["example.com", "corp.local"]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_domains: Option<Vec<String>>,
 }
 
 /// Unified IP configuration using tagged enum for type safety.
 ///
-/// DHCP variant carries no extra fields; Static variant enforces required fields
-/// at compile time. Used by both wired interface configuration and Wi-Fi
-/// connection requests, eliminating duplicated Option-field patterns.
+/// Both DHCP and Static variants can carry optional DNS overrides.
+/// NetworkManager supports setting `ipv4.dns` and `ipv4.dns-search` in DHCP
+/// mode to override/supplement DHCP-provided DNS servers.
 ///
 /// # Serde Format
 ///
 /// Internally tagged via `"method"`:
-/// - `{ "method": "dhcp" }`
+/// - `{ "method": "dhcp" }` — pure DHCP, DNS from server
+/// - `{ "method": "dhcp", "dns": ["8.8.8.8"] }` — DHCP with DNS override
 /// - `{ "method": "static", "ipAddress": "...", "prefixLength": 24, ... }`
 /// - `{ "method": "disabled" }`
 ///
@@ -66,9 +70,21 @@ pub struct StaticIpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method")]
 pub enum IpConfig {
-    /// Obtain IP configuration automatically via DHCP.
+    /// Obtain IP configuration automatically via DHCP, with optional DNS overrides.
     #[serde(rename = "dhcp")]
-    Dhcp,
+    Dhcp {
+        /// Optional DNS server overrides. When set, NM writes these to `ipv4.dns`
+        /// and they take priority over DHCP-provided DNS.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dns: Option<Vec<IpAddr>>,
+        /// DNS search domains override.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "searchDomains"
+        )]
+        search_domains: Option<Vec<String>>,
+    },
     /// Manual static IP configuration.
     #[serde(rename = "static")]
     Static {
@@ -102,7 +118,7 @@ impl IpConfig {
     #[inline]
     pub fn method(&self) -> IpMethod {
         match self {
-            Self::Dhcp => IpMethod::Dhcp,
+            Self::Dhcp { .. } => IpMethod::Dhcp,
             Self::Static { .. } => IpMethod::Static,
             Self::Disabled => IpMethod::Disabled,
         }
@@ -213,9 +229,12 @@ pub struct ControlApRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformSupport {
-    /// Full support (Linux with NetworkManager).
+    /// Full support (Linux with NetworkManager): interfaces, Wi-Fi, AP.
     Full,
-    /// Read-only (macOS/Windows dev environment).
+    /// Partial support (macOS/Windows): interface configuration, Wi-Fi STA
+    /// connect/disconnect/saved-profiles, but no AP management.
+    Partial,
+    /// Read-only: can enumerate and query but cannot configure anything.
     ReadOnly,
     /// Not available.
     Unavailable,
@@ -238,6 +257,9 @@ pub struct Ipv4Config {
     pub addresses: Vec<Ipv4AddressInfo>,
     pub gateway: Option<IpAddr>,
     pub dns: Vec<IpAddr>,
+    /// DNS search domains configured on this interface.
+    #[serde(default)]
+    pub search_domains: Vec<String>,
     pub method: IpMethod,
 }
 
@@ -335,6 +357,34 @@ pub struct WifiAccessPoint {
     pub is_connected: bool,
 }
 
+/// High-level Wi-Fi scan status for diagnostics and UI feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WifiScanStatus {
+    /// Scan completed successfully. The AP list may still be empty.
+    Ready,
+    /// The platform requires user-granted permission before scanning can succeed.
+    PermissionRequired,
+    /// The current platform version or API policy restricts scanning.
+    PlatformRestricted,
+    /// The current process type or execution context cannot trigger scanning successfully.
+    UnsupportedContext,
+    /// Scan failed for an unknown or transient runtime reason.
+    Failed,
+}
+
+/// Structured Wi-Fi scan response with diagnostic context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiScanResult {
+    /// Visible Wi-Fi access points. Can be empty even when status is `ready`.
+    pub access_points: Vec<WifiAccessPoint>,
+    /// Diagnostic status describing whether scan support is currently usable.
+    pub status: WifiScanStatus,
+    /// Human-readable diagnostic hint for the frontend to display.
+    pub message: Option<String>,
+}
+
 /// Wi-Fi STA connection status.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -426,18 +476,6 @@ pub struct ApStatus {
     /// The frontend should prompt the user to restart the network or reboot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sta_restore_failed: bool,
-}
-
-/// DNS configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DnsConfig {
-    /// Global DNS servers.
-    pub servers: Vec<IpAddr>,
-    /// Search domains.
-    pub search_domains: Vec<String>,
-    /// DNS mode (auto from DHCP or manual).
-    pub mode: IpMethod,
 }
 
 /// Platform capabilities response.
@@ -594,14 +632,6 @@ pub struct ConfigureApRequest {
     pub country_code: Option<String>,
     /// Whether to restart the AP after configuration change.
     pub restart: Option<bool>,
-}
-
-/// Request to modify DNS configuration.
-#[derive(Debug, Clone, Deserialize, Validate)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigureDnsRequest {
-    pub servers: Vec<IpAddr>,
-    pub search_domains: Option<Vec<String>>,
 }
 
 // ─────────────────── Aggregated Status (best-interface) ───────────────────

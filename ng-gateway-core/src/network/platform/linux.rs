@@ -20,12 +20,12 @@ use crate::network::{
 use async_trait::async_trait;
 use ng_gateway_error::{network::NetworkError, NGResult};
 use ng_gateway_models::domain::prelude::{
-    ApMode, ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest,
-    DnsConfig, ForgetWifiRequest, InterfaceKind, IpConfig, IpMethod, Ipv4AddressInfo, Ipv4Config,
-    Ipv6AddressInfo, Ipv6Config, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
-    NetworkInterfaceSummary, PlatformSupport, SavedWifiConnection, StaticIpConfig, WifiAccessPoint,
-    WifiBand, WifiConnectPreflight, WifiConnectRequest, WifiDisconnectRequest, WifiMode,
-    WifiSecurity, WifiStaStatus, WirelessInterfaceCapability,
+    ApMode, ApStatus, ConfigureApRequest, ConfigureInterfaceRequest, ForgetWifiRequest,
+    InterfaceKind, IpConfig, IpMethod, Ipv4AddressInfo, Ipv4Config, Ipv6AddressInfo, Ipv6Config,
+    LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
+    PlatformSupport, SavedWifiConnection, StaticIpConfig, WifiAccessPoint, WifiBand,
+    WifiConnectPreflight, WifiConnectRequest, WifiDisconnectRequest, WifiMode, WifiSecurity,
+    WifiStaStatus, WirelessInterfaceCapability,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -401,6 +401,7 @@ impl LinuxNetworkManager {
         let gateway =
             prop_str(&ip4_props, nm_dbus::prop::GATEWAY).and_then(|s| s.parse::<IpAddr>().ok());
         let dns = parse_nm_ip4_nameservers(&ip4_props);
+        let search_domains = parse_nm_ip4_search_domains(&ip4_props);
 
         let method = self.resolve_ip_method(dev_props, nm_dbus::conn::IPV4).await;
 
@@ -408,6 +409,7 @@ impl LinuxNetworkManager {
             addresses,
             gateway,
             dns,
+            search_domains,
             method,
         })
     }
@@ -794,7 +796,7 @@ impl LinuxNetworkManager {
         let ipv4_section = settings.get(nm_dbus::conn::IPV4)?;
 
         let method = settings_str(ipv4_section, nm_dbus::conn::METHOD)
-            .unwrap_or_else(|| nm_dbus::method::AUTO.to_string());
+            .unwrap_or(nm_dbus::method::AUTO.to_string());
 
         let (address, prefix, gateway) = if method == nm_dbus::method::MANUAL {
             let addr_info = parse_settings_address_data(ipv4_section);
@@ -927,8 +929,7 @@ impl LinuxNetworkManager {
             .await
             .unwrap_or_default();
 
-        let sta_iface =
-            parse_env_value(&current_env, "STA_IFACE").unwrap_or_else(|| "wlan0".to_string());
+        let sta_iface = parse_env_value(&current_env, "STA_IFACE").unwrap_or("wlan0".to_string());
         let ap_iface = format!("{sta_iface}_ap");
 
         let updated_env = current_env
@@ -1065,7 +1066,7 @@ impl LinuxNetworkManager {
 
             self.activate_stashed_connection(&s).await
         } else {
-            Err("No STA interface name available".to_string())
+            Err("No STA interface name available".into())
         };
 
         match activate_result {
@@ -1151,7 +1152,7 @@ impl LinuxNetworkManager {
         let resolved_path = self
             .find_saved_connection_by_uuid(uuid)
             .await
-            .ok_or_else(|| format!("No saved profile found for UUID {uuid}"))?;
+            .ok_or(format!("No saved profile found for UUID {uuid}"))?;
 
         let resolved_ref = ObjectPath::try_from(resolved_path.as_str())
             .map_err(|e| format!("Invalid resolved path: {e}"))?;
@@ -1761,8 +1762,7 @@ impl LinuxNetworkManager {
         let file_channel: u32 = parse_conf_value(&current_conf, "channel")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let file_hw_mode =
-            parse_conf_value(&current_conf, "hw_mode").unwrap_or_else(|| "g".to_string());
+        let file_hw_mode = parse_conf_value(&current_conf, "hw_mode").unwrap_or("g".to_string());
 
         // Get the phy name from the first wireless interface for channel query.
         let phy_name = caps.wireless_interfaces.first().map(|w| w.phy.as_str());
@@ -1788,7 +1788,7 @@ impl LinuxNetworkManager {
             file_channel
         } else if !usable_channels.is_empty() {
             let best = ap_config::select_best_ap_channel(&usable_channels)
-                .unwrap_or_else(|| ap_config::default_channel_for_bands(&supported_bands));
+                .unwrap_or(ap_config::default_channel_for_bands(&supported_bands));
             if file_channel > 0 {
                 warn!(
                     old_channel = file_channel,
@@ -1810,8 +1810,7 @@ impl LinuxNetworkManager {
         }
 
         // ── Rewrite files ──
-        let sta_iface =
-            parse_env_value(&current_env, "STA_IFACE").unwrap_or_else(|| "wlan0".to_string());
+        let sta_iface = parse_env_value(&current_env, "STA_IFACE").unwrap_or("wlan0".to_string());
         let (new_ap_iface, new_exclusive) = if runtime_exclusive {
             (sta_iface.clone(), true)
         } else if mode_changed {
@@ -2145,14 +2144,11 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             // NM Update() replaces ALL settings — GetSettings first, merge our
             // ipv4 changes, then Update.  This preserves WiFi-specific sections
             // (802-11-wireless, 802-11-wireless-security) intact.
-            let mut current = self
-                .get_connection_settings(&settings_ref)
-                .await
-                .ok_or_else(|| {
-                    NetworkError::ConfigError(format!(
-                        "Failed to read existing connection settings for {name}"
-                    ))
-                })?;
+            let mut current = self.get_connection_settings(&settings_ref).await.ok_or(
+                NetworkError::ConfigError(format!(
+                    "Failed to read existing connection settings for {name}"
+                )),
+            )?;
 
             let ipv4_owned = build_ipv4_settings_owned(&config.ip_config, &ip_strings);
             current.insert(nm_dbus::conn::IPV4.to_string(), ipv4_owned);
@@ -2533,7 +2529,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .ip_config
             .as_ref()
             .cloned()
-            .unwrap_or(IpConfig::Dhcp);
+            .unwrap_or(IpConfig::Dhcp {
+                dns: None,
+                search_domains: None,
+            });
         let ip_strings = IpConfigStrings::from_config(&effective_ip_config);
         let ipv4 = build_nm_ipv4_settings(&effective_ip_config, &ip_strings);
         conn_settings.insert(nm_dbus::conn::IPV4, ipv4);
@@ -2757,19 +2756,30 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                             .get(nm_dbus::conn::IPV4)
                             .map(|ipv4_s| parse_settings_dns(ipv4_s))
                             .filter(|d| !d.is_empty());
+                        let search_domains = settings
+                            .get(nm_dbus::conn::IPV4)
+                            .map(|ipv4_s| parse_settings_search_domains(ipv4_s))
+                            .filter(|d| !d.is_empty());
                         IpConfig::Static {
                             config: StaticIpConfig {
                                 ip_address,
                                 prefix_length,
                                 gateway,
                                 dns,
+                                search_domains,
                             },
                         }
                     }
                     nm_dbus::method::DISABLED => IpConfig::Disabled,
-                    _ => IpConfig::Dhcp,
+                    _ => IpConfig::Dhcp {
+                        dns: None,
+                        search_domains: None,
+                    },
                 })
-                .unwrap_or(IpConfig::Dhcp);
+                .unwrap_or(IpConfig::Dhcp {
+                    dns: None,
+                    search_domains: None,
+                });
 
             let is_active = active_uuids.contains(&uuid);
 
@@ -2840,14 +2850,14 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
             if uuid.as_deref() == Some(&request.uuid) {
                 target_path = Some(conn_path.to_string());
-                target_ssid = settings_str(conn_section, nm_dbus::conn::ID)
-                    .unwrap_or_else(|| request.uuid.clone());
+                target_ssid =
+                    settings_str(conn_section, nm_dbus::conn::ID).unwrap_or(request.uuid.clone());
                 break;
             }
         }
 
-        let settings_path = target_path
-            .ok_or_else(|| NetworkError::WifiConnectionNotFound(request.uuid.clone()))?;
+        let settings_path =
+            target_path.ok_or(NetworkError::WifiConnectionNotFound(request.uuid.clone()))?;
 
         // If the connection is currently active, deactivate it first.
         let nm = self.nm_proxy().await?;
@@ -3257,133 +3267,6 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 
         self.ap_status().await
     }
-
-    async fn get_dns(&self) -> NGResult<DnsConfig> {
-        // Aggregate DNS from all activated interfaces.
-        let nm = self.nm_proxy().await?;
-        let devices = nm.get_devices().await.unwrap_or_default();
-        let mut all_dns: Vec<IpAddr> = Vec::new();
-        let all_domains: Vec<String> = Vec::new();
-        let mut method = IpMethod::Dhcp;
-
-        for dev_path in &devices {
-            let dev_path_ref = match ObjectPath::try_from(dev_path.as_str()) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let dev_props = self
-                .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
-                .await
-                .unwrap_or_default();
-
-            let state = prop_u32(&dev_props, nm_dbus::prop::STATE).unwrap_or(0);
-            if state != nm_dbus::device_state::ACTIVATED {
-                continue;
-            }
-
-            if let Ok(ip4) = self.read_ipv4_config(&dev_props).await {
-                for d in &ip4.dns {
-                    if !all_dns.contains(d) {
-                        all_dns.push(*d);
-                    }
-                }
-                if ip4.method == IpMethod::Static {
-                    method = IpMethod::Static;
-                }
-            }
-        }
-
-        Ok(DnsConfig {
-            servers: all_dns,
-            search_domains: all_domains,
-            mode: method,
-        })
-    }
-
-    async fn configure_dns(&self, config: &ConfigureDnsRequest) -> NGResult<()> {
-        info!(servers = ?config.servers, "Configuring global DNS");
-
-        // NM global DNS is set via the main NM settings.
-        // The simplest approach: update the first active wired connection's DNS.
-        let nm = self.nm_proxy().await?;
-        let devices = nm
-            .get_devices()
-            .await
-            .map_err(|e| NetworkError::DBusError(format!("GetDevices failed: {e}")))?;
-
-        // Find first activated ethernet device.
-        for dev_path in &devices {
-            let dev_path_ref = match ObjectPath::try_from(dev_path.as_str()) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let dev_props = self
-                .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
-                .await
-                .unwrap_or_default();
-
-            let device_type = prop_u32(&dev_props, nm_dbus::prop::DEVICE_TYPE).unwrap_or(0);
-            let state = prop_u32(&dev_props, nm_dbus::prop::STATE).unwrap_or(0);
-            let iface_name = prop_str(&dev_props, nm_dbus::prop::INTERFACE).unwrap_or_default();
-
-            if device_type != nm_dbus::device_type::ETHERNET
-                || state != nm_dbus::device_state::ACTIVATED
-            {
-                continue;
-            }
-
-            // Preserve the current IP method so we don't accidentally
-            // switch a static-IP interface to DHCP.
-            let current_ip4 = self.read_ipv4_config(&dev_props).await.ok();
-            let current_method = current_ip4
-                .as_ref()
-                .map(|c| c.method)
-                .unwrap_or(IpMethod::Dhcp);
-
-            let dns_list: Vec<IpAddr> = config
-                .servers
-                .iter()
-                .filter_map(|s| s.to_string().parse::<IpAddr>().ok())
-                .collect();
-
-            let ip_config = if current_method == IpMethod::Static {
-                let addr = current_ip4
-                    .as_ref()
-                    .and_then(|c| c.addresses.first())
-                    .map(|a| a.address)
-                    .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                let prefix = current_ip4
-                    .as_ref()
-                    .and_then(|c| c.addresses.first())
-                    .map(|a| a.prefix_length)
-                    .unwrap_or(24);
-                let gw = current_ip4.as_ref().and_then(|c| c.gateway);
-                IpConfig::Static {
-                    config: StaticIpConfig {
-                        ip_address: addr,
-                        prefix_length: prefix,
-                        gateway: gw,
-                        dns: if dns_list.is_empty() {
-                            None
-                        } else {
-                            Some(dns_list)
-                        },
-                    },
-                }
-            } else {
-                IpConfig::Dhcp
-            };
-
-            let apply_config = ConfigureInterfaceRequest { ip_config };
-
-            return self.configure_interface(&iface_name, &apply_config).await;
-        }
-
-        Err(NetworkError::DnsError(
-            "No active ethernet interface found to apply DNS configuration".to_string(),
-        )
-        .into())
-    }
 }
 
 // ─── Helper Functions ───
@@ -3438,11 +3321,32 @@ fn build_ipv4_settings_owned(
 ) -> HashMap<String, OwnedValue> {
     let mut ipv4: HashMap<String, OwnedValue> = HashMap::new();
     match ip_config {
-        IpConfig::Dhcp => {
+        IpConfig::Dhcp {
+            dns,
+            search_domains,
+        } => {
             ipv4.insert(
                 nm_dbus::conn::METHOD.to_string(),
                 to_owned_value(Value::from(nm_dbus::method::AUTO)),
             );
+            if let Some(dns_addrs) = dns {
+                let dns_u32s = ip_addrs_to_nm_dns(dns_addrs);
+                if !dns_u32s.is_empty() {
+                    ipv4.insert(
+                        nm_dbus::conn::DNS.to_string(),
+                        to_owned_value(Value::from(dns_u32s)),
+                    );
+                }
+            }
+            if let Some(domains) = search_domains {
+                if !domains.is_empty() {
+                    let domain_strs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
+                    ipv4.insert(
+                        nm_dbus::conn::DNS_SEARCH.to_string(),
+                        to_owned_value(Value::from(domain_strs)),
+                    );
+                }
+            }
         }
         IpConfig::Static { config: sc } => {
             ipv4.insert(
@@ -3474,6 +3378,16 @@ fn build_ipv4_settings_owned(
                     to_owned_value(Value::from(dns_u32s)),
                 );
             }
+
+            if let Some(domains) = &sc.search_domains {
+                if !domains.is_empty() {
+                    let domain_strs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
+                    ipv4.insert(
+                        nm_dbus::conn::DNS_SEARCH.to_string(),
+                        to_owned_value(Value::from(domain_strs)),
+                    );
+                }
+            }
         }
         IpConfig::Disabled => {
             ipv4.insert(
@@ -3497,8 +3411,23 @@ fn build_nm_ipv4_settings<'a>(
 ) -> HashMap<&'a str, Value<'a>> {
     let mut ipv4: HashMap<&str, Value<'_>> = HashMap::new();
     match ip_config {
-        IpConfig::Dhcp => {
+        IpConfig::Dhcp {
+            dns,
+            search_domains,
+        } => {
             ipv4.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
+            if let Some(dns_addrs) = dns {
+                let dns_u32s = ip_addrs_to_nm_dns(dns_addrs);
+                if !dns_u32s.is_empty() {
+                    ipv4.insert(nm_dbus::conn::DNS, Value::from(dns_u32s));
+                }
+            }
+            if let Some(domains) = search_domains {
+                if !domains.is_empty() {
+                    let domain_strs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
+                    ipv4.insert(nm_dbus::conn::DNS_SEARCH, Value::from(domain_strs));
+                }
+            }
         }
         IpConfig::Static { config: sc } => {
             ipv4.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::MANUAL));
@@ -3518,6 +3447,13 @@ fn build_nm_ipv4_settings<'a>(
             let dns_u32s: Vec<u32> = ip_addrs_to_nm_dns(sc.dns.as_deref().unwrap_or_default());
             if !dns_u32s.is_empty() {
                 ipv4.insert(nm_dbus::conn::DNS, Value::from(dns_u32s));
+            }
+
+            if let Some(domains) = &sc.search_domains {
+                if !domains.is_empty() {
+                    let domain_strs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
+                    ipv4.insert(nm_dbus::conn::DNS_SEARCH, Value::from(domain_strs));
+                }
             }
         }
         IpConfig::Disabled => {
@@ -3584,6 +3520,21 @@ fn parse_settings_dns(ipv4_section: &HashMap<String, OwnedValue>) -> Vec<IpAddr>
                 .ok()
                 .map(|n| IpAddr::V4(Ipv4Addr::from(u32::from_ne_bytes(n.to_ne_bytes()))))
         })
+        .collect()
+}
+
+/// Parse DNS search domains from NM connection settings (ipv4 section).
+///
+/// NM stores search domains in the `dns-search` key as `Array<String>`.
+fn parse_settings_search_domains(ipv4_section: &HashMap<String, OwnedValue>) -> Vec<String> {
+    let Some(val) = ipv4_section.get(nm_dbus::conn::DNS_SEARCH) else {
+        return Vec::new();
+    };
+    let Ok(arr) = val.downcast_ref::<&zbus::zvariant::Array>() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| item.downcast_ref::<&str>().ok().map(|s| s.to_string()))
         .collect()
 }
 
@@ -3843,6 +3794,22 @@ fn parse_nm_ip4_nameservers(props: &HashMap<String, OwnedValue>) -> Vec<IpAddr> 
     }
 
     result
+}
+
+/// Parse DNS search domains from the active NM IP4Config object.
+///
+/// NM exposes `Searches` as `Array<String>` on the `Ip4Config` D-Bus interface.
+#[inline]
+fn parse_nm_ip4_search_domains(props: &HashMap<String, OwnedValue>) -> Vec<String> {
+    let Some(val) = props.get(nm_dbus::prop::SEARCHES) else {
+        return Vec::new();
+    };
+    let Ok(arr) = val.downcast_ref::<&zbus::zvariant::Array>() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| item.downcast_ref::<&str>().ok().map(|s| s.to_string()))
+        .collect()
 }
 
 /// Parse NM IP6Config AddressData property.

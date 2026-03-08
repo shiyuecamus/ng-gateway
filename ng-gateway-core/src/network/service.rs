@@ -9,10 +9,10 @@ use crate::network::ap_manager::ApServiceManager;
 use crate::network::platform::{self, PlatformNetworkManager};
 use ng_gateway_error::NGResult;
 use ng_gateway_models::domain::prelude::{
-    ApStatus, ConfigureApRequest, ConfigureDnsRequest, ConfigureInterfaceRequest, DnsConfig,
-    ForgetWifiRequest, InterfaceKind, LinkState, NetworkCapabilities, NetworkInterfaceDetail,
-    NetworkInterfaceSummary, SavedWifiConnection, WifiAccessPoint, WifiConnectPreflight,
-    WifiConnectRequest, WifiDisconnectRequest, WifiStaStatus, WiredStatus,
+    ApStatus, ConfigureApRequest, ConfigureInterfaceRequest, ForgetWifiRequest, InterfaceKind,
+    LinkState, NetworkCapabilities, NetworkInterfaceDetail, NetworkInterfaceSummary,
+    SavedWifiConnection, WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest,
+    WifiDisconnectRequest, WifiScanResult, WifiScanStatus, WifiStaStatus, WiredStatus,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -176,6 +176,21 @@ impl NetworkService {
         self.manager.scan_wifi(interface_name).await
     }
 
+    /// Scan for Wi-Fi access points with diagnostic status.
+    pub async fn scan_wifi_result(&self, interface_name: Option<&str>) -> WifiScanResult {
+        match self.manager.scan_wifi(interface_name).await {
+            Ok(access_points) => classify_wifi_scan_result(access_points),
+            Err(error) => {
+                let message = error.to_string();
+                WifiScanResult {
+                    access_points: Vec::new(),
+                    status: infer_wifi_scan_status(&message),
+                    message: Some(message),
+                }
+            }
+        }
+    }
+
     /// Pre-flight check for Wi-Fi connect — returns side-effect info for the frontend.
     #[inline]
     pub async fn wifi_connect_preflight(
@@ -246,20 +261,6 @@ impl NetworkService {
         self.manager.configure_ap(config).await
     }
 
-    // ─── DNS ───
-
-    /// Get current DNS configuration.
-    #[inline]
-    pub async fn get_dns(&self) -> NGResult<DnsConfig> {
-        self.manager.get_dns().await
-    }
-
-    /// Set DNS configuration.
-    #[inline]
-    pub async fn configure_dns(&self, config: &ConfigureDnsRequest) -> NGResult<()> {
-        self.manager.configure_dns(config).await
-    }
-
     /// Check AP service status on startup (Linux only).
     ///
     /// The AP hotspot may have been started by `ng-gateway-ap-auto.service`
@@ -293,4 +294,38 @@ impl NetworkService {
             }
         }
     }
+}
+
+fn classify_wifi_scan_result(access_points: Vec<WifiAccessPoint>) -> WifiScanResult {
+    WifiScanResult {
+        access_points,
+        status: WifiScanStatus::Ready,
+        message: None,
+    }
+}
+
+fn infer_wifi_scan_status(message: &str) -> WifiScanStatus {
+    let lower = message.to_lowercase();
+
+    if lower.contains("location services")
+        || lower.contains("location permission")
+        || lower.contains("permission")
+        || lower.contains("access denied")
+    {
+        return WifiScanStatus::PermissionRequired;
+    }
+
+    if lower.contains("current process context") || lower.contains("unsupported context") {
+        return WifiScanStatus::UnsupportedContext;
+    }
+
+    if lower.contains("platform restriction")
+        || lower.contains("platform restricted")
+        || lower.contains("recent macos restrictions")
+        || lower.contains("system policy")
+    {
+        return WifiScanStatus::PlatformRestricted;
+    }
+
+    WifiScanStatus::Failed
 }

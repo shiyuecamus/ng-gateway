@@ -6,17 +6,19 @@
 //! # Notes
 //! The actual host-side dynamic loader lives in `ng-gateway-core`.
 
+use crate::{BinaryArch, BinaryOsType, NorthwardError, PluginConfigSchemas};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::{
     ensure_current_platform_from_path, inspect_binary,
     sdk::{sdk_api_version, SDK_VERSION},
-    BinaryArch, BinaryOsType, NorthwardError, PluginConfigSchemas,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     ffi::CStr,
     os::raw::{c_char, c_uchar},
-    path::Path,
 };
+use std::path::Path;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use libloading::{Library, Symbol};
@@ -42,6 +44,7 @@ pub struct NorthwardProbeInfo {
     pub os_arch: BinaryArch,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[inline]
 fn read_cstr(ptr: *const c_char, label: &str, path: &Path) -> Result<String, NorthwardError> {
     if ptr.is_null() {

@@ -6,17 +6,19 @@
 //! # Notes
 //! The actual host-side dynamic loader lives in `ng-gateway-core`.
 
+use crate::{BinaryArch, BinaryOsType, DriverError, DriverResult, DriverSchemas};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::{
     ensure_current_platform_from_path, inspect_binary,
     sdk::{sdk_api_version, SDK_VERSION},
-    BinaryArch, BinaryOsType, DriverError, DriverResult, DriverSchemas,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     ffi::CStr,
     os::raw::{c_char, c_uchar},
-    path::Path,
 };
+use std::path::Path;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use libloading::{Library, Symbol};
@@ -42,6 +44,7 @@ pub struct DriverProbeInfo {
     pub os_arch: BinaryArch,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[inline]
 fn read_cstr(ptr: *const c_char, label: &str, path: &Path) -> DriverResult<String> {
     if ptr.is_null() {

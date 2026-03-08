@@ -75,6 +75,8 @@ pub mod prop {
     pub const GATEWAY: &str = "Gateway";
     pub const ADDRESS_DATA: &str = "AddressData";
     pub const NAMESERVER_DATA: &str = "NameserverData";
+    /// DNS search domains from the active IP4Config/IP6Config object.
+    pub const SEARCHES: &str = "Searches";
 
     // ─── Dict keys inside AddressData / NameserverData entries ───
     pub const ADDR_KEY_ADDRESS: &str = "address";
@@ -120,6 +122,9 @@ pub mod conn {
     /// Note: `dns-data` (the `aa{sv}` variant) is read-only in GetSettings output
     /// and is **rejected** by Update — always use `dns` for writes.
     pub const DNS: &str = "dns";
+
+    /// DNS search domains key in ipv4/ipv6 connection settings.
+    pub const DNS_SEARCH: &str = "dns-search";
 
     // ─── "connection" group keys (continued) ───
     pub const UUID: &str = "uuid";

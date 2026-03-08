@@ -151,9 +151,11 @@ pre-build = [
 #     "rm -rf /var/lib/apt/lists/*",
 # ]
 
-# Windows (GNU) targets - built via mingw in Linux containers
+# Windows (GNU) targets - built via mingw in Linux containers.
+# NOTE: If cross fails with GLIBC_2.28/2.29 not found, try `:main` image or
+# use native: `rustup target add x86_64-pc-windows-gnu` + `brew install mingw-w64`.
 [target.x86_64-pc-windows-gnu]
-image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu@sha256:8ba72a5491168af78e52f453f09d204cee330ff09a0323d4188a6efe1f59cfbd"
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:main"
 
 [target.i686-pc-windows-gnu]
 image = "ghcr.io/cross-rs/i686-pc-windows-gnu@sha256:c4b541d5baa76a1f13390850ad65ac5daa811c701842802b655edb3eb832c575"

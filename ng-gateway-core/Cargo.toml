@@ -101,3 +101,42 @@ workspace = true
 # Config loading (Linux only) — for AP hotspot default config generation from gateway.toml
 [target.'cfg(target_os = "linux")'.dependencies.config]
 workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_NetworkManagement_WiFi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreWLAN: Wi-Fi STA status, connect, disconnect, scan, saved networks, power management
+objc2-core-wlan = { version = "0.3", features = [
+    "CWWiFiClient",
+    "CWInterface",
+    "CWNetwork",
+    "CWChannel",
+    "CWConfiguration",
+    "CWNetworkProfile",
+    "CoreWLANTypes",
+] }
+# Foundation: NSString, NSArray, NSSet, NSData, NSError interop for ObjC bridge
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSArray",
+    "NSSet",
+    "NSData",
+    "NSError",
+    "NSObjCRuntime",
+    "NSObject",
+    "NSEnumerator",
+    "NSOrderedSet",
+] }
+# objc2 runtime: core ObjC messaging, memory management
+objc2 = "0.6"
+# SystemConfiguration: BSD-interface → network-service mapping, IP/DNS/Gateway reading
+# NOTE: system-configuration 0.7 re-exports core-foundation 0.9 types.
+# Do NOT add an explicit core-foundation dep — use the re-export to avoid version conflicts.
+system-configuration = "0.7"
