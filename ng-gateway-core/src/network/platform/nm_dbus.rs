@@ -113,7 +113,13 @@ pub mod conn {
     // ─── IP group keys ───
     pub const METHOD: &str = "method";
     pub const ADDRESS_DATA: &str = "address-data";
-    pub const DNS_DATA: &str = "dns-data";
+    pub const GATEWAY: &str = "gateway";
+    /// DNS servers as `Array<UInt32>` (IPv4 addresses in network byte order).
+    ///
+    /// This is the canonical key accepted by `Settings.Connection.Update()`.
+    /// Note: `dns-data` (the `aa{sv}` variant) is read-only in GetSettings output
+    /// and is **rejected** by Update — always use `dns` for writes.
+    pub const DNS: &str = "dns";
 
     // ─── "connection" group keys (continued) ───
     pub const UUID: &str = "uuid";

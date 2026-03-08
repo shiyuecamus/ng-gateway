@@ -29,7 +29,7 @@ use ng_gateway_models::domain::prelude::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     time::Duration,
 };
 use tokio::{sync::RwLock, time::sleep};
@@ -580,9 +580,28 @@ impl LinuxNetworkManager {
 
     /// Find an existing NM connection profile (settings path) for the given interface.
     ///
-    /// Queries the device's active connection first; if none, searches all saved
-    /// connections for one bound to this interface name.
+    /// Two-tier lookup:
+    /// 1. **Active connection** — fast O(1) read from the device's `ActiveConnection`
+    ///    D-Bus property. Sufficient when the device is in `ACTIVATED` state.
+    /// 2. **Saved profiles** — enumerate `Settings.ListConnections`, filter by
+    ///    `connection.interface-name`, and pick the most recently used profile
+    ///    (highest `connection.timestamp`). Handles transient NM states where the
+    ///    active connection object is unavailable (DHCP renegotiation, state
+    ///    transitions, etc.).
     async fn find_connection_for_interface(&self, iface_name: &str) -> Option<String> {
+        if let Some(path) = self.find_active_connection_for_device(iface_name).await {
+            return Some(path);
+        }
+
+        debug!(
+            interface = iface_name,
+            "No active connection, searching saved profiles"
+        );
+        self.find_saved_connection_for_interface(iface_name).await
+    }
+
+    /// Tier-1: resolve settings path from the device's current active connection.
+    async fn find_active_connection_for_device(&self, iface_name: &str) -> Option<String> {
         let nm = self.nm_proxy().await.ok()?;
         let device_path = nm.get_device_by_ip_iface(iface_name).await.ok()?;
         let dev_path_ref = ObjectPath::try_from(device_path.as_str()).ok()?;
@@ -591,7 +610,6 @@ impl LinuxNetworkManager {
             .await
             .ok()?;
 
-        // Check if there's an active connection on this device.
         let active_conn_path = prop_object_path(&dev_props, nm_dbus::prop::ACTIVE_CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")?;
 
@@ -603,6 +621,68 @@ impl LinuxNetworkManager {
 
         prop_object_path(&active_props, nm_dbus::prop::CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")
+    }
+
+    /// Tier-2: search all saved NM profiles by `connection.interface-name`.
+    ///
+    /// When multiple profiles match (e.g. a WiFi interface that has connected to
+    /// several networks), picks the one with the highest `connection.timestamp`
+    /// (most recently used).
+    async fn find_saved_connection_for_interface(&self, iface_name: &str) -> Option<String> {
+        let conn_paths: Vec<OwnedObjectPath> = self
+            .dbus_conn
+            .call_method(
+                Some(nm_dbus::iface::NM),
+                nm_dbus::settings_path::ROOT,
+                Some(nm_dbus::iface::SETTINGS),
+                nm_dbus::dbus_method::LIST_CONNECTIONS,
+                &(),
+            )
+            .await
+            .ok()?
+            .body()
+            .deserialize::<Vec<OwnedObjectPath>>()
+            .ok()?;
+
+        let mut best: Option<(String, u64)> = None;
+
+        for conn_path in &conn_paths {
+            let conn_ref = match ObjectPath::try_from(conn_path.as_str()) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let settings = match self.get_connection_settings(&conn_ref).await {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let conn_section = match settings.get(nm_dbus::conn::CONNECTION) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if settings_str(conn_section, nm_dbus::conn::INTERFACE_NAME).as_deref()
+                != Some(iface_name)
+            {
+                continue;
+            }
+
+            let ts = settings_u64(conn_section, nm_dbus::conn::TIMESTAMP).unwrap_or(0);
+            if best.as_ref().map_or(true, |(_, prev_ts)| ts > *prev_ts) {
+                best = Some((conn_path.to_string(), ts));
+            }
+        }
+
+        if let Some((ref path, _)) = best {
+            debug!(
+                interface = iface_name,
+                path = %path,
+                "Found saved connection profile"
+            );
+        }
+
+        best.map(|(path, _)| path)
     }
 
     /// Stash the current active STA connection for later restore (exclusive mode only).
@@ -1512,7 +1592,6 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .await
             .map_err(|_| NetworkError::InterfaceNotFound(name.to_string()))?;
 
-        // Detect device type to set the correct connection.type.
         let dev_path_ref = ObjectPath::try_from(device_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
         let dev_props = self
@@ -1520,44 +1599,24 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .await
             .unwrap_or_default();
         let device_type = prop_u32(&dev_props, nm_dbus::prop::DEVICE_TYPE).unwrap_or(0);
-        let conn_type = if device_type == nm_dbus::device_type::WIFI {
-            nm_dbus::conn::WIFI
-        } else {
-            nm_dbus::conn::ETHERNET
-        };
+        let is_wifi = device_type == nm_dbus::device_type::WIFI;
 
-        let conn_id = format!("{name}-config");
         let ip_strings = IpConfigStrings::from_config(&config.ip_config);
 
-        let build_settings = || -> HashMap<&str, HashMap<&str, Value<'_>>> {
-            let mut conn_settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
-
-            let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
-            connection.insert(nm_dbus::conn::ID, Value::from(conn_id.as_str()));
-            connection.insert(nm_dbus::conn::TYPE, Value::from(conn_type));
-            connection.insert(nm_dbus::conn::INTERFACE_NAME, Value::from(name));
-            connection.insert(nm_dbus::conn::AUTOCONNECT, Value::from(true));
-            conn_settings.insert(nm_dbus::conn::CONNECTION, connection);
-
-            let ipv4 = build_nm_ipv4_settings(&config.ip_config, &ip_strings);
-            conn_settings.insert(nm_dbus::conn::IPV4, ipv4);
-
-            let mut ipv6: HashMap<&str, Value<'_>> = HashMap::new();
-            ipv6.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
-            conn_settings.insert(nm_dbus::conn::IPV6, ipv6);
-
-            conn_settings
-        };
-
+        // ── Path A: update an existing connection profile ──
+        //
+        // For WiFi this is the *only* valid path — a bare WiFi connection without
+        // SSID/security is invalid.  For wired interfaces this is the preferred
+        // path when a profile already exists.
         if let Some(settings_path) = self.find_connection_for_interface(name).await {
             debug!(interface = name, path = %settings_path, "Updating existing NM connection");
 
-            // NM Update() replaces ALL settings — we must GetSettings first, merge
-            // our ipv4 changes, then Update. This preserves WiFi-specific sections
-            // (802-11-wireless SSID, 802-11-wireless-security) that would otherwise
-            // be wiped, causing the connection to become invalid.
             let settings_ref = ObjectPath::try_from(settings_path.as_str())
                 .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
+
+            // NM Update() replaces ALL settings — GetSettings first, merge our
+            // ipv4 changes, then Update.  This preserves WiFi-specific sections
+            // (802-11-wireless, 802-11-wireless-security) intact.
             let mut current = self
                 .get_connection_settings(&settings_ref)
                 .await
@@ -1567,12 +1626,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                     ))
                 })?;
 
-            // Merge ipv4 settings into the existing connection profile.
             let ipv4_owned = build_ipv4_settings_owned(&config.ip_config, &ip_strings);
             current.insert(nm_dbus::conn::IPV4.to_string(), ipv4_owned);
 
-            if let Err(e) = self
-                .dbus_conn
+            self.dbus_conn
                 .call_method(
                     Some(nm_dbus::iface::NM),
                     settings_path.as_str(),
@@ -1581,34 +1638,34 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                     &(current,),
                 )
                 .await
-            {
-                warn!(error = %e, "Failed to update existing connection, falling back to AddAndActivate");
-            } else {
-                let device_ref = ObjectPath::try_from(device_path.as_str())
-                    .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
-                let root = ObjectPath::try_from("/")
-                    .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
+                .map_err(|e| {
+                    NetworkError::ConfigError(format!(
+                        "Failed to update connection profile for {name}: {e}"
+                    ))
+                })?;
 
-                nm.activate_connection(&settings_ref, &device_ref, &root)
-                    .await
-                    .map_err(|e| {
-                        NetworkError::ConfigError(format!(
-                            "Failed to reactivate connection for {name}: {e}"
-                        ))
-                    })?;
+            let device_ref = ObjectPath::try_from(device_path.as_str())
+                .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
+            let root = ObjectPath::try_from("/")
+                .map_err(|e| NetworkError::DBusError(format!("Invalid path: {e}")))?;
 
-                info!(
-                    interface = name,
-                    "Interface configuration updated and reactivated"
-                );
-                return Ok(());
-            }
+            nm.activate_connection(&settings_ref, &device_ref, &root)
+                .await
+                .map_err(|e| {
+                    NetworkError::ConfigError(format!(
+                        "Failed to reactivate connection for {name}: {e}"
+                    ))
+                })?;
+
+            info!(
+                interface = name,
+                "Interface configuration updated and reactivated"
+            );
+            return Ok(());
         }
 
-        // For WiFi interfaces, we must have an existing connection to update
-        // (the one that originally connected). Creating a bare WiFi connection
-        // without SSID/security would fail.
-        if device_type == nm_dbus::device_type::WIFI {
+        // ── Path B: WiFi with no saved profile — hard reject ──
+        if is_wifi {
             return Err(NetworkError::ConfigError(format!(
                 "No existing connection profile found for WiFi interface '{name}'. \
                  Connect to a WiFi network first, then configure its IP settings."
@@ -1616,14 +1673,30 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .into());
         }
 
-        // Fallback: create a new connection (first time configuration for wired interfaces).
-        let settings = build_settings();
+        // ── Path C: wired first-time configuration — create new profile ──
+        let conn_id = format!("{name}-config");
+        let mut conn_settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
+
+        let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
+        connection.insert(nm_dbus::conn::ID, Value::from(conn_id.as_str()));
+        connection.insert(nm_dbus::conn::TYPE, Value::from(nm_dbus::conn::ETHERNET));
+        connection.insert(nm_dbus::conn::INTERFACE_NAME, Value::from(name));
+        connection.insert(nm_dbus::conn::AUTOCONNECT, Value::from(true));
+        conn_settings.insert(nm_dbus::conn::CONNECTION, connection);
+
+        let ipv4 = build_nm_ipv4_settings(&config.ip_config, &ip_strings);
+        conn_settings.insert(nm_dbus::conn::IPV4, ipv4);
+
+        let mut ipv6: HashMap<&str, Value<'_>> = HashMap::new();
+        ipv6.insert(nm_dbus::conn::METHOD, Value::from(nm_dbus::method::AUTO));
+        conn_settings.insert(nm_dbus::conn::IPV6, ipv6);
+
         let device_path_ref = ObjectPath::try_from(device_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
         let root_path = ObjectPath::try_from("/")
             .map_err(|e| NetworkError::DBusError(format!("Invalid root path: {e}")))?;
 
-        nm.add_and_activate_connection(settings, &device_path_ref, &root_path)
+        nm.add_and_activate_connection(conn_settings, &device_path_ref, &root_path)
             .await
             .map_err(|e| {
                 NetworkError::ConfigError(format!("Failed to apply configuration for {name}: {e}"))
@@ -1641,11 +1714,27 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
 
-        // Trigger a scan.
+        // Guard: check device state before attempting scan.
+        // When the wireless device is UNAVAILABLE (e.g. hostapd holds the radio in
+        // AP mode) or UNMANAGED, NM will reject RequestScan with NotAllowed.
+        // Return an empty list instead of propagating a confusing error to the caller.
+        let dev_props = self
+            .get_all_properties(&dev_path_ref, nm_dbus::iface::DEVICE)
+            .await
+            .unwrap_or_default();
+        let dev_state = prop_u32(&dev_props, nm_dbus::prop::STATE).unwrap_or(0);
+
+        if dev_state < nm_dbus::device_state::DISCONNECTED {
+            debug!(
+                state = dev_state,
+                "Wi-Fi device not ready for scanning (UNAVAILABLE/UNMANAGED), returning empty list"
+            );
+            return Ok(Vec::new());
+        }
+
         let scan_options: HashMap<&str, Value<'_>> = HashMap::new();
         let wireless_iface = nm_dbus::iface::DEVICE_WIRELESS;
 
-        // Call RequestScan
         let proxy = self.props_proxy(&dev_path_ref).await?;
         let _: () = proxy
             .inner()
@@ -2134,11 +2223,11 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                             ));
                         let gateway = settings
                             .get(nm_dbus::conn::IPV4)
-                            .and_then(|ipv4_s| settings_str(ipv4_s, "gateway"))
+                            .and_then(|ipv4_s| settings_str(ipv4_s, nm_dbus::conn::GATEWAY))
                             .and_then(|g| g.parse::<IpAddr>().ok());
                         let dns = settings
                             .get(nm_dbus::conn::IPV4)
-                            .map(|ipv4_s| parse_settings_dns_data(ipv4_s))
+                            .map(|ipv4_s| parse_settings_dns(ipv4_s))
                             .filter(|d| !d.is_empty());
                         IpConfig::Static {
                             config: StaticIpConfig {
@@ -2777,7 +2866,6 @@ impl PlatformNetworkManager for LinuxNetworkManager {
 struct IpConfigStrings {
     addr_str: Option<String>,
     gw_str: Option<String>,
-    dns_strings: Vec<String>,
 }
 
 impl IpConfigStrings {
@@ -2786,19 +2874,23 @@ impl IpConfigStrings {
             IpConfig::Static { config: sc } => Self {
                 addr_str: Some(sc.ip_address.to_string()),
                 gw_str: sc.gateway.as_ref().map(|g| g.to_string()),
-                dns_strings: sc
-                    .dns
-                    .as_ref()
-                    .map(|list| list.iter().map(|d| d.to_string()).collect())
-                    .unwrap_or_default(),
             },
             _ => Self {
                 addr_str: None,
                 gw_str: None,
-                dns_strings: Vec::new(),
             },
         }
     }
+}
+
+/// Infallible `Value<'_>` → `OwnedValue` conversion.
+///
+/// `OwnedValue::try_from(Value)` only fails for fd-passing variants which we
+/// never construct. This helper avoids scattering `.unwrap()` across the
+/// settings builders while keeping the code honest about the invariant.
+#[inline]
+fn to_owned_value(v: Value<'_>) -> OwnedValue {
+    OwnedValue::try_from(v).expect("BUG: Value→OwnedValue conversion failed for non-fd variant")
 }
 
 /// Build NM IPv4 settings as `HashMap<String, OwnedValue>` for merging into
@@ -2816,13 +2908,13 @@ fn build_ipv4_settings_owned(
         IpConfig::Dhcp => {
             ipv4.insert(
                 nm_dbus::conn::METHOD.to_string(),
-                OwnedValue::try_from(Value::from(nm_dbus::method::AUTO)).unwrap(),
+                to_owned_value(Value::from(nm_dbus::method::AUTO)),
             );
         }
         IpConfig::Static { config: sc } => {
             ipv4.insert(
                 nm_dbus::conn::METHOD.to_string(),
-                OwnedValue::try_from(Value::from(nm_dbus::method::MANUAL)).unwrap(),
+                to_owned_value(Value::from(nm_dbus::method::MANUAL)),
             );
 
             if let Some(ip_s) = strings.addr_str.as_deref() {
@@ -2837,30 +2929,25 @@ fn build_ipv4_settings_owned(
 
             if let Some(gw) = strings.gw_str.as_deref() {
                 ipv4.insert(
-                    "gateway".to_string(),
-                    OwnedValue::try_from(Value::from(gw)).unwrap(),
+                    nm_dbus::conn::GATEWAY.to_string(),
+                    to_owned_value(Value::from(gw)),
                 );
             }
 
-            if !strings.dns_strings.is_empty() {
-                let dns_data: Vec<HashMap<&str, Value<'_>>> = strings
-                    .dns_strings
-                    .iter()
-                    .map(|d| {
-                        let mut m: HashMap<&str, Value<'_>> = HashMap::new();
-                        m.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(d.as_str()));
-                        m
-                    })
-                    .collect();
-                if let Ok(v) = OwnedValue::try_from(Value::from(dns_data)) {
-                    ipv4.insert(nm_dbus::conn::DNS_DATA.to_string(), v);
-                }
+            let dns_u32s: Vec<u32> = ip_addrs_to_nm_dns(
+                sc.dns.as_deref().unwrap_or_default(),
+            );
+            if !dns_u32s.is_empty() {
+                ipv4.insert(
+                    nm_dbus::conn::DNS.to_string(),
+                    to_owned_value(Value::from(dns_u32s)),
+                );
             }
         }
         IpConfig::Disabled => {
             ipv4.insert(
                 nm_dbus::conn::METHOD.to_string(),
-                OwnedValue::try_from(Value::from(nm_dbus::method::DISABLED)).unwrap(),
+                to_owned_value(Value::from(nm_dbus::method::DISABLED)),
             );
         }
     }
@@ -2869,9 +2956,9 @@ fn build_ipv4_settings_owned(
 
 /// Build NM D-Bus IPv4 settings dict from the unified [`IpConfig`] enum.
 ///
-/// Shared between `configure_interface` and `connect_wifi` to eliminate
-/// duplicated IP configuration logic. The `strings` parameter must be
-/// pre-computed via [`IpConfigStrings::from_config`] and must outlive the
+/// Shared between `configure_interface` (path C) and `connect_wifi` to
+/// eliminate duplicated IP configuration logic. The `strings` parameter must
+/// be pre-computed via [`IpConfigStrings::from_config`] and must outlive the
 /// returned `HashMap`.
 fn build_nm_ipv4_settings<'a>(
     ip_config: &'a IpConfig,
@@ -2894,20 +2981,14 @@ fn build_nm_ipv4_settings<'a>(
             }
 
             if let Some(gw) = strings.gw_str.as_deref() {
-                ipv4.insert("gateway", Value::from(gw));
+                ipv4.insert(nm_dbus::conn::GATEWAY, Value::from(gw));
             }
 
-            if !strings.dns_strings.is_empty() {
-                let dns_data: Vec<HashMap<&str, Value<'_>>> = strings
-                    .dns_strings
-                    .iter()
-                    .map(|d| {
-                        let mut m: HashMap<&str, Value<'_>> = HashMap::new();
-                        m.insert(nm_dbus::prop::ADDR_KEY_ADDRESS, Value::from(d.as_str()));
-                        m
-                    })
-                    .collect();
-                ipv4.insert(nm_dbus::conn::DNS_DATA, Value::from(dns_data));
+            let dns_u32s: Vec<u32> = ip_addrs_to_nm_dns(
+                sc.dns.as_deref().unwrap_or_default(),
+            );
+            if !dns_u32s.is_empty() {
+                ipv4.insert(nm_dbus::conn::DNS, Value::from(dns_u32s));
             }
         }
         IpConfig::Disabled => {
@@ -2956,25 +3037,38 @@ fn parse_settings_address_data(ipv4_section: &HashMap<String, OwnedValue>) -> Op
     Some((address, prefix))
 }
 
-/// Parse `dns-data` from NM connection settings (ipv4 section).
-fn parse_settings_dns_data(ipv4_section: &HashMap<String, OwnedValue>) -> Vec<IpAddr> {
-    let mut result = Vec::new();
-    let Some(dns_data) = ipv4_section.get(nm_dbus::conn::DNS_DATA) else {
-        return result;
+/// Parse DNS servers from NM connection settings (ipv4 section).
+///
+/// NM stores DNS in the `dns` key as `Array<UInt32>` — each entry is an IPv4
+/// address in **network byte order** (little-endian on LE hosts due to how NM
+/// internally stores `in_addr`).
+fn parse_settings_dns(ipv4_section: &HashMap<String, OwnedValue>) -> Vec<IpAddr> {
+    let Some(dns_val) = ipv4_section.get(nm_dbus::conn::DNS) else {
+        return Vec::new();
     };
-    let Ok(arr) = dns_data.downcast_ref::<&zbus::zvariant::Array>() else {
-        return result;
+    let Ok(arr) = dns_val.downcast_ref::<&zbus::zvariant::Array>() else {
+        return Vec::new();
     };
-    for item in arr.iter() {
-        if let Ok(dict) = item.downcast_ref::<&zbus::zvariant::Dict>() {
-            if let Some(addr) = dict_lookup_str(dict, nm_dbus::prop::ADDR_KEY_ADDRESS)
-                .and_then(|s| s.parse::<IpAddr>().ok())
-            {
-                result.push(addr);
-            }
-        }
-    }
-    result
+    arr.iter()
+        .filter_map(|item| {
+            item.downcast_ref::<u32>()
+                .ok()
+                .map(|n| IpAddr::V4(Ipv4Addr::from(u32::from_ne_bytes(n.to_ne_bytes()))))
+        })
+        .collect()
+}
+
+/// Convert `IpAddr` slice to NM's `dns` format (`Array<UInt32>`, network byte order).
+///
+/// IPv6 addresses are silently skipped — NM's `ipv4.dns` only accepts v4.
+fn ip_addrs_to_nm_dns(addrs: &[IpAddr]) -> Vec<u32> {
+    addrs
+        .iter()
+        .filter_map(|addr| match addr {
+            IpAddr::V4(v4) => Some(u32::from_ne_bytes(v4.octets())),
+            IpAddr::V6(_) => None,
+        })
+        .collect()
 }
 
 // ─── Device Type / State Mapping ───
