@@ -2934,9 +2934,7 @@ fn build_ipv4_settings_owned(
                 );
             }
 
-            let dns_u32s: Vec<u32> = ip_addrs_to_nm_dns(
-                sc.dns.as_deref().unwrap_or_default(),
-            );
+            let dns_u32s: Vec<u32> = ip_addrs_to_nm_dns(sc.dns.as_deref().unwrap_or_default());
             if !dns_u32s.is_empty() {
                 ipv4.insert(
                     nm_dbus::conn::DNS.to_string(),
@@ -2984,9 +2982,7 @@ fn build_nm_ipv4_settings<'a>(
                 ipv4.insert(nm_dbus::conn::GATEWAY, Value::from(gw));
             }
 
-            let dns_u32s: Vec<u32> = ip_addrs_to_nm_dns(
-                sc.dns.as_deref().unwrap_or_default(),
-            );
+            let dns_u32s: Vec<u32> = ip_addrs_to_nm_dns(sc.dns.as_deref().unwrap_or_default());
             if !dns_u32s.is_empty() {
                 ipv4.insert(nm_dbus::conn::DNS, Value::from(dns_u32s));
             }
