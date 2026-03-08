@@ -37,6 +37,12 @@ fi
 # Wi-Fi reconnection is orchestrated by the Rust gateway process via D-Bus
 # ActivateConnection — this avoids race conditions between shell-level
 # `nmcli device connect` and Rust-level NM activation.
+#
+# When DEFER_NM_HANDOFF=true (set by the Rust process), the script performs
+# L2/L3 cleanup (type change, IP flush, link up) but does NOT hand the
+# interface back to NetworkManager. The Rust process will do that itself
+# after setting up the proper connection activation, preventing NM's
+# autoconnect from racing with the explicit ActivateConnection call.
 if [ "${AP_EXCLUSIVE}" = "true" ]; then
   log "Exclusive mode — restoring STA (managed) mode on ${AP_IFACE}"
   iw dev "${AP_IFACE}" set type managed 2>/dev/null || true
@@ -49,7 +55,9 @@ if [ "${AP_EXCLUSIVE}" = "true" ]; then
 
   ip link set "${AP_IFACE}" up 2>/dev/null || true
 
-  if command -v nmcli >/dev/null 2>&1; then
+  if [ "${DEFER_NM_HANDOFF:-false}" = "true" ]; then
+    log "NM handoff deferred — Rust process will manage NM re-attachment"
+  elif command -v nmcli >/dev/null 2>&1; then
     nmcli device set "${AP_IFACE}" managed yes 2>/dev/null || true
   fi
 fi

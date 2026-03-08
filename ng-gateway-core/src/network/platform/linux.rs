@@ -130,12 +130,53 @@ const STA_RESTORE_FILE: &str = "sta-restore.json";
 /// When starting AP in exclusive mode we disconnect STA; we save the NM connection
 /// and device paths so we can reactivate via `ActivateConnection` when the user stops AP.
 /// This is also persisted to disk so that a gateway restart does not lose the restore info.
+///
+/// In addition to the bare routing info, we capture a lightweight IPv4 fingerprint
+/// from the NM profile at stash time. This is **not** a second source of truth —
+/// the NM profile remains canonical — but it lets the restore path verify that the
+/// connection was re-established with the expected IP strategy (static vs DHCP) and,
+/// if not, trigger a corrective re-activation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StashedStaConnection {
     /// Settings connection path (org.freedesktop.NetworkManager.Settings.Connection).
     connection_path: String,
     /// Wi-Fi device path (org.freedesktop.NetworkManager.Device).
     device_path: String,
+    /// Stable NM profile UUID — survives NM restarts and object-path renumbering.
+    /// Used as a fallback locator when `connection_path` becomes stale.
+    #[serde(default)]
+    connection_uuid: Option<String>,
+    /// Lightweight IPv4 fingerprint captured at stash time.
+    /// Used for post-restore verification only — never written back to NM.
+    #[serde(default)]
+    ipv4_fingerprint: Option<Ipv4Fingerprint>,
+}
+
+/// Lightweight snapshot of the IPv4 configuration from an NM connection profile.
+///
+/// Captured at stash time and compared after restore to detect mismatches
+/// (e.g. NM autoconnect selected a different profile, or the profile was
+/// unexpectedly reverted to DHCP).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct Ipv4Fingerprint {
+    /// `"manual"` (static) or `"auto"` (DHCP).
+    method: String,
+    /// First static IP address (if method == manual).
+    address: Option<String>,
+    /// Prefix length (if method == manual).
+    prefix: Option<u8>,
+    /// Gateway (if method == manual).
+    gateway: Option<String>,
+}
+
+/// Saved autoconnect state for a profile temporarily modified during STA restore.
+///
+/// We use this to suppress competing Wi-Fi profiles while explicitly restoring
+/// the stashed profile, then restore the original autoconnect flags afterward.
+#[derive(Debug, Clone)]
+struct AutoconnectSuppression {
+    settings_path: String,
+    previous_autoconnect: bool,
 }
 
 impl StashedStaConnection {
@@ -176,6 +217,11 @@ pub struct LinuxNetworkManager {
     /// In exclusive mode, STA is disconnected before AP start; this holds the connection
     /// info for restore when the user stops AP.
     stashed_sta_for_restore: RwLock<Option<StashedStaConnection>>,
+    /// Whether the most recent exclusive-mode STA restore attempt failed.
+    ///
+    /// Exposed via `ApStatus.sta_restore_failed` so the frontend can guide the
+    /// user when AP stop succeeded but Wi-Fi management-channel recovery did not.
+    sta_restore_failed: RwLock<bool>,
     /// Cached AP mode to avoid re-running expensive `detect_capabilities` on every
     /// `ap_status` call. Updated whenever `detect_capabilities` runs.
     cached_ap_mode: RwLock<Option<ApMode>>,
@@ -200,6 +246,7 @@ impl LinuxNetworkManager {
         Ok(Self {
             dbus_conn,
             stashed_sta_for_restore: RwLock::new(stashed),
+            sta_restore_failed: RwLock::new(false),
             cached_ap_mode: RwLock::new(None),
         })
     }
@@ -688,7 +735,11 @@ impl LinuxNetworkManager {
     /// Stash the current active STA connection for later restore (exclusive mode only).
     ///
     /// Reads the ActiveConnection from the Wi-Fi device, then the Connection property
-    /// (settings path) from that ActiveConnection. Returns `None` if no active connection.
+    /// (settings path) from that ActiveConnection. Also captures:
+    /// - The stable NM profile UUID (survives NM restarts / object-path renumbering).
+    /// - A lightweight IPv4 fingerprint from the profile for post-restore verification.
+    ///
+    /// Returns `None` if no active connection.
     async fn stash_active_sta_connection(&self) -> Option<StashedStaConnection> {
         let dev_path = self.find_wireless_device(None).await.ok()?;
         let dev_path_ref = ObjectPath::try_from(dev_path.as_str()).ok()?;
@@ -709,10 +760,159 @@ impl LinuxNetworkManager {
         let connection_path = prop_object_path(&active_props, nm_dbus::prop::CONNECTION)
             .filter(|p| !p.is_empty() && p != "/")?;
 
+        // Capture the stable UUID from the active connection properties.
+        let connection_uuid = prop_str(&active_props, nm_dbus::prop::UUID);
+
+        // Read the NM profile's ipv4 section to build a verification fingerprint.
+        let ipv4_fingerprint = self.read_ipv4_fingerprint(&connection_path).await;
+
+        if let Some(ref fp) = ipv4_fingerprint {
+            info!(
+                method = %fp.method,
+                address = ?fp.address,
+                uuid = ?connection_uuid,
+                "Stashed STA connection with IPv4 fingerprint"
+            );
+        }
+
         Some(StashedStaConnection {
             connection_path,
             device_path: dev_path.to_string(),
+            connection_uuid,
+            ipv4_fingerprint,
         })
+    }
+
+    /// Read the IPv4 fingerprint from an NM connection profile (settings path).
+    ///
+    /// This reads the persisted profile via `GetSettings()`, not the runtime IP
+    /// configuration — so it reflects the user's intended configuration rather
+    /// than whatever the kernel currently has assigned.
+    async fn read_ipv4_fingerprint(&self, settings_path: &str) -> Option<Ipv4Fingerprint> {
+        let conn_ref = ObjectPath::try_from(settings_path).ok()?;
+        let settings = self.get_connection_settings(&conn_ref).await?;
+        let ipv4_section = settings.get(nm_dbus::conn::IPV4)?;
+
+        let method = settings_str(ipv4_section, nm_dbus::conn::METHOD)
+            .unwrap_or_else(|| nm_dbus::method::AUTO.to_string());
+
+        let (address, prefix, gateway) = if method == nm_dbus::method::MANUAL {
+            let addr_info = parse_settings_address_data(ipv4_section);
+            let gw = settings_str(ipv4_section, nm_dbus::conn::GATEWAY);
+            match addr_info {
+                Some((ip, pfx)) => (Some(ip.to_string()), Some(pfx), gw),
+                None => (None, None, gw),
+            }
+        } else {
+            (None, None, None)
+        };
+
+        Some(Ipv4Fingerprint {
+            method,
+            address,
+            prefix,
+            gateway,
+        })
+    }
+
+    /// Temporarily disable autoconnect on competing Wi-Fi profiles for an interface.
+    ///
+    /// This narrows the remaining race window after `managed yes`: even if
+    /// NetworkManager notices the device before our explicit `ActivateConnection`,
+    /// competing profiles on the same interface are prevented from opportunistically
+    /// claiming the device.
+    ///
+    /// Returns the list of profiles whose autoconnect state was modified, so the
+    /// caller can restore them after the restore transaction finishes.
+    async fn suppress_competing_wifi_autoconnect(
+        &self,
+        iface_name: &str,
+        stashed: &StashedStaConnection,
+    ) -> Vec<AutoconnectSuppression> {
+        let conn_paths: Vec<OwnedObjectPath> = match self
+            .dbus_conn
+            .call_method(
+                Some(nm_dbus::iface::NM),
+                nm_dbus::settings_path::ROOT,
+                Some(nm_dbus::iface::SETTINGS),
+                nm_dbus::dbus_method::LIST_CONNECTIONS,
+                &(),
+            )
+            .await
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<Vec<OwnedObjectPath>>().ok())
+        {
+            Some(paths) => paths,
+            None => return Vec::new(),
+        };
+
+        let mut suppressed = Vec::new();
+
+        for conn_path in &conn_paths {
+            let conn_ref = match ObjectPath::try_from(conn_path.as_str()) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let settings = match self.get_connection_settings(&conn_ref).await {
+                Some(s) => s,
+                None => continue,
+            };
+            let conn_section = match settings.get(nm_dbus::conn::CONNECTION) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if settings_str(conn_section, nm_dbus::conn::TYPE).as_deref()
+                != Some(nm_dbus::conn::WIFI)
+            {
+                continue;
+            }
+
+            let settings_path = conn_path.to_string();
+            let conn_uuid = settings_str(conn_section, nm_dbus::conn::UUID);
+
+            if settings_path == stashed.connection_path
+                || conn_uuid.as_deref() == stashed.connection_uuid.as_deref()
+            {
+                continue;
+            }
+
+            let profile_iface = settings_str(conn_section, nm_dbus::conn::INTERFACE_NAME);
+            if profile_iface
+                .as_deref()
+                .is_some_and(|name| name != iface_name)
+            {
+                continue;
+            }
+
+            let autoconnect =
+                settings_bool(conn_section, nm_dbus::conn::AUTOCONNECT).unwrap_or(true);
+            if !autoconnect {
+                continue;
+            }
+
+            info!(
+                path = %settings_path,
+                uuid = ?conn_uuid,
+                interface = iface_name,
+                "Temporarily disabling competing Wi-Fi profile autoconnect during STA restore"
+            );
+            self.set_connection_autoconnect(&settings_path, false).await;
+            suppressed.push(AutoconnectSuppression {
+                settings_path,
+                previous_autoconnect: true,
+            });
+        }
+
+        suppressed
+    }
+
+    /// Restore autoconnect flags previously suppressed during STA restore.
+    async fn restore_autoconnect_suppressions(&self, suppressed: &[AutoconnectSuppression]) {
+        for entry in suppressed {
+            self.set_connection_autoconnect(&entry.settings_path, entry.previous_autoconnect)
+                .await;
+        }
     }
 
     /// Attempt to restore AP on a virtual interface after STA connection succeeds.
@@ -788,29 +988,47 @@ impl LinuxNetworkManager {
 
     /// Restore a previously stashed STA connection after stopping (or failing to start) AP.
     ///
-    /// Takes the stashed connection from memory, removes the persisted file, then
-    /// uses `ap-teardown.sh` semantics (interface → managed mode) followed by
-    /// NM `ActivateConnection` to reconnect the STA. This is called from both
-    /// `stop_ap` and the `start_ap` failure rollback path.
+    /// Orchestrates a controlled restore sequence that avoids the NM autoconnect race:
+    ///
+    /// 1. Run `ap-teardown.sh` with `DEFER_NM_HANDOFF=true` — this does L2/L3
+    ///    cleanup (type change, IP flush, link up) but does NOT hand the interface
+    ///    back to NetworkManager.
+    /// 2. Explicitly hand the interface to NM (`nmcli device set managed yes`).
+    /// 3. Wait for NM to discover the interface.
+    /// 4. Call `ActivateConnection` with the stashed profile path (fallback to UUID).
+    /// 5. Wait for the connection to reach `ACTIVATED` state.
+    /// 6. Verify that the active connection's IPv4 configuration matches the
+    ///    stashed fingerprint. If mismatched (e.g. NM somehow used a different
+    ///    profile or the profile was reverted to DHCP), attempt corrective
+    ///    re-activation.
+    ///
+    /// Called from both `stop_ap` and the `start_ap` failure rollback path.
     async fn restore_stashed_sta_connection(&self) {
-        let stashed = self.stashed_sta_for_restore.write().await.take();
+        let stashed = self.stashed_sta_for_restore.read().await.clone();
         let Some(s) = stashed else { return };
-        StashedStaConnection::remove().await;
 
-        // ap-teardown.sh (ExecStop of ap-setup.service) restores the interface to
-        // managed mode, but when we reach here from the start_ap rollback path
-        // the service hasn't been cleanly stopped. Re-run the teardown script
-        // defensively so the interface is guaranteed to be in managed/NM mode.
+        info!(
+            connection_path = %s.connection_path,
+            uuid = ?s.connection_uuid,
+            expected_ipv4 = ?s.ipv4_fingerprint,
+            "Restoring stashed STA connection"
+        );
+
+        // ── Step 1: L2/L3 teardown (NM handoff deferred) ──
         let env_path = format!("{}/{}", AP_CONFIG_DIR, AP_ENV_FILE);
         let env_content = tokio::fs::read_to_string(&env_path)
             .await
             .unwrap_or_default();
         let sta_iface = parse_env_value(&env_content, "STA_IFACE").unwrap_or_default();
 
+        let suppressed_profiles = if !sta_iface.is_empty() {
+            self.suppress_competing_wifi_autoconnect(&sta_iface, &s)
+                .await
+        } else {
+            Vec::new()
+        };
+
         if !sta_iface.is_empty() {
-            // ap-teardown.sh reads AP_IFACE / AP_EXCLUSIVE / UPLINK_IFACE from the
-            // environment. When called from systemd these come from the EnvironmentFile,
-            // but here we invoke the script directly so we must inject them explicitly.
             let mut cmd = tokio::process::Command::new("/opt/ng-gateway/scripts/ap-teardown.sh");
             for line in env_content.lines() {
                 let line = line.trim();
@@ -822,37 +1040,355 @@ impl LinuxNetworkManager {
                     cmd.env(key, val);
                 }
             }
+            // Force deferred handoff regardless of what ap-env currently says,
+            // because the Rust process will manage NM re-attachment below.
+            cmd.env("DEFER_NM_HANDOFF", "true");
             let _ = cmd.output().await;
-            // Give NM time to recognise the restored managed-mode interface.
-            sleep(Duration::from_millis(1500)).await;
         }
 
-        let activate_result: Result<(), String> = async {
-            let conn_ref = ObjectPath::try_from(s.connection_path.as_str())
-                .map_err(|e| format!("Invalid connection path: {e}"))?;
-            let dev_ref = ObjectPath::try_from(s.device_path.as_str())
-                .map_err(|e| format!("Invalid device path: {e}"))?;
-            let root = ObjectPath::try_from("/").map_err(|e| format!("Invalid root path: {e}"))?;
+        // ── Step 2: Hand interface to NM and activate atomically ──
+        //
+        // To eliminate the autoconnect race, we:
+        //   a) Set the device managed
+        //   b) Poll device state until NM transitions it to at least DISCONNECTED
+        //   c) Immediately fire ActivateConnection — no fixed sleep gap for NM
+        //      to opportunistically autoconnect a different profile
+        let activate_result = if !sta_iface.is_empty() {
+            let _ = tokio::process::Command::new("nmcli")
+                .args(["device", "set", &sta_iface, "managed", "yes"])
+                .output()
+                .await;
 
-            self.nm_proxy()
-                .await
-                .map_err(|e| format!("NM proxy: {e}"))?
-                .activate_connection(&conn_ref, &dev_ref, &root)
-                .await
-                .map_err(|e| format!("ActivateConnection: {e}"))?;
-            Ok(())
-        }
-        .await;
+            // Poll until NM recognizes the device (state ≥ DISCONNECTED).
+            self.poll_device_ready(&sta_iface, Duration::from_secs(5))
+                .await;
+
+            self.activate_stashed_connection(&s).await
+        } else {
+            Err("No STA interface name available".to_string())
+        };
 
         match activate_result {
             Ok(()) => {
-                info!("Restored previous Wi-Fi STA connection");
-                sleep(Duration::from_millis(2000)).await;
+                info!("STA connection activation requested — waiting for connection");
+
+                // Poll until the connection reaches ACTIVATED state (DHCP lease
+                // acquired or static IP assigned) rather than a fixed sleep.
+                let activated = self
+                    .poll_connection_activated(&sta_iface, Duration::from_secs(15))
+                    .await;
+
+                if !activated {
+                    warn!("Connection did not reach ACTIVATED state within timeout");
+                }
+
+                // ── Step 4: Post-restore verification ──
+                let verified = self.verify_sta_restore(&s, &sta_iface).await;
+
+                if activated && verified {
+                    {
+                        let mut guard = self.stashed_sta_for_restore.write().await;
+                        *guard = None;
+                    }
+                    StashedStaConnection::remove().await;
+
+                    let mut restore_failed = self.sta_restore_failed.write().await;
+                    *restore_failed = false;
+                } else {
+                    let mut restore_failed = self.sta_restore_failed.write().await;
+                    *restore_failed = true;
+                }
             }
             Err(e) => {
-                warn!(error = %e, "Failed to restore STA connection — device may need manual WiFi reconnection");
+                warn!(
+                    error = %e,
+                    uuid = ?s.connection_uuid,
+                    "Failed to restore STA connection — device may need manual WiFi reconnection"
+                );
+                let mut restore_failed = self.sta_restore_failed.write().await;
+                *restore_failed = true;
             }
         }
+
+        self.restore_autoconnect_suppressions(&suppressed_profiles)
+            .await;
+    }
+
+    /// Attempt to activate the stashed NM connection profile.
+    ///
+    /// Tries `connection_path` first; if that fails (stale object path after NM
+    /// restart), falls back to resolving the profile by UUID.
+    async fn activate_stashed_connection(&self, s: &StashedStaConnection) -> Result<(), String> {
+        let dev_ref = ObjectPath::try_from(s.device_path.as_str())
+            .map_err(|e| format!("Invalid device path: {e}"))?;
+        let root = ObjectPath::try_from("/").map_err(|e| format!("Invalid root path: {e}"))?;
+        let nm = self
+            .nm_proxy()
+            .await
+            .map_err(|e| format!("NM proxy: {e}"))?;
+
+        // Primary attempt: use the stashed connection_path directly.
+        let conn_ref = ObjectPath::try_from(s.connection_path.as_str());
+        if let Ok(ref conn_path) = conn_ref {
+            match nm.activate_connection(conn_path, &dev_ref, &root).await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %s.connection_path,
+                        "ActivateConnection via stashed path failed — trying UUID fallback"
+                    );
+                }
+            }
+        }
+
+        // Fallback: resolve by UUID (survives NM restart / path renumbering).
+        let uuid = s
+            .connection_uuid
+            .as_deref()
+            .ok_or("No UUID available for fallback")?;
+
+        let resolved_path = self
+            .find_saved_connection_by_uuid(uuid)
+            .await
+            .ok_or_else(|| format!("No saved profile found for UUID {uuid}"))?;
+
+        let resolved_ref = ObjectPath::try_from(resolved_path.as_str())
+            .map_err(|e| format!("Invalid resolved path: {e}"))?;
+
+        nm.activate_connection(&resolved_ref, &dev_ref, &root)
+            .await
+            .map_err(|e| format!("ActivateConnection via UUID fallback: {e}"))?;
+
+        info!(uuid = uuid, "Restored STA via UUID fallback");
+        Ok(())
+    }
+
+    /// Find a saved NM connection profile by UUID.
+    async fn find_saved_connection_by_uuid(&self, target_uuid: &str) -> Option<String> {
+        let conn_paths: Vec<OwnedObjectPath> = self
+            .dbus_conn
+            .call_method(
+                Some(nm_dbus::iface::NM),
+                nm_dbus::settings_path::ROOT,
+                Some(nm_dbus::iface::SETTINGS),
+                nm_dbus::dbus_method::LIST_CONNECTIONS,
+                &(),
+            )
+            .await
+            .ok()?
+            .body()
+            .deserialize::<Vec<OwnedObjectPath>>()
+            .ok()?;
+
+        for conn_path in &conn_paths {
+            let conn_ref = match ObjectPath::try_from(conn_path.as_str()) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let settings = match self.get_connection_settings(&conn_ref).await {
+                Some(s) => s,
+                None => continue,
+            };
+            let conn_section = match settings.get(nm_dbus::conn::CONNECTION) {
+                Some(s) => s,
+                None => continue,
+            };
+            if settings_str(conn_section, nm_dbus::conn::UUID).as_deref() == Some(target_uuid) {
+                return Some(conn_path.to_string());
+            }
+        }
+        None
+    }
+
+    /// Verify that the restored STA connection matches the stashed IPv4 fingerprint.
+    ///
+    /// If a mismatch is detected (wrong profile activated, or profile IPv4 settings
+    /// reverted), logs a detailed warning with both expected and actual values and
+    /// returns whether the restore outcome is acceptable.
+    async fn verify_sta_restore(&self, stashed: &StashedStaConnection, sta_iface: &str) -> bool {
+        let expected_fp = match &stashed.ipv4_fingerprint {
+            Some(fp) => fp,
+            None => {
+                debug!("No IPv4 fingerprint stashed — skipping post-restore verification");
+                return true;
+            }
+        };
+
+        // Read the currently active connection's profile to compare.
+        let actual_fp = match self.read_active_ipv4_fingerprint(sta_iface).await {
+            Some(fp) => fp,
+            None => {
+                warn!(
+                    interface = sta_iface,
+                    "Cannot read active connection IPv4 config — post-restore verification skipped"
+                );
+                return false;
+            }
+        };
+
+        if *expected_fp == actual_fp {
+            info!(
+                method = %actual_fp.method,
+                address = ?actual_fp.address,
+                "Post-restore verification passed — IPv4 config matches stashed fingerprint"
+            );
+            return true;
+        }
+
+        // Mismatch detected — log details for diagnostics.
+        warn!(
+            expected_method = %expected_fp.method,
+            expected_address = ?expected_fp.address,
+            expected_gateway = ?expected_fp.gateway,
+            actual_method = %actual_fp.method,
+            actual_address = ?actual_fp.address,
+            actual_gateway = ?actual_fp.gateway,
+            "Post-restore IPv4 mismatch — active connection does not match stashed profile"
+        );
+
+        // Attempt corrective re-activation: resolve the profile (with UUID fallback)
+        // to confirm its IPv4 settings are still intact, then force re-activate.
+        let profile_fp = self.resolve_profile_fingerprint(stashed).await;
+        if profile_fp.as_ref() == Some(expected_fp) {
+            info!("Stashed NM profile still has correct IPv4 settings — attempting corrective re-activation");
+            if let Ok(()) = self.activate_stashed_connection(stashed).await {
+                self.poll_connection_activated(sta_iface, Duration::from_secs(15))
+                    .await;
+                if let Some(recheck) = self.read_active_ipv4_fingerprint(sta_iface).await {
+                    if recheck == *expected_fp {
+                        info!("Corrective re-activation succeeded — IPv4 config restored");
+                        return true;
+                    }
+                    warn!(
+                        actual_method = %recheck.method,
+                        actual_address = ?recheck.address,
+                        "Corrective re-activation did not fix the mismatch"
+                    );
+                }
+            }
+        } else {
+            warn!(
+                profile_fp = ?profile_fp,
+                "NM profile IPv4 settings differ from stashed fingerprint — profile may have been modified externally"
+            );
+        }
+
+        false
+    }
+
+    /// Resolve the IPv4 fingerprint of a stashed profile, with UUID fallback.
+    ///
+    /// First tries the stashed `connection_path`. If that fails (e.g. NM restarted
+    /// and object paths were renumbered), falls back to locating the profile by UUID
+    /// and reading its fingerprint. This keeps the verification path consistent with
+    /// the activation path that already supports UUID fallback.
+    async fn resolve_profile_fingerprint(
+        &self,
+        stashed: &StashedStaConnection,
+    ) -> Option<Ipv4Fingerprint> {
+        if let Some(fp) = self.read_ipv4_fingerprint(&stashed.connection_path).await {
+            return Some(fp);
+        }
+
+        // connection_path stale — try UUID fallback.
+        let uuid = stashed.connection_uuid.as_deref()?;
+        let resolved_path = self.find_saved_connection_by_uuid(uuid).await?;
+        debug!(uuid = uuid, path = %resolved_path, "Resolved profile via UUID for fingerprint check");
+        self.read_ipv4_fingerprint(&resolved_path).await
+    }
+
+    /// Read the IPv4 fingerprint of the currently active connection on a given interface.
+    ///
+    /// This reads the persisted NM profile (via `GetSettings`) of whatever connection
+    /// is currently active on the device, giving us the *configured* method rather
+    /// than the runtime IP state.
+    async fn read_active_ipv4_fingerprint(&self, iface_name: &str) -> Option<Ipv4Fingerprint> {
+        let settings_path = self.find_active_connection_for_device(iface_name).await?;
+        self.read_ipv4_fingerprint(&settings_path).await
+    }
+
+    /// Poll until NM recognizes a device and it reaches at least `DISCONNECTED` state.
+    ///
+    /// After `nmcli device set <iface> managed yes`, NM needs a moment to transition
+    /// the device from `UNMANAGED` → `UNAVAILABLE` → `DISCONNECTED`. We poll with
+    /// exponential backoff (100ms → 200ms → 400ms, capped at 500ms) instead of a
+    /// fixed sleep, and fire `ActivateConnection` the instant the device is ready.
+    /// This eliminates the autoconnect window that a fixed sleep would create.
+    async fn poll_device_ready(&self, iface_name: &str, timeout: Duration) {
+        let start = std::time::Instant::now();
+        let mut interval = Duration::from_millis(100);
+
+        loop {
+            if let Some(state) = self.read_device_state(iface_name).await {
+                if state >= nm_dbus::device_state::DISCONNECTED {
+                    debug!(
+                        iface = iface_name,
+                        state = state,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "Device reached ready state"
+                    );
+                    return;
+                }
+            }
+
+            if start.elapsed() >= timeout {
+                warn!(
+                    iface = iface_name,
+                    "Timeout waiting for device to become ready — proceeding anyway"
+                );
+                return;
+            }
+
+            sleep(interval).await;
+            interval = (interval * 2).min(Duration::from_millis(500));
+        }
+    }
+
+    /// Poll until the active connection on a device reaches `ACTIVATED` state.
+    ///
+    /// Used after `ActivateConnection` to wait for the connection to fully establish
+    /// (DHCP lease acquired or static IP assigned) before running post-restore
+    /// verification.
+    async fn poll_connection_activated(&self, iface_name: &str, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        let mut interval = Duration::from_millis(200);
+
+        loop {
+            if let Some(state) = self.read_device_state(iface_name).await {
+                if state == nm_dbus::device_state::ACTIVATED {
+                    debug!(
+                        iface = iface_name,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "Connection reached ACTIVATED state"
+                    );
+                    return true;
+                }
+            }
+
+            if start.elapsed() >= timeout {
+                warn!(
+                    iface = iface_name,
+                    "Timeout waiting for connection to activate"
+                );
+                return false;
+            }
+
+            sleep(interval).await;
+            interval = (interval * 2).min(Duration::from_millis(1000));
+        }
+    }
+
+    /// Read the NM device state for an interface by name.
+    async fn read_device_state(&self, iface_name: &str) -> Option<u32> {
+        let nm = self.nm_proxy().await.ok()?;
+        let dev_path = nm.get_device_by_ip_iface(iface_name).await.ok()?;
+        let dev_ref = ObjectPath::try_from(dev_path.as_str()).ok()?;
+        let props = self
+            .get_all_properties(&dev_ref, nm_dbus::iface::DEVICE)
+            .await
+            .ok()?;
+        prop_u32(&props, nm_dbus::prop::STATE)
     }
 
     /// Force-restore the WiFi interface to managed mode after a failed AP start.
@@ -860,8 +1396,11 @@ impl LinuxNetworkManager {
     /// When `ap-setup.sh` runs in exclusive mode, it converts the interface to
     /// `__ap` type and removes it from NM control. If hostapd then fails to start,
     /// the interface is stuck in `__ap` mode and the device is unreachable.
-    /// This method runs the equivalent of `ap-teardown.sh` to restore the interface
-    /// to managed mode so NM can reconnect.
+    ///
+    /// This method only performs L2/L3 cleanup (down → managed type → flush →
+    /// up). NM ownership handoff is intentionally omitted — the caller is
+    /// expected to invoke `restore_stashed_sta_connection` next, which handles
+    /// NM re-attachment and explicit `ActivateConnection` in a race-free sequence.
     async fn force_restore_wifi_interface(&self) {
         let env_path = format!("{}/{}", AP_CONFIG_DIR, AP_ENV_FILE);
         let env_content = tokio::fs::read_to_string(&env_path)
@@ -874,12 +1413,12 @@ impl LinuxNetworkManager {
             return;
         }
 
-        info!(iface = %ap_iface, "Force-restoring WiFi interface to managed mode");
+        info!(iface = %ap_iface, "Force-restoring WiFi interface to managed mode (L2/L3 only)");
 
-        // Down → set type managed → up → hand back to NM
         let commands: &[&[&str]] = &[
             &["ip", "link", "set", &ap_iface, "down"],
             &["iw", "dev", &ap_iface, "set", "type", "managed"],
+            &["ip", "addr", "flush", "dev", &ap_iface],
             &["ip", "link", "set", &ap_iface, "up"],
         ];
 
@@ -893,18 +1432,7 @@ impl LinuxNetworkManager {
             }
         }
 
-        // Hand interface back to NetworkManager
-        let nmcli_result = tokio::process::Command::new("nmcli")
-            .args(["device", "set", &ap_iface, "managed", "yes"])
-            .output()
-            .await;
-        if let Err(e) = nmcli_result {
-            warn!(error = %e, "Failed to set interface managed via nmcli");
-        }
-
-        // Give NM time to recognize the restored interface
-        sleep(Duration::from_millis(2000)).await;
-        info!(iface = %ap_iface, "WiFi interface restored to managed mode");
+        info!(iface = %ap_iface, "WiFi interface restored to managed mode (NM handoff deferred to restore_stashed_sta_connection)");
     }
 
     /// Core Wi-Fi disconnect logic without AP restore evaluation.
@@ -2468,6 +2996,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             }
         };
         let sta_will_disconnect = ap_mode == ApMode::Exclusive;
+        let sta_restore_failed = *self.sta_restore_failed.read().await;
 
         let mgr = ApServiceManager::from_connection(self.dbus_conn.clone());
         let svc_status = mgr.status().await.unwrap_or(ApServiceStatus {
@@ -2490,7 +3019,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 prefix_length: None,
                 ap_mode,
                 sta_will_disconnect,
-                sta_restore_failed: false,
+                sta_restore_failed,
             });
         }
 
@@ -2543,7 +3072,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             prefix_length,
             ap_mode,
             sta_will_disconnect,
-            sta_restore_failed: false,
+            sta_restore_failed,
         })
     }
 
@@ -2570,6 +3099,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         // script's nmcli operations and leave the interface in an inconsistent
         // state.
         if is_exclusive {
+            let mut restore_failed = self.sta_restore_failed.write().await;
+            *restore_failed = false;
+            drop(restore_failed);
+
             info!("Exclusive mode: stashing STA connection for later restore");
             if let Some(stashed) = self.stash_active_sta_connection().await {
                 stashed.persist().await;

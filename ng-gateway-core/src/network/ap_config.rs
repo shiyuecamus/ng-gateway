@@ -413,6 +413,7 @@ mod tests {
         assert!(env.contains("STA_IFACE=\"wlan0\""));
         assert!(env.contains("UPLINK_IFACE=\"wlan0\""));
         assert!(env.contains("AP_EXCLUSIVE=\"false\""));
+        assert!(!env.contains("DEFER_NM_HANDOFF"));
     }
 
     #[test]
@@ -424,6 +425,7 @@ mod tests {
         let env = render_ap_env(&ctx);
         assert!(env.contains("AP_EXCLUSIVE=\"true\""));
         assert!(env.contains("AP_IFACE=\"wlP2p33s0\""));
+        assert!(!env.contains("DEFER_NM_HANDOFF"));
     }
 
     #[test]
