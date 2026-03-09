@@ -3,7 +3,7 @@ use bytes::Bytes;
 use ng_gateway_sdk::{
     DataType, DriverError, DriverResult, NGValue, NGValueCastError, Transform, ValueCodec,
 };
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 /// Register-based codec utilities for converting between logical values and Modbus-like register words.
 ///
@@ -547,7 +547,7 @@ impl ModbusCodec {
         Ok(Self::bytes_to_words(&raw_bytes, byte_order, word_order))
     }
 
-    fn cast_err(val: &NGValue, err: impl std::fmt::Display) -> DriverError {
+    fn cast_err(val: &NGValue, err: impl fmt::Display) -> DriverError {
         DriverError::ValidationError(format!("Cast failed for {:?}: {}", val.data_type(), err))
     }
 

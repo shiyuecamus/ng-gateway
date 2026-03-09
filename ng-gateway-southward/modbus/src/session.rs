@@ -9,7 +9,7 @@ use ng_gateway_sdk::{
     supervision::{RunOutcome, Session, SessionContext},
     DriverError,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 /// Modbus attempt session.
 pub struct ModbusSession {
@@ -44,7 +44,7 @@ impl Session for ModbusSession {
     async fn run(self, ctx: SessionContext) -> Result<RunOutcome, Self::Error> {
         ctx.cancel.cancelled().await;
         if let Some(pool) = self.handle.detach_pool() {
-            pool.disconnect_all(std::time::Duration::from_secs(2)).await;
+            pool.disconnect_all(Duration::from_secs(2)).await;
         }
         Ok(RunOutcome::Disconnected)
     }

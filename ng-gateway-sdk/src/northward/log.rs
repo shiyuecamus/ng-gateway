@@ -13,11 +13,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::VecDeque,
-    fmt,
+    error, fmt,
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 use tokio::runtime::Handle;
 use tracing::{
@@ -305,7 +306,7 @@ async fn plugin_flush_loop(st: Arc<PluginLogState>) {
     loop {
         tokio::select! {
             _ = st.notify.notified() => {}
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
 
         let sink = {
@@ -379,7 +380,7 @@ impl Visit for JsonVisitor {
         self.fields
             .insert(field.name().to_string(), Value::from(value));
     }
-    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+    fn record_error(&mut self, field: &Field, value: &(dyn error::Error + 'static)) {
         self.fields
             .insert(field.name().to_string(), Value::from(value.to_string()));
     }

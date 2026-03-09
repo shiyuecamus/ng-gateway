@@ -1,4 +1,4 @@
-use std::result::Result as StdResult;
+use std::{io, result::Result as StdResult};
 use thiserror::Error as ThisError;
 
 /// Unified S7 result type
@@ -7,7 +7,7 @@ pub type Result<T> = StdResult<T, Error>;
 #[derive(Debug, ThisError)]
 pub enum Error {
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
     #[error("connect timeout")]
     ErrConnectTimeout,

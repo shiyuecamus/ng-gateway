@@ -6,7 +6,10 @@ use ng_gateway_sdk::{
     supervision::{Connector, SupervisorLoop, SupervisorParams},
     Driver, SupervisedDriver,
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// Manual integration test: CJ/T 188-2018 short disconnect and reconnect.
 ///
@@ -65,7 +68,7 @@ async fn reconnect_and_collect() {
         panic!("timeout waiting for CJ/T 188-2018 driver to connect, please check simulator");
     }
 
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let duration = Duration::from_secs(30);
     let mut iteration: u32 = 0;
 

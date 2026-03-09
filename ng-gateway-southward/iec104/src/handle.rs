@@ -20,6 +20,7 @@ use ng_gateway_sdk::{
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Display,
     future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -254,7 +255,7 @@ impl Iec104Handle {
     where
         F: Future<Output = Result<T, E>> + Send + 'static,
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: Display + Send + 'static,
     {
         let timeout_duration = TokioDuration::from_millis(timeout_ms);
 

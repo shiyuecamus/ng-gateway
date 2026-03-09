@@ -6,10 +6,9 @@ use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::core::metrics::SystemInfoSnapshot;
 use prometheus::{Gauge, IntCounter, Registry};
 #[cfg(target_os = "macos")]
-use std::ffi::CString;
+use std::{ffi::CString, mem, sync::Mutex};
 #[cfg(not(target_os = "macos"))]
-use std::path::Path;
-use std::sync::Mutex;
+use std::{path::Path, sync::Mutex};
 #[cfg(not(target_os = "macos"))]
 use sysinfo::Disks;
 use sysinfo::{get_current_pid, Networks, ProcessesToUpdate, System};
@@ -384,7 +383,7 @@ fn disk_total_used_bytes() -> (u64, u64) {
 #[cfg(target_os = "macos")]
 fn disk_total_used_bytes_macos() -> Option<(u64, u64)> {
     let c_path = CString::new("/").ok()?;
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    let mut s: libc::statfs = unsafe { mem::zeroed() };
     let rc = unsafe { libc::statfs(c_path.as_ptr(), &mut s as *mut libc::statfs) };
     if rc != 0 {
         return None;

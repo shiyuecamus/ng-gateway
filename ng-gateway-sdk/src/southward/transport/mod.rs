@@ -14,10 +14,17 @@ mod stream;
 mod udp;
 
 pub use noop::NoopSouthwardTransportMeter;
-use std::{fmt::Debug, io::Result as IoResult, net::SocketAddr, sync::Arc};
+use std::{
+    fmt::Debug,
+    io::{Error, ErrorKind, Result as IoResult},
+    net::SocketAddr,
+    sync::Arc,
+};
 pub use stream::MeteredStream;
-use tokio::net::{TcpStream, UdpSocket};
-use tokio::time::{timeout, Duration as TokioDuration};
+use tokio::{
+    net::{TcpStream, UdpSocket},
+    time::{timeout, Duration as TokioDuration},
+};
 use tokio_serial::{DataBits, Parity, SerialPortBuilderExt, SerialStream, StopBits};
 pub use udp::MeteredUdpSocket;
 
@@ -73,10 +80,7 @@ pub async fn connect_tcp_metered_with_timeout(
     let d = TokioDuration::from_millis(connect_timeout_ms.max(1));
     match timeout(d, connect_tcp_metered(addr, meter)).await {
         Ok(r) => r,
-        Err(_elapsed) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "tcp connect timeout",
-        )),
+        Err(_elapsed) => Err(Error::new(ErrorKind::TimedOut, "tcp connect timeout")),
     }
 }
 
@@ -105,10 +109,7 @@ pub async fn bind_udp_metered_with_timeout(
     let d = TokioDuration::from_millis(bind_timeout_ms.max(1));
     match timeout(d, bind_udp_metered(bind_addr, meter)).await {
         Ok(r) => r,
-        Err(_elapsed) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "udp bind timeout",
-        )),
+        Err(_elapsed) => Err(Error::new(ErrorKind::TimedOut, "udp bind timeout")),
     }
 }
 

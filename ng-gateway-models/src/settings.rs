@@ -15,6 +15,7 @@ use ng_gateway_error::NGResult;
 use ng_gateway_sdk::RetryPolicy;
 use serde::{self, Deserialize, Serialize};
 use std::{
+    cmp,
     ops::Deref,
     path::PathBuf,
     sync::{
@@ -1045,7 +1046,7 @@ impl Web {
         match self.workers {
             0 => System::new_all().cpus().len(),
             n if n > 0 => n as usize,
-            n => std::cmp::max(
+            n => cmp::max(
                 1,
                 (System::new_all().cpus().len() as i32 / n.abs()) as usize,
             ),

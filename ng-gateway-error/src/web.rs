@@ -1,8 +1,8 @@
+use crate::{storage::StorageError, NGError};
 use actix_web::{HttpResponse, ResponseError};
 use serde_json::json;
+use std::io;
 use thiserror::Error;
-
-use crate::{storage::StorageError, NGError};
 
 #[derive(Error, Debug)]
 pub enum WebError {
@@ -22,8 +22,8 @@ pub enum WebError {
     MultipartError(String),
 }
 
-impl From<std::io::Error> for WebError {
-    fn from(e: std::io::Error) -> Self {
+impl From<io::Error> for WebError {
+    fn from(e: io::Error) -> Self {
         WebError::InternalError(e.to_string())
     }
 }

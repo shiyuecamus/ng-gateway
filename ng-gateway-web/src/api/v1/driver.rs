@@ -24,7 +24,10 @@ use ng_gateway_sdk::{
     TemplateMetadata,
 };
 use sea_orm::{DatabaseConnection, IntoActiveModel};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path as StdPath, PathBuf},
+    sync::Arc,
+};
 use tempfile::{Builder, NamedTempFile};
 use tokio::{fs::File, io::AsyncWriteExt};
 use tracing::{info, instrument};
@@ -481,7 +484,7 @@ async fn save_to_system_temp(multipart: &mut Multipart) -> WebResult<NamedTempFi
     let uploaded_name = content_disposition.and_then(|cd| cd.get_filename().map(String::from));
     let ext = uploaded_name
         .and_then(|n| {
-            let path = std::path::Path::new(&n);
+            let path = StdPath::new(&n);
             path.extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_string())
@@ -545,7 +548,7 @@ async fn save_to_target_dir(
     let uploaded_name = content_disposition.and_then(|cd| cd.get_filename().map(String::from));
     let ext = uploaded_name
         .and_then(|n| {
-            let path = std::path::Path::new(&n);
+            let path = StdPath::new(&n);
             path.extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_string())

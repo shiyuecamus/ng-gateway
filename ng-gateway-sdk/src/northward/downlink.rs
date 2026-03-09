@@ -1,12 +1,15 @@
-use crate::envelope::EnvelopeKind;
-use crate::mapping::{CompiledMappedJson, MappedJsonSpec, MappedRule};
-use crate::northward::codec::{decode_downlink_envelope, DecodeError};
-use crate::northward::payload::MappedJsonConfig;
-use crate::{NorthwardEvent, ServerRpcResponse, WritePoint};
+use crate::{
+    envelope::EnvelopeKind,
+    mapping::{CompiledMappedJson, MappedJsonSpec, MappedRule},
+    northward::{
+        codec::{decode_downlink_envelope, DecodeError},
+        payload::MappedJsonConfig,
+    },
+    NorthwardEvent, ServerRpcResponse, WritePoint,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// Downlink event kind used for mapping into `NorthwardEvent`.
 #[derive(Debug, Clone, Copy)]

@@ -1,9 +1,10 @@
+use std::io;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ProtocolError {
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
     #[error("Frame too short: {0}")]
     FrameTooShort(String),

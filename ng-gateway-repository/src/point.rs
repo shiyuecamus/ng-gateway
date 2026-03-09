@@ -15,6 +15,7 @@ use sea_orm::{
     prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend,
     EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
+use std::mem;
 
 /// Repository for point operations
 pub struct PointRepository;
@@ -85,7 +86,7 @@ impl PointRepository {
         for p in points.into_iter() {
             batch.push(p);
             if batch.len() >= batch_rows {
-                let to_insert = std::mem::take(&mut batch);
+                let to_insert = mem::take(&mut batch);
                 let inserted = Point::insert_many(to_insert)
                     .exec_with_returning_many(conn)
                     .await?;

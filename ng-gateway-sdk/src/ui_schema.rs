@@ -8,6 +8,7 @@ use crate::DriverError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     fmt::{self, Display, Formatter},
     io::{Read as IoRead, Seek as IoSeek, Write as IoWrite},
@@ -1052,9 +1053,9 @@ impl FlattenColumn {
                 return f(a
                     .partial_cmp(&b)
                     .map(|o| match o {
-                        std::cmp::Ordering::Less => -1,
-                        std::cmp::Ordering::Equal => 0,
-                        std::cmp::Ordering::Greater => 1,
+                        Ordering::Less => -1,
+                        Ordering::Equal => 0,
+                        Ordering::Greater => 1,
                     })
                     .unwrap_or(1));
             }

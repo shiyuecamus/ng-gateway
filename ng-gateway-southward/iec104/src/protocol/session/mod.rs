@@ -24,10 +24,11 @@ use arc_swap::ArcSwapOption;
 use chrono::{DateTime, Utc};
 use futures::{pin_mut, Stream, StreamExt};
 use futures_util::SinkExt;
-use std::{collections::VecDeque, time::Duration};
 use std::{
+    collections::VecDeque,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},

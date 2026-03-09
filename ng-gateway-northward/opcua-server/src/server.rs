@@ -29,8 +29,7 @@ use opcua::{
         Variant,
     },
 };
-use std::time::Instant;
-use std::{net::IpAddr, path::PathBuf, str::FromStr, sync::Arc};
+use std::{fs, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Instrument};
 
@@ -441,7 +440,7 @@ fn materialize_trusted_client_certs(pki_dir: &str, certs: &[String]) -> Northwar
     }
 
     let trusted_dir = PathBuf::from(pki_dir).join("trusted");
-    std::fs::create_dir_all(&trusted_dir).map_err(|e| NorthwardError::ConfigurationError {
+    fs::create_dir_all(&trusted_dir).map_err(|e| NorthwardError::ConfigurationError {
         message: format!(
             "failed to create PKI trusted directory {}: {e}",
             trusted_dir.display()
@@ -461,7 +460,7 @@ fn materialize_trusted_client_certs(pki_dir: &str, certs: &[String]) -> Northwar
         })?;
         let file_name = opcua::crypto::CertificateStore::cert_file_name(&x509);
         let path = trusted_dir.join(file_name);
-        std::fs::write(&path, &der).map_err(|e| NorthwardError::ConfigurationError {
+        fs::write(&path, &der).map_err(|e| NorthwardError::ConfigurationError {
             message: format!(
                 "failed to write trusted certificate {}: {e}",
                 path.display()

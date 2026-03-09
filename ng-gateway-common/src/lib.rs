@@ -28,8 +28,10 @@ use ng_gateway_models::{
 };
 use once_cell::sync::OnceCell;
 use std::{
+    env, fs,
     future::Future,
     path::Path,
+    process,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -398,7 +400,7 @@ impl NGAppContext {
         tracker.wait().await;
 
         info!("✅ Graceful shutdown completed successfully");
-        std::process::exit(0);
+        process::exit(0);
     }
 }
 
@@ -414,10 +416,10 @@ fn apply_runtime_dir(runtime_dir: &str) -> NGResult<()> {
         return Ok(());
     }
 
-    std::fs::create_dir_all(dir)
+    fs::create_dir_all(dir)
         .map_err(|e| NGError::from(format!("Failed to create runtime_dir {}: {}", dir, e)))?;
 
-    std::env::set_current_dir(dir).map_err(|e| {
+    env::set_current_dir(dir).map_err(|e| {
         NGError::from(format!(
             "Failed to set current_dir to runtime_dir {}: {}",
             dir, e
@@ -453,7 +455,7 @@ fn ensure_runtime_directories() -> NGResult<()> {
     ];
 
     for dir in dirs {
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        if let Err(e) = fs::create_dir_all(&dir) {
             return Err(NGError::from(format!(
                 "Failed to create directory {}: {}",
                 dir.display(),

@@ -15,8 +15,7 @@ use ng_gateway_sdk::{
     DriverError, DriverResult, FailureKind, FailurePhase, SouthwardInitContext,
     SouthwardTransportMeter,
 };
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 /// IEC104 supervised connector (constructed from init context, no I/O).
 #[derive(Clone)]

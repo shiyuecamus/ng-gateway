@@ -12,7 +12,11 @@ pub mod opcua;
 use ng_gateway_sdk::{
     Driver, DriverResult, NGValue, NorthwardData, RuntimeDevice, RuntimePoint, WriteResult,
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    fmt::{self, Debug, Formatter},
+    sync::Arc,
+    time::Duration,
+};
 
 /// A pre-built grouping item for `collect_data`: (device, points_of_device).
 ///
@@ -38,8 +42,8 @@ pub struct ChannelRuntime {
     pub downlink_points: Vec<Arc<dyn RuntimePoint>>,
 }
 
-impl std::fmt::Debug for ChannelRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for ChannelRuntime {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChannelRuntime")
             .field("channel_idx", &self.channel_idx)
             .field("devices", &self.devices.len())

@@ -13,6 +13,7 @@ use ng_gateway_sdk::{
     RetryPolicy, RuntimeDevice, RuntimePoint,
 };
 use std::{
+    cmp,
     collections::HashMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -514,7 +515,7 @@ impl NGCollector {
                         });
                     }
                     let remaining2 = total_budget.saturating_sub(elapsed2);
-                    let actual_sleep = std::cmp::min(delay, remaining2);
+                    let actual_sleep = cmp::min(delay, remaining2);
                     if actual_sleep.is_zero() {
                         continue;
                     }

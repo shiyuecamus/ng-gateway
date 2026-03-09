@@ -10,7 +10,7 @@
 //! - All escaping is delegated to `serde_json` to ensure correctness.
 
 use ng_gateway_sdk::{NGValue, NorthwardError, NorthwardResult};
-use std::io::Write as _;
+use std::{io::Write as _, mem};
 use tracing::warn;
 
 // NOTE: keep framing bytes private to avoid leaking "magic values" into call sites.
@@ -158,8 +158,8 @@ impl TelemetryChunker {
             let flushed = if self.wrote_any {
                 self.payload.extend_from_slice(TELEMETRY_SUFFIX);
                 // Double-buffer swap: preserve payload capacity; publish buffer can be recycled.
-                std::mem::swap(&mut self.payload, &mut self.out);
-                let out = std::mem::take(&mut self.out);
+                mem::swap(&mut self.payload, &mut self.out);
+                let out = mem::take(&mut self.out);
                 self.payload.clear();
                 self.payload.extend_from_slice(&self.prefix);
                 self.wrote_any = false;
@@ -265,8 +265,8 @@ impl AttributesChunker {
         if self.payload.len() + entry_len + ATTRIBUTES_SUFFIX.len() > self.max_payload_bytes {
             let flushed = if self.wrote_any {
                 self.payload.extend_from_slice(ATTRIBUTES_SUFFIX);
-                std::mem::swap(&mut self.payload, &mut self.out);
-                let out = std::mem::take(&mut self.out);
+                mem::swap(&mut self.payload, &mut self.out);
+                let out = mem::take(&mut self.out);
                 self.payload.clear();
                 self.payload.extend_from_slice(&self.prefix);
                 self.wrote_any = false;

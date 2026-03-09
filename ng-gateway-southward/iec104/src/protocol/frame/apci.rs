@@ -3,7 +3,10 @@ use super::{
     Apdu,
 };
 use chrono::{DateTime, NaiveDateTime, Utc};
-use std::{collections::VecDeque, fmt::Display};
+use std::{
+    collections::VecDeque,
+    fmt::{Display, Formatter, Result as FmtResult},
+};
 
 pub const START_FRAME: u8 = 0x68; // 启动字符
 
@@ -36,7 +39,7 @@ pub struct Apci {
 }
 
 impl Display for Apci {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_fmt(format_args!("[{:02X}]", self.start))?;
         f.write_fmt(format_args!("[{:02X}]", self.apdu_length))?;
         f.write_fmt(format_args!("[{:02X}]", self.ctrl1))?;

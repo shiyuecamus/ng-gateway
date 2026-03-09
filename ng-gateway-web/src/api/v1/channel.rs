@@ -35,6 +35,7 @@ use sea_orm::IntoActiveModel;
 use std::{
     collections::{HashMap, HashSet},
     io::Cursor,
+    iter,
     sync::Arc,
 };
 
@@ -1142,7 +1143,7 @@ pub async fn import_device_points_commit(
                 // Build point rows without cloning: consume owned `ValidatedRow` values and remove keys in-place.
                 let mut point_rows: Vec<ValidatedRow> = Vec::new();
 
-                for row in std::iter::once(first_row).chain(row_iter) {
+                for row in iter::once(first_row).chain(row_iter) {
                     let mut point_row_values = row.values;
                     point_row_values.remove("device_name");
                     point_row_values.remove("device_type");

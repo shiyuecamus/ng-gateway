@@ -6,7 +6,10 @@ use serde_json::Value as Json;
 use std::{
     collections::HashMap,
     ffi::CStr,
+    fs,
+    os::raw::c_char,
     path::{Path, PathBuf},
+    ptr, slice,
     time::Instant,
 };
 
@@ -169,7 +172,7 @@ impl ScenarioPreset {
 // FFI symbols exported by exactly one linked driver (see `ng-gateway-bench` feature flags).
 extern "C" {
     fn ng_driver_metadata_json_ptr(out_ptr: *mut *const u8, out_len: *mut usize);
-    fn ng_driver_type() -> *const ::std::os::raw::c_char;
+    fn ng_driver_type() -> *const c_char;
 }
 
 fn main() -> anyhow::Result<()> {
@@ -297,7 +300,7 @@ struct WriteDevicePointsParams<'a> {
 /// Write a single device+points workbook (one channel worth of rows).
 fn write_device_points_workbook(params: &WriteDevicePointsParams<'_>) -> anyhow::Result<()> {
     if let Some(parent) = params.path.parent() {
-        std::fs::create_dir_all(parent)
+        fs::create_dir_all(parent)
             .with_context(|| format!("create output dir {}", parent.display()))?;
     }
 
@@ -554,18 +557,18 @@ fn must_col(map: &HashMap<&str, usize>, key: &str) -> anyhow::Result<usize> {
 
 /// Load `DriverSchemas` from the driver-exported metadata JSON bytes.
 fn load_driver_schemas_from_ffi() -> anyhow::Result<DriverSchemas> {
-    let mut ptr: *const u8 = std::ptr::null();
+    let mut ptr: *const u8 = ptr::null();
     let mut len: usize = 0;
     unsafe { ng_driver_metadata_json_ptr(&mut ptr as *mut *const u8, &mut len as *mut usize) };
     if ptr.is_null() || len == 0 {
         anyhow::bail!("driver returned empty metadata json");
     }
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let bytes = unsafe { slice::from_raw_parts(ptr, len) };
     Ok(serde_json::from_slice::<DriverSchemas>(bytes)?)
 }
 
 /// Convert a C string pointer into a Rust `String`.
-fn cstr_to_string(ptr: *const ::std::os::raw::c_char) -> String {
+fn cstr_to_string(ptr: *const c_char) -> String {
     if ptr.is_null() {
         return String::new();
     }

@@ -13,8 +13,7 @@ use crate::{envelope::EnvelopeKind, northward::NorthwardData};
 use jmespath::Expression;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
 /// One mapping rule: write `expr(input)` into `out_path`.

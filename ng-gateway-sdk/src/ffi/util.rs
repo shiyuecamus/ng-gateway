@@ -5,6 +5,7 @@
 //! - Keep `ng_driver_factory!` / `ng_plugin_factory!` macro bodies readable.
 //! - Centralize safety checks for raw pointer outputs.
 
+use std::{ffi::CString, vec::Vec};
 use tokio::runtime::Runtime;
 
 /// Convert a `&'static str` to a C string safely.
@@ -13,15 +14,15 @@ use tokio::runtime::Runtime;
 /// - This MUST NOT panic.
 /// - If the input contains an interior NUL, it is sanitized to a space (`0x20`).
 #[inline]
-pub fn cstring_sanitized(input: &'static str) -> ::std::ffi::CString {
+pub fn cstring_sanitized(input: &'static str) -> CString {
     let bytes = input.as_bytes();
-    let mut buf: ::std::vec::Vec<u8> = ::std::vec::Vec::with_capacity(bytes.len() + 1);
+    let mut buf: Vec<u8> = Vec::with_capacity(bytes.len() + 1);
     for &b in bytes.iter() {
         buf.push(if b == 0 { b' ' } else { b });
     }
     buf.push(0);
     // SAFETY: we ensured there are no interior NULs and we appended a terminator.
-    unsafe { ::std::ffi::CString::from_vec_unchecked(buf) }
+    unsafe { CString::from_vec_unchecked(buf) }
 }
 
 /// Write a slice's pointer/length to out-params.

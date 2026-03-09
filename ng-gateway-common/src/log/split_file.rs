@@ -13,8 +13,8 @@ use ng_gateway_models::settings::{LoggingFileRotation, LoggingFormat, RotationMo
 use ng_gateway_sdk::log::fields as log_fields;
 use serde_json;
 use std::{
-    fmt::Write as _,
-    fs::OpenOptions,
+    fmt::{Debug, Display, Write as _},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -106,7 +106,7 @@ impl Visit for LogRouteVisitor {
         }
     }
 
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
         // Best-effort: capture string-ish debug values. This makes the extractor resilient
         // even if callers log `driver_type = %...` instead of `driver_type = "..."`.
         match field.name() {
@@ -214,7 +214,7 @@ impl SplitFileRegistry {
     fn new(log_dir: PathBuf, rotation: LoggingFileRotation) -> Self {
         // Ensure log directory exists (best-effort). This avoids surprising runtime failures
         // when the logger initializes before runtime directories are created.
-        let _ = std::fs::create_dir_all(&log_dir);
+        let _ = fs::create_dir_all(&log_dir);
         Self {
             writers: DashMap::new(),
             guards: DashMap::new(),
@@ -281,7 +281,7 @@ impl SplitFileRegistry {
     /// Get all active log file names (for API listing).
     pub fn list_log_files(&self) -> Vec<String> {
         let mut files: Vec<String> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&self.log_dir) {
+        if let Ok(entries) = fs::read_dir(&self.log_dir) {
             for entry in entries.flatten() {
                 let Ok(ft) = entry.file_type() else { continue };
                 if !ft.is_file() {
@@ -319,7 +319,7 @@ struct RotatingFileAppender {
 
 impl RotatingFileAppender {
     fn new(dir: PathBuf, stem: String, rotation: LoggingFileRotation) -> Self {
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
         let now = chrono::Utc::now();
         let current_name = compute_active_name(&stem, &rotation, now);
         let (file, size) = open_for_append(&dir, &current_name);
@@ -375,14 +375,14 @@ impl RotatingFileAppender {
         for i in (1..keep_rotated).rev() {
             let src = rotated_path(&self.dir, &self.current_name, i);
             let dst = rotated_path(&self.dir, &self.current_name, i + 1);
-            let _ = std::fs::remove_file(&dst);
-            let _ = std::fs::rename(&src, &dst);
+            let _ = fs::remove_file(&dst);
+            let _ = fs::rename(&src, &dst);
         }
 
         // Move current base to `.1`
         let first = rotated_path(&self.dir, &self.current_name, 1);
-        let _ = std::fs::remove_file(&first);
-        let _ = std::fs::rename(&base_path, &first);
+        let _ = fs::remove_file(&first);
+        let _ = fs::rename(&base_path, &first);
 
         // Open a new active file.
         let (file, _) = open_for_truncate(&self.dir, &self.current_name);
@@ -491,7 +491,7 @@ struct EventFieldsFormatter {
 
 impl EventFieldsFormatter {
     #[inline]
-    fn push_kv(&mut self, key: &str, value: impl std::fmt::Display) {
+    fn push_kv(&mut self, key: &str, value: impl Display) {
         if key == log_fields::MESSAGE {
             // `message` is handled separately to keep output stable.
             return;
@@ -530,7 +530,7 @@ impl Visit for EventFieldsFormatter {
         self.push_kv(field.name(), value);
     }
 
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
         if field.name() == log_fields::MESSAGE {
             self.message = format!("{value:?}");
             return;

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::{net::IpAddr, ops};
 use validator::Validate;
 
 // ─────────────────── Enums ───────────────────
@@ -474,7 +474,7 @@ pub struct ApStatus {
     pub sta_will_disconnect: bool,
     /// Set to `true` if a previous `stop_ap` failed to restore the STA connection.
     /// The frontend should prompt the user to restart the network or reboot.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "ops::Not::not")]
     pub sta_restore_failed: bool,
 }
 

@@ -19,8 +19,10 @@ use ng_gateway_sdk::{
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::CStr,
+    fs,
     os::raw::{c_char, c_uchar},
     path::Path,
+    ptr, slice,
     sync::Arc,
 };
 
@@ -375,7 +377,7 @@ fn extract_probe_info(library: &Library, path: &Path) -> DriverResult<SouthwardP
     };
     let version = read_cstr(unsafe { version_fn() }, "ng_driver_version", path)?;
 
-    let mut ptr: *const c_uchar = std::ptr::null();
+    let mut ptr: *const c_uchar = ptr::null();
     let mut len: usize = 0;
     unsafe { metadata_ptr_fn(&mut ptr, &mut len) };
     if ptr.is_null() || len == 0 {
@@ -386,7 +388,7 @@ fn extract_probe_info(library: &Library, path: &Path) -> DriverResult<SouthwardP
             len
         )));
     }
-    let json_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let json_slice = unsafe { slice::from_raw_parts(ptr, len) };
     let driver_metadata: DriverSchemas = serde_json::from_slice(json_slice).map_err(|e| {
         DriverError::LoadError(format!(
             "Failed to parse driver metadata json in {}: {e}",
@@ -394,8 +396,8 @@ fn extract_probe_info(library: &Library, path: &Path) -> DriverResult<SouthwardP
         ))
     })?;
 
-    let size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
-    let bytes = std::fs::read(path).map_err(|e| {
+    let size = fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+    let bytes = fs::read(path).map_err(|e| {
         DriverError::LoadError(format!("Failed to read library {}: {e}", path.display()))
     })?;
     let info = inspect_binary(&bytes);

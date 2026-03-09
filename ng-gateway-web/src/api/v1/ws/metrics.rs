@@ -11,8 +11,6 @@
 //! - Payloads are **aggregated snapshots**. Device/point-level details must use
 //!   `/api/ws/monitor` or dedicated diagnostic APIs.
 
-use std::sync::Arc;
-
 use super::common::ws_upgrade_and_spawn;
 use crate::AppState;
 use actix_web::{web, Error as ActixError, HttpRequest, HttpResponse};
@@ -25,7 +23,7 @@ use ng_gateway_models::core::metrics::DeviceStatsSnapshot;
 use ng_gateway_models::Gateway;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio::time::{interval_at, Duration, Instant, MissedTickBehavior};
 use tracing::{debug, error, instrument, warn};
 

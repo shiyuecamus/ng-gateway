@@ -13,8 +13,9 @@ use rustls::{
 use rustls_pemfile::{certs, ec_private_keys, pkcs8_private_keys, rsa_private_keys};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufReader, Seek},
+    io::{BufReader, Seek, SeekFrom},
     path::Path,
+    str,
     sync::Arc,
 };
 use time::OffsetDateTime;
@@ -110,9 +111,7 @@ pub fn configure_rustls_server_config(
             }
             PrivateKeyDer::Pkcs8(pkcs8_keys.into_iter().next().unwrap())
         } else {
-            key_reader
-                .seek(std::io::SeekFrom::Start(0))
-                .map_err(TLSError::Io)?;
+            key_reader.seek(SeekFrom::Start(0)).map_err(TLSError::Io)?;
             // Try PKCS1 (RSA)
             let rsa_keys = rsa_private_keys(&mut key_reader)
                 .map(|item_result| item_result.map_err(TLSError::Io))
@@ -124,9 +123,7 @@ pub fn configure_rustls_server_config(
                 }
                 PrivateKeyDer::Pkcs1(rsa_keys.into_iter().next().unwrap())
             } else {
-                key_reader
-                    .seek(std::io::SeekFrom::Start(0))
-                    .map_err(TLSError::Io)?;
+                key_reader.seek(SeekFrom::Start(0)).map_err(TLSError::Io)?;
                 // Try SEC1 (EC)
                 let ec_keys = ec_private_keys(&mut key_reader)
                     .map(|item_result| item_result.map_err(TLSError::Io))
@@ -378,8 +375,8 @@ fn generate_or_load_certificate(
         ));
     }
 
-    let ca_key_pem_str = std::str::from_utf8(&ca_key_pem_vec).map_err(TLSError::Utf8Error)?;
-    let ca_cert_pem_str = std::str::from_utf8(&ca_cert_pem_vec).map_err(TLSError::Utf8Error)?;
+    let ca_key_pem_str = str::from_utf8(&ca_key_pem_vec).map_err(TLSError::Utf8Error)?;
+    let ca_cert_pem_str = str::from_utf8(&ca_cert_pem_vec).map_err(TLSError::Utf8Error)?;
 
     let ca_key_pair_for_signing = KeyPair::from_pem(ca_key_pem_str).map_err(TLSError::Rcgen)?;
     // Create an Issuer from CA cert PEM and the CA's private key

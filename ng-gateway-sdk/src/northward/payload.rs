@@ -1,12 +1,17 @@
-use crate::mapping::{build_mapping_input, CompiledMappedJson, MappedJsonSpec, MappedRule};
-use crate::northward::codec::{encode_uplink, EncodeError, NorthwardUplinkFormat};
-use crate::northward::{NorthwardData, NorthwardRuntimeApi};
+use crate::{
+    mapping::{build_mapping_input, CompiledMappedJson, MappedJsonSpec, MappedRule},
+    northward::{
+        codec::{encode_uplink, EncodeError, NorthwardUplinkFormat},
+        NorthwardData, NorthwardRuntimeApi,
+    },
+};
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use serde::ser::SerializeMap;
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeMap, Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 /// Declarative mapping configuration for `mapped_json`.
 ///

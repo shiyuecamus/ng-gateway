@@ -26,7 +26,11 @@ use super::{
 use arc_swap::ArcSwapOption;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{SinkExt, Stream, StreamExt};
-use std::{io, sync::Arc, time::Duration};
+use std::{
+    io::{Error, ErrorKind, Result as IoResult},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -49,7 +53,7 @@ pub struct SessionRequest {
     /// Operation timeout.
     pub timeout: Duration,
     /// Response channel that will receive the decoded `McMessage`.
-    pub response_tx: oneshot::Sender<std::io::Result<McMessage>>,
+    pub response_tx: oneshot::Sender<IoResult<McMessage>>,
     /// Concurrency permit carried across the lifetime of this request.
     pub permit: OwnedSemaphorePermit,
 }
@@ -280,23 +284,23 @@ impl Session {
     /// This method enforces strict request/response semantics and delegates
     /// the actual I/O to the background connection task, which uses
     /// `Framed<TcpStream, Codec>` for encode/decode.
-    pub async fn request_message(&self, message: McMessage) -> std::io::Result<McMessage> {
+    pub async fn request_message(&self, message: McMessage) -> IoResult<McMessage> {
         // Acquire one concurrency slot
         let permit = match self.request_semaphore.clone().acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
+                return Err(Error::new(
+                    ErrorKind::BrokenPipe,
                     "MC session semaphore closed",
                 ))
             }
         };
 
         // Fast path: ensure we have a request sender
-        let sender = self.request_tx.load_full().ok_or(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "MC session not active",
-        ))?;
+        let sender = self
+            .request_tx
+            .load_full()
+            .ok_or(Error::new(ErrorKind::NotConnected, "MC session not active"))?;
 
         let (tx, rx) = oneshot::channel();
         let req = SessionRequest {
@@ -307,8 +311,8 @@ impl Session {
         };
 
         if sender.send(req).await.is_err() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
+            return Err(Error::new(
+                ErrorKind::BrokenPipe,
                 "MC session request channel closed",
             ));
         }
@@ -316,8 +320,8 @@ impl Session {
         match rx.await {
             Ok(Ok(msg)) => Ok(msg),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
+            Err(_) => Err(Error::new(
+                ErrorKind::TimedOut,
                 "MC session request timeout",
             )),
         }
@@ -387,7 +391,7 @@ impl Session {
 
                 let resp = match self.request_message(message).await {
                     Ok(m) => m,
-                    Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    Err(e) if e.kind() == ErrorKind::TimedOut => {
                         return Err(McError::RequestTimeout);
                     }
                     Err(e) => return Err(McError::Io(e)),
@@ -569,7 +573,7 @@ impl Session {
 
             let resp = match self.request_message(message).await {
                 Ok(m) => m,
-                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
                     return Err(McError::RequestTimeout);
                 }
                 Err(e) => return Err(McError::Io(e)),
@@ -769,7 +773,7 @@ impl Session {
 
             let resp = match self.request_message(message).await {
                 Ok(m) => m,
-                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
                     return Err(McError::RequestTimeout);
                 }
                 Err(e) => return Err(McError::Io(e)),
@@ -837,7 +841,7 @@ impl Session {
 
                 let resp = match self.request_message(message).await {
                     Ok(m) => m,
-                    Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    Err(e) if e.kind() == ErrorKind::TimedOut => {
                         return Err(McError::RequestTimeout);
                     }
                     Err(e) => return Err(McError::Io(e)),
@@ -941,7 +945,7 @@ impl Session {
 
             let resp = match self.request_message(message).await {
                 Ok(m) => m,
-                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
                     return Err(McError::RequestTimeout);
                 }
                 Err(e) => return Err(McError::Io(e)),
@@ -1074,7 +1078,7 @@ impl Session {
 
             let resp = match self.request_message(message).await {
                 Ok(m) => m,
-                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
                     return Err(McError::RequestTimeout);
                 }
                 Err(e) => return Err(McError::Io(e)),
@@ -1341,8 +1345,8 @@ async fn run_connection_with_stream(
                 if let Some(request) = req {
                     // Send full MC message via framed Sink (encodes with `Codec`).
                     if let Err(e) = framed.send(request.message).await {
-                        let _ = request.response_tx.send(Err(std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
+                        let _ = request.response_tx.send(Err(Error::new(
+                            ErrorKind::BrokenPipe,
                             format!("MC write failed: {e}"),
                         )));
                         let _ = events_tx.send(SessionEvent::TransportError);
@@ -1360,16 +1364,16 @@ async fn run_connection_with_stream(
                             break;
                         }
                         Ok(None) => {
-                            let _ = request.response_tx.send(Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
+                            let _ = request.response_tx.send(Err(Error::new(
+                                ErrorKind::UnexpectedEof,
                                 "MC connection closed",
                             )));
                             let _ = events_tx.send(SessionEvent::TransportError);
                             break;
                         }
                         Err(_elapsed) => {
-                            let _ = request.response_tx.send(Err(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
+                            let _ = request.response_tx.send(Err(Error::new(
+                                ErrorKind::TimedOut,
                                 "MC request timed out waiting for response",
                             )));
                             let _ = events_tx.send(SessionEvent::TransportError);

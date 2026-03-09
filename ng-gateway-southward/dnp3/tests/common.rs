@@ -9,7 +9,7 @@ use ng_gateway_sdk::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Once},
+    sync::{Arc, Mutex, MutexGuard, Once},
 };
 use tracing::Level;
 
@@ -18,7 +18,7 @@ use tracing::Level;
 /// # Notes
 /// If the mutex is poisoned, we log an error and recover the inner value to
 /// keep integration tests running and observable.
-fn lock_unpoisoned<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock_unpoisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     match m.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {

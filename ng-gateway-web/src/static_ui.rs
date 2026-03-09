@@ -235,9 +235,9 @@ fn content_type_for_path(path: &str) -> &'static str {
 
 #[cfg(feature = "ui-embedded")]
 fn load_zip_into_assets(zip_bytes: &[u8]) -> NGResult<UiAssets> {
-    use std::io::Read;
+    use std::io::{Cursor, Read};
 
-    let cursor = std::io::Cursor::new(zip_bytes);
+    let cursor = Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| NGError::from(format!("Failed to open embedded ui-dist.zip: {e}")))?;
 

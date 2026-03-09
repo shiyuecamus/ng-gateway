@@ -6,7 +6,10 @@ use moka::{
 };
 use ng_gateway_error::{storage::CacheError, StorageResult};
 use ng_gateway_models::cache::NGBaseCache;
-use std::{any::Any, time::Duration};
+use std::{
+    any::Any,
+    time::{Duration, Instant},
+};
 
 // The cached item with per-entry expiration metadata.
 #[derive(Clone)]
@@ -42,12 +45,7 @@ impl<K, V> Expiry<K, CacheItem<V>> for MokaExpiry
 where
     V: Clone + Send + Sync + 'static,
 {
-    fn expire_after_create(
-        &self,
-        _key: &K,
-        item: &CacheItem<V>,
-        _: std::time::Instant,
-    ) -> Option<Duration> {
+    fn expire_after_create(&self, _key: &K, item: &CacheItem<V>, _: Instant) -> Option<Duration> {
         match item.ttl {
             Some(ttl) => Some(ttl),
             None => self.ttl,
@@ -58,7 +56,7 @@ where
         &self,
         _key: &K,
         item: &CacheItem<V>,
-        _: std::time::Instant,
+        _: Instant,
         _current: Option<Duration>,
     ) -> Option<Duration> {
         match item.ttl {

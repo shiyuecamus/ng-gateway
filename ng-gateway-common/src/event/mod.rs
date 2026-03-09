@@ -9,7 +9,7 @@ use ng_gateway_models::{
     EventBus,
 };
 use std::{
-    any::{type_name, TypeId},
+    any::{type_name, Any, TypeId},
     marker::PhantomData,
     sync::Arc,
 };
@@ -24,7 +24,7 @@ use tracing::{debug, instrument, warn, Instrument};
 pub struct NGEventBus {
     config: EventBusConfig,
     channels: Arc<DashMap<TypeId, Sender<Arc<dyn NGEvent>>>>,
-    dispatchers: Arc<DashMap<TypeId, Box<dyn std::any::Any + Send + Sync>>>,
+    dispatchers: Arc<DashMap<TypeId, Box<dyn Any + Send + Sync>>>,
     stats: Arc<RwLock<EventStats>>,
 }
 

@@ -1,10 +1,11 @@
+use std::{io, str};
 use thiserror::Error;
 
 /// Represents TLS-related errors that can occur during TLS operations
 #[derive(Error, Debug)]
 pub enum TLSError {
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("Certificate generation error: {0}")]
     Rcgen(#[from] rcgen::Error),
     #[error("Rustls error: {0}")]
@@ -30,5 +31,5 @@ pub enum TLSError {
     #[error("Failed to acquire file lock for certificate generation: {path}")]
     FileLockError { path: String },
     #[error("UTF-8 conversion error: {0}")]
-    Utf8Error(#[from] std::str::Utf8Error),
+    Utf8Error(#[from] str::Utf8Error),
 }

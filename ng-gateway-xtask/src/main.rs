@@ -1,11 +1,11 @@
-use std::env;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::{
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, ExitCode},
+};
 
 #[derive(Parser)]
 #[command(name = "ng-gateway-xtask")]

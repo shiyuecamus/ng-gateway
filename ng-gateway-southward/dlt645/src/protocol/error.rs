@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{io, time::Duration};
 use thiserror::Error;
 
 /// DL/T645 exception code carried in the data field when D6 = 1.
@@ -81,5 +81,5 @@ pub enum ProtocolError {
     Transport(String),
     /// Underlying IO error.
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 }

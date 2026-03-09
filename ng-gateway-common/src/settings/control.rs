@@ -13,7 +13,7 @@ use ng_gateway_models::domain::prelude::{
 };
 use ng_gateway_models::settings::Settings;
 use ng_gateway_sdk::RetryPolicy;
-use std::{fs, path::Path};
+use std::{env, fs, io, path::Path};
 use toml_edit::{value as toml_value, DocumentMut, Item};
 
 #[inline]
@@ -138,7 +138,7 @@ fn derive_env_key(key: RuntimeSettingKey) -> String {
 
 #[inline]
 fn env_overridden(key: RuntimeSettingKey) -> bool {
-    std::env::var_os(derive_env_key(key)).is_some()
+    env::var_os(derive_env_key(key)).is_some()
 }
 
 #[inline]
@@ -147,7 +147,7 @@ fn read_gateway_toml_doc(path: &Path) -> NGResult<DocumentMut> {
         Ok(s) => s
             .parse::<DocumentMut>()
             .map_err(|e| NGError::from(format!("Failed to parse {DEFAULT_CONFIG_FILE_NAME}: {e}"))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DocumentMut::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(DocumentMut::new()),
         Err(e) => Err(NGError::from(format!(
             "Failed to read {DEFAULT_CONFIG_FILE_NAME} {}: {e}",
             path.display()

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use actix_web::{http::Method, web};
 use actix_web_validator::{Json, Path, Query};
 use ng_gateway_common::casbin::NGPermChecker;
@@ -17,6 +15,7 @@ use ng_gateway_models::{
 };
 use ng_gateway_repository::{AppSubRepository, ChannelRepository};
 use sea_orm::DatabaseConnection;
+use std::{sync::Arc, time::Instant};
 use tracing::{info, instrument};
 
 use crate::{
@@ -109,7 +108,7 @@ async fn page(params: Query<AppSubPageParams>) -> WebResult<WebResponse<PageResu
 
 /// Retrieve channel-device tree for subscription scope selection
 async fn device_tree() -> WebResult<WebResponse<Vec<ChannelDeviceTree>>> {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let tree = ChannelRepository::find_with_devices::<DatabaseConnection>(None)
         .await?
         .into_iter()

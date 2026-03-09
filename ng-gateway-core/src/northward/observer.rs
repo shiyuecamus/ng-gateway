@@ -22,11 +22,13 @@ use ng_gateway_sdk::{
     supervision::{NorthwardObserverLabels, Observer, ObserverFactory, RetryBudgetSnapshot},
     ConnectionState, FailureReport, NorthwardData, Phase, QueuePolicy,
 };
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use std::time::Duration;
 use tracing::warn;
 
 /// Lock-free connection state cell shared between AppActor and its supervision observer.

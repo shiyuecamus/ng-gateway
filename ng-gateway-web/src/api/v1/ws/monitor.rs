@@ -20,8 +20,7 @@ use ng_gateway_models::RealtimeMonitorHub;
 use ng_gateway_sdk::{NGValue, NGValueJsonOptions, NorthwardData};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, mem, sync::Arc};
 use tokio::{
     sync::broadcast::error::RecvError,
     time::{interval, Duration, MissedTickBehavior},
@@ -213,7 +212,7 @@ impl ConnectionSubscriptions {
                                     data_type: "telemetry".to_string(),
                                     scope: None,
                                     timestamp: ts,
-                                    values: Value::Object(std::mem::take(&mut telemetry_buf)),
+                                    values: Value::Object(mem::take(&mut telemetry_buf)),
                                 };
 
                                 let text = match serde_json::to_string(&msg) {
@@ -238,9 +237,9 @@ impl ConnectionSubscriptions {
                                 let ts = attr_ts.take().unwrap_or_default();
 
                                 let values = Value::Object(Map::from_iter([
-                                    ("client".to_string(), Value::Object(std::mem::take(&mut attr_client_buf))),
-                                    ("shared".to_string(), Value::Object(std::mem::take(&mut attr_shared_buf))),
-                                    ("server".to_string(), Value::Object(std::mem::take(&mut attr_server_buf))),
+                                    ("client".to_string(), Value::Object(mem::take(&mut attr_client_buf))),
+                                    ("shared".to_string(), Value::Object(mem::take(&mut attr_shared_buf))),
+                                    ("server".to_string(), Value::Object(mem::take(&mut attr_server_buf))),
                                 ]));
 
                                 let msg = MonitorServerMessage::Update {

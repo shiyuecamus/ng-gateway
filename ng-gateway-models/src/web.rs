@@ -1,7 +1,6 @@
 use actix_web::body::EitherBody;
 use actix_web::{HttpResponse, Responder};
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Response code
 pub enum ResponseCode {

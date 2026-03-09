@@ -30,6 +30,7 @@ use ng_gateway_sdk::{
 use serde_json::json;
 use std::{
     collections::HashMap,
+    fmt::{self, Debug, Formatter},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -97,8 +98,8 @@ impl McSessionPool {
     }
 }
 
-impl std::fmt::Debug for McSessionPool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for McSessionPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("McSessionPool")
             .field("pool_size", &self.sessions.len())
             .finish()

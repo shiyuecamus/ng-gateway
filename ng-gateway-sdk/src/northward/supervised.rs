@@ -14,9 +14,12 @@ use crate::{
 };
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 use tokio::sync::{watch, Mutex};
 
@@ -25,7 +28,7 @@ use tokio::sync::{watch, Mutex};
 pub trait NorthwardHandle: DowncastSync + Send + Sync + 'static {
     async fn process_data(&self, data: Arc<NorthwardData>) -> NorthwardResult<()>;
 
-    async fn ping(&self) -> NorthwardResult<std::time::Duration> {
+    async fn ping(&self) -> NorthwardResult<Duration> {
         Err(NorthwardError::NotConnected)
     }
 }

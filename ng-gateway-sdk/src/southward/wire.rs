@@ -1,8 +1,9 @@
 use bytes::{BufMut, Bytes};
+use std::fmt;
 
 /// Unified wire encoding trait across layers
 pub trait WireEncode {
-    type Error: std::fmt::Debug + Send + Sync + 'static;
+    type Error: fmt::Debug + Send + Sync + 'static;
     type Context;
 
     fn encoded_len(&self, ctx: &Self::Context) -> usize;
@@ -11,7 +12,7 @@ pub trait WireEncode {
 
 /// Unified zero-copy wire decoding trait across layers
 pub trait WireDecode: Sized {
-    type Error: std::fmt::Debug + Send + Sync + 'static;
+    type Error: fmt::Debug + Send + Sync + 'static;
     type Context;
 
     /// Parse from `input`, returning the remaining slice and the parsed value.

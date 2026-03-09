@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    fmt::{Display, Formatter},
+    fmt::{Display, Formatter, Result as FmtResult},
     sync::Arc,
 };
 
@@ -101,7 +101,7 @@ pub enum EnvelopeKind {
 }
 
 impl Display for EnvelopeKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.as_str())
     }
 }

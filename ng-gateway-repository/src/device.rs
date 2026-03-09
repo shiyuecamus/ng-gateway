@@ -12,6 +12,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, Order, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
+use std::mem;
 
 /// Repository for device operations
 pub struct DeviceRepository;
@@ -66,7 +67,7 @@ impl DeviceRepository {
         for d in devices.into_iter() {
             batch.push(d);
             if batch.len() >= batch_rows {
-                let to_insert = std::mem::take(&mut batch);
+                let to_insert = mem::take(&mut batch);
                 let inserted = Device::insert_many(to_insert)
                     .exec_with_returning_many(conn)
                     .await?;

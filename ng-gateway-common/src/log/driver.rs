@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 use std::{
     collections::VecDeque,
     ffi::c_void,
+    slice,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -143,7 +144,7 @@ fn host_enqueue(user_data: *mut c_void, ptr: *const u8, len: usize) {
         return;
     }
     let ctx = unsafe { &*(user_data as *const HostSinkContext) };
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let bytes = unsafe { slice::from_raw_parts(ptr, len) };
 
     // Copy immediately (FFI boundary).
     let mut payload = Vec::with_capacity(len.min(1024 * 1024));

@@ -24,8 +24,7 @@
 
 use super::di_types::{DIResponseSchema, DataFormat, ResponseField};
 use crate::protocol::frame::defs::{MeterType, MeterTypeFamily};
-use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 
 /// Key for DI schema lookup
 ///

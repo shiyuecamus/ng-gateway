@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use ng_gateway_sdk::{NorthwardRuntimeApi, PointMeta, RuntimeDelta};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::broadcast;
 
 #[derive(Clone)]

@@ -18,6 +18,7 @@ use ng_gateway_models::settings::Settings;
 use ng_gateway_utils::log_files::{self, LogFileMeta};
 use std::{
     collections::HashSet,
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -184,7 +185,7 @@ pub fn cleanup_logs_once(settings: &Settings, dry_run: bool) -> NGResult<Cleanup
         // Extra safety: only allow safe file names.
         log_files::validate_safe_file_name(&f.name).map_err(|e| NGError::from(e.to_string()))?;
         let path = Path::new(&log_dir).join(&f.name);
-        match std::fs::remove_file(&path) {
+        match fs::remove_file(&path) {
             Ok(()) => {
                 freed_bytes = freed_bytes.saturating_add(f.size);
                 deleted.push(f);

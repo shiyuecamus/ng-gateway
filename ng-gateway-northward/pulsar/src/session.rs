@@ -27,7 +27,7 @@ use pulsar::{
     producer::{MultiTopicProducer, ProducerOptions},
     Authentication, ConnectionRetryOptions, Pulsar, TokioExecutor,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn, Instrument};
@@ -437,7 +437,7 @@ fn build_producer_options(cfg: &PulsarProducerConfig) -> ProducerOptions {
         opts.batch_byte_size = cfg.batching_max_bytes.map(|v| v as usize);
         opts.batch_timeout = cfg
             .batching_max_publish_delay_ms
-            .map(|ms| std::time::Duration::from_millis(ms as u64));
+            .map(|ms| Duration::from_millis(ms as u64));
     }
 
     opts.compression = Some(match cfg.compression {

@@ -16,8 +16,7 @@ use ng_gateway_sdk::{
     supervision::{Connector, FailureKind, FailurePhase, Session, SessionContext},
     NorthwardError, NorthwardEvent, NorthwardInitContext, NorthwardResult, NorthwardRuntimeApi,
 };
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tracing::info;
 

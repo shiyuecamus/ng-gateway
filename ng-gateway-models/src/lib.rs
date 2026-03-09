@@ -39,7 +39,7 @@ use ng_gateway_error::{
 use ng_gateway_sdk::{ConnectionState, NorthwardData};
 use sea_orm::DatabaseConnection;
 use settings::Settings;
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::broadcast;
 
 // Implement downcast for core system traits
@@ -461,19 +461,19 @@ pub trait ActionRuntimeCmd: DowncastSync + Send + Sync + 'static {
 #[async_trait::async_trait]
 pub trait DriverRuntimeCmd: DowncastSync + Send + Sync + 'static {
     /// Install a new driver from uploaded file path (already stored in controlled dir)
-    async fn install_driver(&self, driver_id: i32, file_path: &std::path::Path) -> NGResult<()>;
+    async fn install_driver(&self, driver_id: i32, file_path: &Path) -> NGResult<()>;
 
     /// Uninstall a driver (force stop related channels, remove file and DB)
-    async fn uninstall_driver(&self, driver_id: i32, file_path: &std::path::Path) -> NGResult<()>;
+    async fn uninstall_driver(&self, driver_id: i32, file_path: &Path) -> NGResult<()>;
 }
 
 #[async_trait::async_trait]
 pub trait PluginRuntimeCmd: DowncastSync + Send + Sync + 'static {
     /// Install a new northward plugin from uploaded file path (already stored in controlled dir)
-    async fn install_plugin(&self, plugin_id: i32, file_path: &std::path::Path) -> NGResult<()>;
+    async fn install_plugin(&self, plugin_id: i32, file_path: &Path) -> NGResult<()>;
 
     /// Uninstall a northward plugin (if no apps reference it, remove file and DB)
-    async fn uninstall_plugin(&self, plugin_id: i32, file_path: &std::path::Path) -> NGResult<()>;
+    async fn uninstall_plugin(&self, plugin_id: i32, file_path: &Path) -> NGResult<()>;
 }
 
 #[async_trait::async_trait]

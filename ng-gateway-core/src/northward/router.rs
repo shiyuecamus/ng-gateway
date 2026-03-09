@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use dashmap::{mapref::entry::Entry as DashEntry, DashMap};
 use ng_gateway_models::entities::prelude::AppSubModel;
 use once_cell::sync::Lazy;
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 use tracing::{debug, info};
 
 type AppId = i32;
@@ -19,7 +19,7 @@ type DeviceSubscriptions = DashMap<AppId, AppPriorityList>;
 static EMPTY_SUBSCRIPTIONS: Lazy<AppPriorityList> = Lazy::new(|| Arc::new(Vec::new()));
 
 #[inline]
-fn cmp_app_priority(a: &AppPriority, b: &AppPriority) -> std::cmp::Ordering {
+fn cmp_app_priority(a: &AppPriority, b: &AppPriority) -> Ordering {
     // Higher priority first; tie-break by app_id to keep ordering deterministic.
     b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
 }

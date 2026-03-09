@@ -23,6 +23,7 @@ use rust_ethernet_ip::EipClient;
 use serde_json::json;
 use std::{
     collections::HashMap,
+    fmt::{self, Debug, Formatter},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         Arc, OnceLock,
@@ -101,8 +102,8 @@ impl EipSessionPool {
     }
 }
 
-impl std::fmt::Debug for EipSessionPool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for EipSessionPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("EipSessionPool")
             .field("pool_size", &self.clients.len())
             .finish()

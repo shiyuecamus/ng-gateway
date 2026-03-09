@@ -1,6 +1,14 @@
 use clap::Parser;
 use ng_gateway_sdk::{DriverSchemas, FieldError, FlattenEntity, ValidatedRow, ValidationCode};
-use std::{collections::HashMap, fs, io::Cursor, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::CStr,
+    fs,
+    io::Cursor,
+    os::raw::c_char,
+    ptr, slice,
+    time::Instant,
+};
 
 /// Benchmark tool for Excel import preview performance.
 ///
@@ -31,7 +39,7 @@ use ng_driver_opcua as _;
 // FFI symbols exported by exactly one linked driver (see `ng-gateway-bench` feature flags).
 extern "C" {
     fn ng_driver_metadata_json_ptr(out_ptr: *mut *const u8, out_len: *mut usize);
-    fn ng_driver_type() -> *const ::std::os::raw::c_char;
+    fn ng_driver_type() -> *const c_char;
 }
 
 fn main() -> anyhow::Result<()> {
@@ -72,7 +80,7 @@ fn main() -> anyhow::Result<()> {
     all_errors.extend(group_errors);
 
     // Deduplicate invalid rows by row index.
-    let mut invalid_rows = std::collections::HashSet::with_capacity(all_errors.len());
+    let mut invalid_rows = HashSet::with_capacity(all_errors.len());
     for e in &all_errors {
         invalid_rows.insert(e.row);
     }
@@ -96,22 +104,22 @@ fn main() -> anyhow::Result<()> {
 
 /// Load `DriverSchemas` from the driver-exported metadata JSON bytes.
 fn load_driver_schemas_from_ffi() -> anyhow::Result<DriverSchemas> {
-    let mut ptr: *const u8 = std::ptr::null();
+    let mut ptr: *const u8 = ptr::null();
     let mut len: usize = 0;
     unsafe { ng_driver_metadata_json_ptr(&mut ptr as *mut *const u8, &mut len as *mut usize) };
     if ptr.is_null() || len == 0 {
         anyhow::bail!("driver returned empty metadata json");
     }
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let bytes = unsafe { slice::from_raw_parts(ptr, len) };
     Ok(serde_json::from_slice::<DriverSchemas>(bytes)?)
 }
 
 /// Convert a C string pointer into a Rust `String`.
-fn cstr_to_string(ptr: *const ::std::os::raw::c_char) -> String {
+fn cstr_to_string(ptr: *const c_char) -> String {
     if ptr.is_null() {
         return String::new();
     }
-    unsafe { std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string() }
+    unsafe { CStr::from_ptr(ptr).to_string_lossy().to_string() }
 }
 
 /// Validate device-level consistency constraints for `FlattenEntity::DevicePoints`.

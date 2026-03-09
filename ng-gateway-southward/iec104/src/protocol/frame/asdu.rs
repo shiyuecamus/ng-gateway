@@ -3,7 +3,7 @@ use bit_struct::*;
 use byteorder::ReadBytesExt;
 use bytes::{BufMut, Bytes, BytesMut};
 use std::{
-    fmt::{Debug, Display},
+    fmt::{Debug, Display, Formatter, Result as FmtResult, Write as _},
     io::Cursor,
 };
 
@@ -41,11 +41,10 @@ pub struct Asdu {
 }
 
 impl Display for Asdu {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(self.identifier.to_string().as_str())?;
         let mut s = String::with_capacity(self.raw.len() * 4);
         for b in self.raw.iter() {
-            use std::fmt::Write as _;
             let _ = write!(&mut s, "[{:#04X}]", b);
         }
         f.write_str(&s)?;
@@ -65,7 +64,7 @@ pub struct Identifier {
 }
 
 impl Display for Identifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_fmt(format_args!("[{:02X}]", self.type_id as u8))?;
         f.write_fmt(format_args!("[{:02X}]", self.variable_struct.raw()))?;
         f.write_fmt(format_args!("[{:02X}]", self.cot.raw()))?;

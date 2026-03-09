@@ -14,8 +14,7 @@ use ng_gateway_models::domain::prelude::{
     SavedWifiConnection, WifiAccessPoint, WifiConnectPreflight, WifiConnectRequest,
     WifiDisconnectRequest, WifiScanResult, WifiScanStatus, WifiStaStatus, WiredStatus,
 };
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
 

@@ -133,7 +133,7 @@ impl Session for OpcUaSession {
                 // Best-effort close.
                 session.disable_reconnects();
                 let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect())
+                    tokio::time::timeout(tokio::time::Duration::from_secs(2), session.disconnect())
                         .await;
             }
             .in_current_span(),

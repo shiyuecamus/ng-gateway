@@ -18,7 +18,7 @@ use ng_gateway_error::NGResult;
 use std::{
     fmt,
     sync::{atomic::Ordering, Arc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc::{
     self,
@@ -209,7 +209,7 @@ impl<T> InstrumentedSender<T> {
     pub async fn send_timeout(
         &self,
         value: T,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> Result<(), SendTimeoutError<T>> {
         let start = Instant::now();
         let res = self.inner.send_timeout(value, timeout).await;

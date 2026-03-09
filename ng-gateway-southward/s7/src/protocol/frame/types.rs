@@ -3,6 +3,7 @@ use super::super::error::{Error, Result};
 use super::WireEncode;
 use bytes::BufMut;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use core::result::Result as StdResult;
 
 // ... (previous Enums and Impls unchanged) ...
 
@@ -185,7 +186,7 @@ pub enum CotpType {
 impl TryFrom<u8> for CotpType {
     type Error = ();
 
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         match v {
             0xE0 => Ok(CotpType::Cr),
             0xD0 => Ok(CotpType::Cc),
@@ -210,7 +211,7 @@ pub enum S7PduType {
 
 impl TryFrom<u8> for S7PduType {
     type Error = ();
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         match v {
             0x01 => Ok(S7PduType::Job),
             0x02 => Ok(S7PduType::Ack),
@@ -255,7 +256,7 @@ pub enum S7Function {
 impl TryFrom<u8> for S7Function {
     type Error = ();
 
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         match v {
             0x00 => Ok(S7Function::CpuService),
             0xF0 => Ok(S7Function::SetupCommunication),
@@ -304,7 +305,7 @@ pub enum S7SyntaxId {
 
 impl TryFrom<u8> for S7SyntaxId {
     type Error = ();
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         match v {
             0x10 => Ok(S7SyntaxId::S7Any),
             0x13 => Ok(S7SyntaxId::PbcRid),
@@ -362,7 +363,7 @@ pub enum S7Area {
 
 impl TryFrom<u8> for S7Area {
     type Error = ();
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         match v {
             0x03 => Ok(S7Area::SI200),
             0x05 => Ok(S7Area::SF200),
@@ -414,7 +415,7 @@ pub enum S7TransportSize {
 
 impl TryFrom<u8> for S7TransportSize {
     type Error = ();
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         use S7TransportSize::*;
         Ok(match v {
             0x01 => Bit,
@@ -497,7 +498,7 @@ pub enum S7ReturnCode {
 
 impl TryFrom<u8> for S7ReturnCode {
     type Error = ();
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         Ok(match v {
             0x00 => S7ReturnCode::Reserved,
             0xFF => S7ReturnCode::Success,
@@ -552,7 +553,7 @@ pub enum S7DataVariableType {
 
 impl TryFrom<u8> for S7DataVariableType {
     type Error = ();
-    fn try_from(v: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(v: u8) -> StdResult<Self, Self::Error> {
         Ok(match v {
             0x00 => S7DataVariableType::Null,
             0x03 => S7DataVariableType::Bit,
@@ -588,7 +589,7 @@ pub enum CpuFunctionGroup {
 
 impl TryFrom<u8> for CpuFunctionGroup {
     type Error = ();
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: u8) -> StdResult<Self, Self::Error> {
         match value {
             0x00 => Ok(CpuFunctionGroup::ModeTransition),
             0x01 => Ok(CpuFunctionGroup::ProgrammerCommands),
@@ -616,7 +617,7 @@ pub enum CpuFunctionType {
 
 impl TryFrom<u8> for CpuFunctionType {
     type Error = ();
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: u8) -> StdResult<Self, Self::Error> {
         match value {
             0x00 => Ok(CpuFunctionType::IndicationPush),
             0x04 => Ok(CpuFunctionType::Request),

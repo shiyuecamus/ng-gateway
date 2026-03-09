@@ -37,7 +37,7 @@ mod tests {
         ClientBuilder,
     };
     use bytes::Bytes;
-    use std::{any::Any, sync::Once};
+    use std::{any::Any, net::SocketAddr, sync::Once};
     use tokio::{
         net::TcpListener,
         time::{sleep, sleep_until, timeout, Duration, Instant},
@@ -59,7 +59,7 @@ mod tests {
             .without_time() // 可选：关闭时间戳，测试输出更清晰
             .try_init();
 
-        let socket_addr: std::net::SocketAddr = "127.0.0.1:2404".parse()?;
+        let socket_addr: SocketAddr = "127.0.0.1:2404".parse()?;
         let client = ClientBuilder::new().socket_addr(socket_addr).build();
         let (session, event_loop) = client.connect().await?;
         let mut lifecycle = session.lifecycle();

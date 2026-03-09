@@ -14,6 +14,7 @@ use sea_orm::{
     prelude::Expr, sea_query::Query, ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend,
     EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
+use std::mem;
 
 /// Repository for action operations
 pub struct ActionRepository;
@@ -68,7 +69,7 @@ impl ActionRepository {
         for a in actions.into_iter() {
             batch.push(a);
             if batch.len() >= batch_rows {
-                let to_insert = std::mem::take(&mut batch);
+                let to_insert = mem::take(&mut batch);
                 let inserted = Action::insert_many(to_insert)
                     .exec_with_returning_many(conn)
                     .await?;

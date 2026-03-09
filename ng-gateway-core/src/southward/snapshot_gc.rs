@@ -11,7 +11,10 @@
 use super::{DeviceDataSnapshot, SnapshotGcRuntime};
 use crate::southward::internal::snapshot_now_ms;
 use dashmap::DashMap;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
@@ -84,12 +87,7 @@ impl SnapshotGcRuntime {
         // Idempotent start.
         if self
             .started
-            .compare_exchange(
-                0,
-                1,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
             return;

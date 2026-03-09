@@ -18,11 +18,13 @@ use ng_gateway_sdk::{
     ConnectionState, DeviceConnectedData, DeviceDisconnectedData, NorthwardData, Phase,
     SouthwardTransportMeter,
 };
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use std::time::Duration;
 
 /// Per-channel bound transport meter (hot-path friendly).
 ///

@@ -26,8 +26,7 @@ use model::{
 };
 use runtime_api::NorthwardRuntimeApi;
 use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 use tokio::sync::{broadcast, mpsc, watch};
 
 /// Initialization context for northward plugins

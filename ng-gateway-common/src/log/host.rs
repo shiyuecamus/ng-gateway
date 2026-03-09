@@ -14,6 +14,7 @@ use arc_swap::ArcSwapOption;
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::{domain::prelude::LogLevel, settings::LoggingOutput};
 use std::{
+    io,
     path::PathBuf,
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -168,9 +169,9 @@ impl Logger {
         // Console layer: output all logs to console
         let console_layer = {
             #[cfg(debug_assertions)]
-            let mut layer = fmt::layer().pretty().with_writer(std::io::stdout);
+            let mut layer = fmt::layer().pretty().with_writer(io::stdout);
             #[cfg(not(debug_assertions))]
-            let mut layer = fmt::layer().with_writer(std::io::stdout);
+            let mut layer = fmt::layer().with_writer(io::stdout);
 
             #[cfg(debug_assertions)]
             {

@@ -7,8 +7,10 @@
 //! - **Low overhead**: avoid `String` duplication on fast control-plane paths.
 
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// Connection phase for a supervised component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -9,8 +9,9 @@ use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, PaginatorTrait,
     QueryFilter, TransactionTrait,
 };
+use std::{error, io};
 
-type Result<T> = std::result::Result<T, casbin::Error>;
+type Result<T> = core::result::Result<T, casbin::Error>;
 
 /// Casbin adapter for database operations
 #[derive(Clone, Debug)]
@@ -68,8 +69,8 @@ impl NGCasbinDBAdapter {
             .chars()
             .next()
             .map(String::from)
-            .ok_or(Self::to_adapter_error(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            .ok_or(Self::to_adapter_error(io::Error::new(
+                io::ErrorKind::InvalidData,
                 "Invalid ptype",
             )))?;
 
@@ -133,7 +134,7 @@ impl NGCasbinDBAdapter {
     }
 
     /// Convert database error to casbin error
-    fn to_adapter_error<E: std::error::Error + Send + Sync + 'static>(err: E) -> casbin::Error {
+    fn to_adapter_error<E: error::Error + Send + Sync + 'static>(err: E) -> casbin::Error {
         casbin::Error::from(AdapterError(Box::new(err)))
     }
 

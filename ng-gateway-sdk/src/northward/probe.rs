@@ -6,19 +6,19 @@
 //! # Notes
 //! The actual host-side dynamic loader lives in `ng-gateway-core`.
 
-use crate::{BinaryArch, BinaryOsType, NorthwardError, PluginConfigSchemas};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::{
     ensure_current_platform_from_path, inspect_binary,
     sdk::{sdk_api_version, SDK_VERSION},
 };
+use crate::{BinaryArch, BinaryOsType, NorthwardError, PluginConfigSchemas};
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     ffi::CStr,
     os::raw::{c_char, c_uchar},
 };
-use std::path::Path;
+use std::{fs, path::Path, ptr, slice};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use libloading::{Library, Symbol};
@@ -154,7 +154,7 @@ fn extract_probe_info(
     };
     let version = read_cstr(unsafe { version_fn() }, "ng_plugin_version", path)?;
 
-    let mut ptr: *const c_uchar = std::ptr::null();
+    let mut ptr: *const c_uchar = ptr::null();
     let mut len: usize = 0;
     unsafe { metadata_ptr_fn(&mut ptr, &mut len) };
     if ptr.is_null() || len == 0 {
@@ -165,7 +165,7 @@ fn extract_probe_info(
             len
         )));
     }
-    let json_slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let json_slice = unsafe { slice::from_raw_parts(ptr, len) };
     let metadata: PluginConfigSchemas = serde_json::from_slice(json_slice).map_err(|e| {
         NorthwardError::LoadError(format!(
             "Failed to parse northward metadata json in {}: {e}",
@@ -173,8 +173,8 @@ fn extract_probe_info(
         ))
     })?;
 
-    let size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
-    let bytes = std::fs::read(path).map_err(|e| {
+    let size = fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+    let bytes = fs::read(path).map_err(|e| {
         NorthwardError::LoadError(format!("Failed to read library {}: {e}", path.display()))
     })?;
     let info = inspect_binary(&bytes);
@@ -223,7 +223,7 @@ pub fn probe_north_library(_path: &Path) -> Result<NorthwardProbeInfo, Northward
 pub fn discover_north_libraries_in_dir(dir: &Path) -> Vec<(String, NorthwardProbeInfo)> {
     let mut out = Vec::new();
     let expected_ext = BinaryOsType::current().expected_driver_ext().to_string();
-    let Ok(rd) = std::fs::read_dir(dir) else {
+    let Ok(rd) = fs::read_dir(dir) else {
         return out;
     };
     for entry in rd.flatten() {

@@ -10,7 +10,9 @@
 
 use bytes::Bytes;
 use std::{
-    io::{self, Read, Write},
+    fs::File,
+    io::{self, BufReader, Read, Write},
+    mem,
     path::PathBuf,
 };
 use tokio::sync::mpsc;
@@ -39,7 +41,7 @@ impl ChannelWriter {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let chunk = std::mem::take(&mut self.buf);
+        let chunk = mem::take(&mut self.buf);
         self.buf = Vec::with_capacity(Self::CHUNK);
         self.tx
             .blocking_send(Ok(Bytes::from(chunk)))
@@ -96,7 +98,7 @@ pub fn stream_zip_stored(
         }
 
         zip.start_file(name, options)?;
-        let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
+        let mut f = BufReader::new(File::open(path)?);
         loop {
             let n = f.read(&mut buf)?;
             if n == 0 {
@@ -114,30 +116,36 @@ pub fn stream_zip_stored(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::{
+        env, fs,
+        io::Cursor,
+        path::PathBuf,
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     /// Build a unique temporary directory path for tests.
     ///
     /// # Note
     /// We intentionally avoid adding extra dev-dependencies (e.g. `tempfile`)
     /// to keep changes minimal.
-    fn temp_dir() -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+    fn temp_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("ng-gateway-zip-stream-test-{}", nanos))
+        env::temp_dir().join(format!("ng-gateway-zip-stream-test-{}", nanos))
     }
 
     #[test]
     fn stream_zip_stored_writes_non_empty_zip_with_entries() {
         let dir = temp_dir();
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        fs::create_dir_all(&dir).expect("create temp dir");
 
         let host = dir.join("host.log.2026-01-27");
         let modbus = dir.join("modbus.log.2026-01-27");
-        std::fs::write(&host, b"hello host\n").expect("write host file");
-        std::fs::write(&modbus, b"hello modbus\n").expect("write modbus file");
+        fs::write(&host, b"hello host\n").expect("write host file");
+        fs::write(&modbus, b"hello modbus\n").expect("write modbus file");
 
         let entries = vec![
             ("host.log.2026-01-27".to_string(), host.clone()),
@@ -145,7 +153,7 @@ mod tests {
         ];
 
         let (tx, mut rx) = mpsc::channel::<Result<Bytes, io::Error>>(8);
-        let t = std::thread::spawn(move || stream_zip_stored(entries, tx));
+        let t = thread::spawn(move || stream_zip_stored(entries, tx));
 
         // Collect all zip bytes from the receiver.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -187,6 +195,6 @@ mod tests {
         );
 
         // Cleanup best-effort.
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

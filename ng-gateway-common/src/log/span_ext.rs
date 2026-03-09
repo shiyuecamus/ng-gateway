@@ -5,6 +5,7 @@
 //! - the file output layer to optionally include span fields (channel_id, etc.)
 
 use ng_gateway_sdk::log::fields::{APP_ID, CHANNEL_ID};
+use std::fmt::Debug;
 use tracing::{
     field::{Field, Visit},
     span::{Attributes, Id, Record},
@@ -74,7 +75,7 @@ impl Visit for ChannelIdVisitor {
         }
     }
 
-    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+    fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
 }
 
 /// A tiny `tracing` layer that records `app_id` from span fields into extensions.
@@ -143,5 +144,5 @@ impl Visit for AppIdVisitor {
         }
     }
 
-    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+    fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
 }

@@ -16,7 +16,7 @@ use ng_gateway_sdk::{
     SouthwardInitContext, SouthwardTransportMeter,
 };
 use rust_ethernet_ip::{EipClient, RoutePath};
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 /// Ethernet/IP connector built from `SouthwardInitContext` (no I/O).
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl EthernetIpConnector {
     ) -> DriverResult<EipClient> {
         let addr = format!("{}:{}", cfg.host, cfg.port);
         let slot = cfg.slot;
-        let socket_addr = addr.parse::<std::net::SocketAddr>().map_err(|e| {
+        let socket_addr = addr.parse::<SocketAddr>().map_err(|e| {
             DriverError::ConfigurationError(format!("Invalid Ethernet/IP address {addr}: {e}"))
         })?;
 

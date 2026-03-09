@@ -11,7 +11,10 @@ use crate::{
 use ng_gateway_macros::SeedableInitializer;
 use sea_orm::{DatabaseBackend, DeriveIden};
 use sea_orm_migration::{prelude::*, schema::pk_auto};
-use std::path::{Path, PathBuf};
+use std::{
+    convert,
+    path::{Path, PathBuf},
+};
 
 /// Default branding title when the system is first initialized.
 const DEFAULT_APP_TITLE: &str = "NG Gateway";
@@ -39,7 +42,7 @@ const FALLBACK_PNG_1X1_TRANSPARENT: &[u8] = &[
 /// - 16 bytes image directory entry (single image)
 /// - PNG payload
 fn build_ico_with_png(png: &[u8]) -> Vec<u8> {
-    let png_len = <u32 as std::convert::TryFrom<usize>>::try_from(png.len()).unwrap_or_default();
+    let png_len = <u32 as convert::TryFrom<usize>>::try_from(png.len()).unwrap_or_default();
 
     // ICONDIR
     let mut ico = Vec::with_capacity(6 + 16 + png.len());

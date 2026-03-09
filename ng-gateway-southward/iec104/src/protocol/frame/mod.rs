@@ -7,7 +7,7 @@ pub mod msys;
 pub mod time;
 
 use self::{apci::Apci, asdu::Asdu};
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 #[derive(Debug)]
 pub struct Apdu {
@@ -16,7 +16,7 @@ pub struct Apdu {
 }
 
 impl Display for Apdu {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(self.apci.to_string().as_str())?;
         if let Some(asdu) = &self.asdu {
             f.write_str(asdu.to_string().as_str())?;

@@ -24,7 +24,7 @@ use ng_gateway_models::{
 use ng_gateway_repository::{ChannelRepository, DeviceRepository, DriverRepository};
 use ng_gateway_sdk::{DriverSchemas, FlattenEntity, RowMappingContext};
 use sea_orm::IntoActiveModel;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 use tracing::{info, instrument};
 
 pub(super) const ROUTER_PREFIX: &str = "/device";
@@ -365,7 +365,7 @@ pub async fn import_point_preview(
         // Read metadata and rows, validate meta
         let template = schemas.build_template(FlattenEntity::Point, "zh-CN");
         let (metadata, rows) = template
-            .read_with_meta_from_reader(std::io::Cursor::new(buf))
+            .read_with_meta_from_reader(Cursor::new(buf))
             .map_err(|e| WebError::InternalError(e.to_string()))?;
         metadata
             .validate(&driver_type, FlattenEntity::Point)
@@ -450,7 +450,7 @@ pub async fn import_point_commit(
     let prepared = tokio::task::spawn_blocking(move || -> Result<PreparedPointCommit, WebError> {
         let template = schemas.build_template(FlattenEntity::Point, "zh-CN");
         let (metadata, rows) = template
-            .read_with_meta_from_reader(std::io::Cursor::new(buf))
+            .read_with_meta_from_reader(Cursor::new(buf))
             .map_err(|e| WebError::InternalError(e.to_string()))?;
         metadata
             .validate(&driver_type, FlattenEntity::Point)
@@ -549,7 +549,7 @@ pub async fn import_action_preview(
         // Parse + validate meta
         let template = schemas.build_template(FlattenEntity::Action, "zh-CN");
         let (metadata, rows) = template
-            .read_with_meta_from_reader(std::io::Cursor::new(buf))
+            .read_with_meta_from_reader(Cursor::new(buf))
             .map_err(|e| WebError::InternalError(e.to_string()))?;
         metadata
             .validate(&driver_type, FlattenEntity::Action)
@@ -629,7 +629,7 @@ pub async fn import_action_commit(
         tokio::task::spawn_blocking(move || -> Result<PreparedActionCommit, WebError> {
             let template = schemas.build_template(FlattenEntity::Action, "zh-CN");
             let (metadata, rows) = template
-                .read_with_meta_from_reader(std::io::Cursor::new(buf))
+                .read_with_meta_from_reader(Cursor::new(buf))
                 .map_err(|e| WebError::InternalError(e.to_string()))?;
             metadata
                 .validate(&driver_type, FlattenEntity::Action)

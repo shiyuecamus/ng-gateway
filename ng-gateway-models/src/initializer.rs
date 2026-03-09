@@ -16,7 +16,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbErr,
     EntityTrait, IntoActiveModel, QueryFilter, Set,
 };
-use std::{any::Any, collections::HashMap, path::Path};
+use std::{any::Any, collections::HashMap, env, path::Path};
 use tokio::fs::{metadata, read_dir, try_exists};
 
 #[async_trait]
@@ -591,7 +591,7 @@ impl BuiltinSynchronizer {
 ///   This makes the path stable when users relocate `general.runtime_dir`.
 fn normalize_runtime_relative_path(path: &Path) -> String {
     if path.is_absolute() {
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(cwd) = env::current_dir() {
             if let Ok(rel) = path.strip_prefix(&cwd) {
                 return rel.to_string_lossy().to_string();
             }

@@ -11,8 +11,10 @@
 
 use std::{
     collections::HashMap,
+    fs,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
+    time,
 };
 
 /// A single log file entry discovered under a log directory.
@@ -46,7 +48,7 @@ pub struct LogDirScan {
 pub fn scan_log_dir(log_dir: &Path) -> io::Result<LogDirScan> {
     let mut out = LogDirScan::default();
 
-    let entries = match std::fs::read_dir(log_dir) {
+    let entries = match fs::read_dir(log_dir) {
         Ok(v) => v,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(out),
         Err(e) => return Err(e),
@@ -75,7 +77,7 @@ pub fn scan_log_dir(log_dir: &Path) -> io::Result<LogDirScan> {
             .modified()
             .ok()
             .and_then(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
+                t.duration_since(time::UNIX_EPOCH)
                     .ok()
                     .map(|d| d.as_millis() as i64)
             })
@@ -97,7 +99,7 @@ pub fn scan_log_dir(log_dir: &Path) -> io::Result<LogDirScan> {
 /// - only safe file names are included
 pub fn build_allowed_map(log_dir: &Path) -> io::Result<HashMap<String, PathBuf>> {
     let mut m: HashMap<String, PathBuf> = HashMap::new();
-    let entries = match std::fs::read_dir(log_dir) {
+    let entries = match fs::read_dir(log_dir) {
         Ok(v) => v,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(m),
         Err(e) => return Err(e),

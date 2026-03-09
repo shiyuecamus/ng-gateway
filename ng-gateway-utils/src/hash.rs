@@ -1,9 +1,11 @@
 use bcrypt::{hash, verify};
 use md5::Md5;
 use sha2::{Digest as Sha256Digest, Sha256};
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, Read, Result as IoResult},
+    path::Path,
+};
 
 /// Hash a password using bcrypt
 ///
@@ -100,7 +102,7 @@ pub fn sha256_bytes(data: &[u8]) -> String {
 /// Calculate SHA-256 for a file by streaming to avoid high memory usage
 ///
 /// Returns lowercase hex string of length 64.
-pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+pub fn sha256_file(path: &Path) -> IoResult<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();

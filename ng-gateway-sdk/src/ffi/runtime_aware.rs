@@ -14,7 +14,7 @@ use crate::{
     NorthwardInitContext, NorthwardResult, Plugin, PluginConfig, RuntimeAction, RuntimeChannel,
     RuntimeDelta, RuntimeDevice, RuntimeParameter, RuntimePoint, SouthwardInitContext, WriteResult,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::{
     runtime::Handle,
     sync::{mpsc, oneshot, Semaphore},
@@ -125,7 +125,7 @@ struct RuntimeAwareDriver {
     cancel_token: CancellationToken,
     channel_id: i32,
     collect_sem: Arc<Semaphore>,
-    rx: std::sync::Mutex<Option<mpsc::Receiver<DriverMessage>>>,
+    rx: Mutex<Option<mpsc::Receiver<DriverMessage>>>,
     rt_handle: Option<Handle>,
 }
 
@@ -145,7 +145,7 @@ impl RuntimeAwareDriver {
             cancel_token: CancellationToken::new(),
             channel_id,
             collect_sem: Arc::new(Semaphore::new(1)),
-            rx: std::sync::Mutex::new(Some(rx)),
+            rx: Mutex::new(Some(rx)),
             rt_handle,
         }
     }
@@ -364,7 +364,7 @@ impl PluginFactory for RuntimeAwarePluginFactory {
             app_id,
             tx,
             cancel_token: CancellationToken::new(),
-            rx: std::sync::Mutex::new(Some(rx)),
+            rx: Mutex::new(Some(rx)),
             rt_handle: self.rt_handle.clone(),
         }))
     }
@@ -382,7 +382,7 @@ struct RuntimeAwarePlugin {
     app_id: i32,
     tx: mpsc::Sender<Arc<NorthwardData>>,
     cancel_token: CancellationToken,
-    rx: std::sync::Mutex<Option<mpsc::Receiver<Arc<NorthwardData>>>>,
+    rx: Mutex<Option<mpsc::Receiver<Arc<NorthwardData>>>>,
     rt_handle: Option<Handle>,
 }
 

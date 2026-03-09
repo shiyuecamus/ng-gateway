@@ -28,7 +28,7 @@ use rdkafka::{
     producer::{FutureProducer, FutureRecord},
     ClientConfig, Message,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, str, sync::Arc};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn, Instrument};
@@ -367,7 +367,7 @@ async fn handle_downlink_message(
     let policy = &policy_route.mapping;
 
     let payload = msg.payload().unwrap_or(&[]);
-    let key = msg.key().and_then(|k| std::str::from_utf8(k).ok());
+    let key = msg.key().and_then(|k| str::from_utf8(k).ok());
 
     // Convert Kafka headers to SDK KeyValue pairs (best-effort UTF-8 only).
     let mut owned_kvs: Vec<(String, String)> = Vec::new();
@@ -376,7 +376,7 @@ async fn handle_downlink_message(
             let h = hdrs.get(i);
             let key_s = h.key.to_string();
             let value_s = match h.value {
-                Some(v) => match std::str::from_utf8(v) {
+                Some(v) => match str::from_utf8(v) {
                     Ok(s) => s.to_string(),
                     Err(_) => continue,
                 },

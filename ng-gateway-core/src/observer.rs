@@ -12,11 +12,13 @@ use ng_gateway_sdk::supervision::{
     ConnectionState, FailureKind, FailureReport, NoopObserver, NorthwardObserverLabels, Observer,
     ObserverFactory, Phase, RetryBudgetSnapshot, SouthwardObserverLabels,
 };
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use std::time::Duration;
 
 /// A tiny fan-out observer that calls multiple observers sequentially.
 ///

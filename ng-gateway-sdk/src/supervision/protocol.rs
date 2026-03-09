@@ -9,7 +9,7 @@
 //! - `Session::run()` drives the session until disconnect/cancel/reconnect request.
 
 use super::{super::CollectorConcurrencyProfile, FailureKind, FailurePhase, FailureReport};
-use std::sync::Arc;
+use std::{error, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::Span;
@@ -150,7 +150,7 @@ pub trait Session: Send + 'static {
     /// Data-plane handle type to publish when Ready.
     type Handle: Send + Sync + 'static;
     /// Error type produced by this session.
-    type Error: std::error::Error + Send + Sync + 'static;
+    type Error: error::Error + Send + Sync + 'static;
 
     /// The data-plane handle is always published as `Arc<Handle>`.
     ///

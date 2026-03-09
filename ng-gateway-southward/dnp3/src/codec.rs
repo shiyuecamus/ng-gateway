@@ -1,7 +1,7 @@
 use crate::types::PointMeta;
 use bytes::Bytes;
 use ng_gateway_sdk::{DataType, NGValue, ValueCodec};
-use std::sync::Arc;
+use std::{str, sync::Arc};
 
 /// DNP3 protocol specific codec helpers.
 ///
@@ -44,7 +44,7 @@ impl Dnp3Codec {
     pub fn octets_to_value(bytes: &[u8], meta: &PointMeta) -> Option<NGValue> {
         match meta.logical_data_type() {
             DataType::Binary => Some(NGValue::Binary(Bytes::copy_from_slice(bytes))),
-            DataType::String => std::str::from_utf8(bytes)
+            DataType::String => str::from_utf8(bytes)
                 .map(|s| NGValue::String(Arc::<str>::from(s)))
                 .ok()
                 .or_else(|| {

@@ -26,8 +26,11 @@ use ng_gateway_models::domain::prelude::{
 };
 use std::{
     collections::HashSet,
+    env,
     ffi::c_void,
+    iter,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ptr, thread,
     time::{Duration, Instant},
 };
 use tokio::process::Command;
@@ -249,7 +252,7 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         let summary = interfaces
             .into_iter()
             .find(|i| i.name == name)
-            .ok_or_else(|| NetworkError::InterfaceNotFound(name.to_string()))?;
+            .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
 
         Ok(NetworkInterfaceDetail {
             summary,
@@ -287,7 +290,7 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         Ok(NetworkCapabilities {
             platform: PlatformSupport::Partial,
             os: "windows".to_string(),
-            arch: std::env::consts::ARCH.to_string(),
+            arch: env::consts::ARCH.to_string(),
             network_manager_available: false,
             network_manager_version: None,
             can_configure_interfaces: true,
@@ -440,9 +443,9 @@ impl PlatformNetworkManager for WindowsNetworkManager {
             let handle = WlanHandle::open()?;
             let interfaces = enumerate_wlan_interfaces_with_handle(&handle)?;
 
-            let iface = interfaces.first().ok_or_else(|| {
-                NetworkError::InterfaceNotFound("No Wi-Fi interface available".to_string())
-            })?;
+            let iface = interfaces.first().ok_or(NetworkError::InterfaceNotFound(
+                "No Wi-Fi interface available".to_string(),
+            ))?;
 
             // Trigger a fresh scan.
             let scan_result = unsafe {
@@ -462,10 +465,10 @@ impl PlatformNetworkManager for WindowsNetworkManager {
             }
 
             // Small delay to allow scan to populate.
-            std::thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(500));
 
             // Get available network list.
-            let mut network_list_ptr: *mut WLAN_AVAILABLE_NETWORK_LIST = std::ptr::null_mut();
+            let mut network_list_ptr: *mut WLAN_AVAILABLE_NETWORK_LIST = ptr::null_mut();
             let result = unsafe {
                 WlanGetAvailableNetworkList(
                     handle.as_raw(),
@@ -536,29 +539,24 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         let iface_name = tokio::task::spawn_blocking(move || -> Result<String, NetworkError> {
             let handle = WlanHandle::open()?;
             let interfaces = enumerate_wlan_interfaces_with_handle(&handle)?;
-            let iface = interfaces.first().ok_or_else(|| {
-                NetworkError::InterfaceNotFound("No Wi-Fi interface available".to_string())
-            })?;
+            let iface = interfaces.first().ok_or(NetworkError::InterfaceNotFound(
+                "No Wi-Fi interface available".to_string(),
+            ))?;
 
             // Use adapter FriendlyName (not WLAN description) for netsh/configure_interface.
-            let adapters = get_adapters_addresses().map_err(|e| {
-                NetworkError::CommandFailed {
-                    command: "GetAdaptersAddresses".to_string(),
-                    reason: e,
-                }
+            let adapters = get_adapters_addresses().map_err(|e| NetworkError::CommandFailed {
+                command: "GetAdaptersAddresses".to_string(),
+                reason: e,
             })?;
             let netsh_name = adapters
                 .iter()
                 .find(|a| a.guid == iface.guid)
                 .map(|a| a.name.clone())
-                .unwrap_or_else(|| iface.description.clone());
+                .unwrap_or(iface.description.clone());
 
             // Build and set a WLAN profile XML.
             let profile_xml = build_wifi_profile_xml(&ssid, password.as_deref(), hidden);
-            let profile_wide: Vec<u16> = profile_xml
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let profile_wide: Vec<u16> = profile_xml.encode_utf16().chain(iter::once(0)).collect();
 
             let set_result = unsafe {
                 windows::Win32::NetworkManagement::WiFi::WlanSetProfile(
@@ -569,7 +567,7 @@ impl PlatformNetworkManager for WindowsNetworkManager {
                     None,
                     true, // overwrite existing
                     None,
-                    std::ptr::null_mut(),
+                    ptr::null_mut(),
                 )
             };
 
@@ -580,8 +578,7 @@ impl PlatformNetworkManager for WindowsNetworkManager {
             }
 
             // Build connection parameters.
-            let profile_name_wide: Vec<u16> =
-                ssid.encode_utf16().chain(std::iter::once(0)).collect();
+            let profile_name_wide: Vec<u16> = ssid.encode_utf16().chain(iter::once(0)).collect();
             let mut dot11_ssid = DOT11_SSID {
                 uSSIDLength: ssid.len().min(32) as u32,
                 ucSSID: [0u8; 32],
@@ -593,7 +590,7 @@ impl PlatformNetworkManager for WindowsNetworkManager {
                 wlanConnectionMode: WLAN_CONNECTION_MODE(0), // wlan_connection_mode_profile
                 strProfile: PCWSTR(profile_name_wide.as_ptr()),
                 pDot11Ssid: &mut dot11_ssid,
-                pDesiredBssidList: std::ptr::null_mut(),
+                pDesiredBssidList: ptr::null_mut(),
                 dot11BssType: DOT11_BSS_TYPE(1), // dot11_BSS_type_infrastructure
                 dwFlags: 0,
             };
@@ -656,9 +653,9 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         tokio::task::spawn_blocking(move || -> Result<(), NetworkError> {
             let handle = WlanHandle::open()?;
             let interfaces = enumerate_wlan_interfaces_with_handle(&handle)?;
-            let iface = interfaces.first().ok_or_else(|| {
-                NetworkError::InterfaceNotFound("No Wi-Fi interface available".to_string())
-            })?;
+            let iface = interfaces.first().ok_or(NetworkError::InterfaceNotFound(
+                "No Wi-Fi interface available".to_string(),
+            ))?;
 
             let result = unsafe { WlanDisconnect(handle.as_raw(), &iface.guid, None) };
 
@@ -758,11 +755,11 @@ impl PlatformNetworkManager for WindowsNetworkManager {
             tokio::task::spawn_blocking(|| -> Result<Vec<SavedWifiConnection>, NetworkError> {
                 let handle = WlanHandle::open()?;
                 let interfaces = enumerate_wlan_interfaces_with_handle(&handle)?;
-                let iface = interfaces.first().ok_or_else(|| {
-                    NetworkError::InterfaceNotFound("No Wi-Fi interface available".to_string())
-                })?;
+                let iface = interfaces.first().ok_or(NetworkError::InterfaceNotFound(
+                    "No Wi-Fi interface available".to_string(),
+                ))?;
 
-                let mut profile_list_ptr: *mut WLAN_PROFILE_INFO_LIST = std::ptr::null_mut();
+                let mut profile_list_ptr: *mut WLAN_PROFILE_INFO_LIST = ptr::null_mut();
                 let result = unsafe {
                     WlanGetProfileList(handle.as_raw(), &iface.guid, None, &mut profile_list_ptr)
                 };
@@ -833,14 +830,11 @@ impl PlatformNetworkManager for WindowsNetworkManager {
         tokio::task::spawn_blocking(move || -> Result<(), NetworkError> {
             let handle = WlanHandle::open()?;
             let interfaces = enumerate_wlan_interfaces_with_handle(&handle)?;
-            let iface = interfaces.first().ok_or_else(|| {
-                NetworkError::InterfaceNotFound("No Wi-Fi interface available".to_string())
-            })?;
+            let iface = interfaces.first().ok_or(NetworkError::InterfaceNotFound(
+                "No Wi-Fi interface available".to_string(),
+            ))?;
 
-            let profile_wide: Vec<u16> = profile_name
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let profile_wide: Vec<u16> = profile_name.encode_utf16().chain(iter::once(0)).collect();
             let result = unsafe {
                 WlanDeleteProfile(
                     handle.as_raw(),
@@ -936,7 +930,7 @@ fn enumerate_wlan_interfaces() -> Result<Vec<NativeWlanInterface>, NetworkError>
 fn enumerate_wlan_interfaces_with_handle(
     handle: &WlanHandle,
 ) -> Result<Vec<NativeWlanInterface>, NetworkError> {
-    let mut iface_list_ptr: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
+    let mut iface_list_ptr: *mut WLAN_INTERFACE_INFO_LIST = ptr::null_mut();
     let result = unsafe { WlanEnumInterfaces(handle.as_raw(), None, &mut iface_list_ptr) };
 
     if result != ERROR_SUCCESS.0 {
@@ -970,7 +964,7 @@ fn query_wlan_connection(
     guid: &windows::core::GUID,
 ) -> Result<Option<NativeConnectionInfo>, NetworkError> {
     let mut data_size: u32 = 0;
-    let mut data_ptr: *mut c_void = std::ptr::null_mut();
+    let mut data_ptr: *mut c_void = ptr::null_mut();
 
     // wlan_intf_opcode_current_connection = 7
     let opcode = windows::Win32::NetworkManagement::WiFi::WLAN_INTF_OPCODE(7);

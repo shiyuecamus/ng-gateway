@@ -34,7 +34,10 @@ use objc2_core_wlan::{
 use objc2_foundation::{NSData, NSOrderedSet, NSSet, NSString};
 use std::{
     collections::{BTreeMap, HashSet},
-    net::IpAddr,
+    env,
+    ffi::c_void,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    process::Command as StdCommand,
     time::{Duration, Instant},
 };
 use system_configuration::core_foundation::{
@@ -88,8 +91,9 @@ where
 {
     tokio::task::spawn_blocking(move || {
         let client = unsafe { CWWiFiClient::sharedWiFiClient() };
-        let iface = unsafe { client.interface() }
-            .ok_or_else(|| NetworkError::InterfaceNotFound("No Wi-Fi interface".to_string()))?;
+        let iface = unsafe { client.interface() }.ok_or(NetworkError::InterfaceNotFound(
+            "No Wi-Fi interface".to_string(),
+        ))?;
         f(&iface)
     })
     .await
@@ -111,12 +115,13 @@ where
         let client = unsafe { CWWiFiClient::sharedWiFiClient() };
         let iface = if let Some(ref n) = name_owned {
             let ns = NSString::from_str(n);
-            unsafe { client.interfaceWithName(Some(&ns)) }.ok_or_else(|| {
-                NetworkError::InterfaceNotFound(format!("Wi-Fi interface '{n}' not found"))
-            })?
+            unsafe { client.interfaceWithName(Some(&ns)) }.ok_or(
+                NetworkError::InterfaceNotFound(format!("Wi-Fi interface '{n}' not found")),
+            )?
         } else {
-            unsafe { client.interface() }
-                .ok_or_else(|| NetworkError::InterfaceNotFound("No Wi-Fi interface".to_string()))?
+            unsafe { client.interface() }.ok_or(NetworkError::InterfaceNotFound(
+                "No Wi-Fi interface".to_string(),
+            ))?
         };
         f(&iface)
     })
@@ -176,7 +181,7 @@ impl PlatformNetworkManager for MacosNetworkManager {
                 let display = service_map
                     .get(&ni.name)
                     .map(|s| s.service_name.clone())
-                    .or_else(|| Some(ni.name.clone()));
+                    .or(Some(ni.name.clone()));
                 NetworkInterfaceSummary {
                     name: ni.name.clone(),
                     display_name: display,
@@ -290,7 +295,7 @@ impl PlatformNetworkManager for MacosNetworkManager {
         let summary = interfaces
             .into_iter()
             .find(|i| i.name == name)
-            .ok_or_else(|| NetworkError::InterfaceNotFound(name.to_string()))?;
+            .ok_or(NetworkError::InterfaceNotFound(name.to_string()))?;
 
         let mtu = get_interface_mtu(name).await;
 
@@ -340,7 +345,7 @@ impl PlatformNetworkManager for MacosNetworkManager {
         Ok(NetworkCapabilities {
             platform: PlatformSupport::Partial,
             os: "macos".to_string(),
-            arch: std::env::consts::ARCH.to_string(),
+            arch: env::consts::ARCH.to_string(),
             network_manager_available: false,
             network_manager_version: None,
             can_configure_interfaces: true,
@@ -460,15 +465,15 @@ impl PlatformNetworkManager for MacosNetworkManager {
                 let client = unsafe { CWWiFiClient::sharedWiFiClient() };
                 let iface = if let Some(ref name) = iface_name {
                     let ns = NSString::from_str(name);
-                    unsafe { client.interfaceWithName(Some(&ns)) }.ok_or_else(|| {
+                    unsafe { client.interfaceWithName(Some(&ns)) }.ok_or(
                         NetworkError::InterfaceNotFound(format!(
                             "Wi-Fi interface '{name}' not found"
-                        ))
-                    })?
+                        )),
+                    )?
                 } else {
-                    unsafe { client.interface() }.ok_or_else(|| {
-                        NetworkError::InterfaceNotFound("No Wi-Fi interface".to_string())
-                    })?
+                    unsafe { client.interface() }.ok_or(NetworkError::InterfaceNotFound(
+                        "No Wi-Fi interface".to_string(),
+                    ))?
                 };
 
                 // Trigger a fresh scan. Pass None for SSID to scan all networks.
@@ -532,20 +537,20 @@ impl PlatformNetworkManager for MacosNetworkManager {
                 let client = unsafe { CWWiFiClient::sharedWiFiClient() };
                 let iface = if let Some(ref name) = iface_name {
                     let ns = NSString::from_str(name);
-                    unsafe { client.interfaceWithName(Some(&ns)) }.ok_or_else(|| {
+                    unsafe { client.interfaceWithName(Some(&ns)) }.ok_or(
                         NetworkError::InterfaceNotFound(format!(
                             "Wi-Fi interface '{name}' not found"
-                        ))
-                    })?
+                        )),
+                    )?
                 } else {
-                    unsafe { client.interface() }.ok_or_else(|| {
-                        NetworkError::InterfaceNotFound("No Wi-Fi interface".to_string())
-                    })?
+                    unsafe { client.interface() }.ok_or(NetworkError::InterfaceNotFound(
+                        "No Wi-Fi interface".to_string(),
+                    ))?
                 };
 
                 let resolved_name = unsafe { iface.interfaceName() }
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| "en0".to_string());
+                    .unwrap_or("en0".to_string());
 
                 // Ensure Wi-Fi power is on.
                 let power_on = unsafe { iface.powerOn() };
@@ -583,9 +588,9 @@ impl PlatformNetworkManager for MacosNetworkManager {
                 } else {
                     networks.first()
                 }
-                .ok_or_else(|| {
-                    NetworkError::WifiError(format!("No matching network for SSID '{ssid}'"))
-                })?;
+                .ok_or(NetworkError::WifiError(format!(
+                    "No matching network for SSID '{ssid}'"
+                )))?;
 
                 // Connect using CoreWLAN native API.
                 let ns_password = password.as_deref().map(NSString::from_str);
@@ -713,12 +718,12 @@ impl PlatformNetworkManager for MacosNetworkManager {
         let saved = tokio::task::spawn_blocking(
             move || -> Result<Vec<SavedWifiConnection>, NetworkError> {
                 let client = unsafe { CWWiFiClient::sharedWiFiClient() };
-                let iface = unsafe { client.interface() }.ok_or_else(|| {
-                    NetworkError::InterfaceNotFound("No Wi-Fi interface".to_string())
-                })?;
+                let iface = unsafe { client.interface() }.ok_or(
+                    NetworkError::InterfaceNotFound("No Wi-Fi interface".to_string()),
+                )?;
 
-                let config: Retained<CWConfiguration> = unsafe { iface.configuration() }
-                    .ok_or_else(|| NetworkError::CommandFailed {
+                let config: Retained<CWConfiguration> =
+                    unsafe { iface.configuration() }.ok_or(NetworkError::CommandFailed {
                         command: "CWInterface::configuration".to_string(),
                         reason: "Failed to get Wi-Fi configuration".to_string(),
                     })?;
@@ -1097,7 +1102,7 @@ struct ScIpState {
 
 // Raw FFI binding for SCNetworkServiceGetName (not exposed by system-configuration crate).
 extern "C" {
-    fn SCNetworkServiceGetName(service: *const std::ffi::c_void) -> CFStringRef;
+    fn SCNetworkServiceGetName(service: *const c_void) -> CFStringRef;
 }
 
 /// Get the user-visible name of an SCNetworkService (e.g. "Wi-Fi", "Ethernet").
@@ -1237,7 +1242,7 @@ fn read_sc_ip_state() -> BTreeMap<String, ScIpState> {
 /// (e.g. when the process runs without full preferences access).
 fn build_service_map_from_networksetup() -> BTreeMap<String, MacosServiceInfo> {
     let mut map = BTreeMap::new();
-    let output = match std::process::Command::new("networksetup")
+    let output = match StdCommand::new("networksetup")
         .args(["-listnetworkserviceorder"])
         .output()
     {
@@ -1297,11 +1302,9 @@ fn resolve_service_name(bsd_name: &str) -> Result<String, NetworkError> {
     cli_map
         .get(bsd_name)
         .map(|info| info.service_name.clone())
-        .ok_or_else(|| {
-            NetworkError::InterfaceNotFound(format!(
-                "No macOS network service found for interface '{bsd_name}'"
-            ))
-        })
+        .ok_or(NetworkError::InterfaceNotFound(format!(
+            "No macOS network service found for interface '{bsd_name}'"
+        )))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1375,29 +1378,29 @@ async fn run_networksetup(args: &[&str]) -> Result<String, NetworkError> {
 /// BSD interface name prefixes to exclude from enumeration.
 /// Order does not matter; use `starts_with` for matching.
 const SKIP_INTERFACE_PREFIXES: &[&str] = &[
-    "lo",      // loopback (lo0, lo1, etc.)
-    "utun",    // User-mode tunnel (VPN, etc.)
-    "awdl",    // Apple Wireless Direct Link
-    "llw",     // Low-latency Wi-Fi
-    "anpi",    // Apple Neural Processing
-    "bridge",  // Bridge (bridge0, bridge100, etc.)
-    "gif",     // Generic tunnel
-    "stf",     // 6to4 tunnel
-    "XHC",     // USB controller
-    "ap",      // AP mode interface (ap1)
-    "pktap",   // Packet tap
-    "ipsec",   // IPsec tunnel
-    "tun",     // Tunnel (tun0, etc.)
-    "tap",     // TAP device
+    "lo",     // loopback (lo0, lo1, etc.)
+    "utun",   // User-mode tunnel (VPN, etc.)
+    "awdl",   // Apple Wireless Direct Link
+    "llw",    // Low-latency Wi-Fi
+    "anpi",   // Apple Neural Processing
+    "bridge", // Bridge (bridge0, bridge100, etc.)
+    "gif",    // Generic tunnel
+    "stf",    // 6to4 tunnel
+    "XHC",    // USB controller
+    "ap",     // AP mode interface (ap1)
+    "pktap",  // Packet tap
+    "ipsec",  // IPsec tunnel
+    "tun",    // Tunnel (tun0, etc.)
+    "tap",    // TAP device
 ];
 
 /// Virtual/hosted network interface prefixes (VMware, Docker, etc.).
 const VIRTUAL_INTERFACE_PREFIXES: &[&str] = &[
-    "vmenet",  // VMware
-    "vmnet",   // VMware (alternative)
-    "veth",    // Docker/Linux virtual eth
-    "vnic",    // Virtual NIC
-    "virbr",   // libvirt bridge
+    "vmenet", // VMware
+    "vmnet",  // VMware (alternative)
+    "veth",   // Docker/Linux virtual eth
+    "vnic",   // Virtual NIC
+    "virbr",  // libvirt bridge
 ];
 
 /// Keywords indicating Wi-Fi hardware (hardware_port or service_name).
@@ -1464,12 +1467,12 @@ fn classify_interface(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Convert an IPv4 subnet mask to CIDR prefix length.
-fn netmask_to_prefix_v4(mask: std::net::Ipv4Addr) -> u8 {
+fn netmask_to_prefix_v4(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
 }
 
 /// Convert an IPv6 subnet mask to CIDR prefix length.
-fn netmask_to_prefix_v6(mask: std::net::Ipv6Addr) -> u8 {
+fn netmask_to_prefix_v6(mask: Ipv6Addr) -> u8 {
     u128::from(mask).count_ones() as u8
 }
 

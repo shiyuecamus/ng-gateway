@@ -36,6 +36,7 @@ use ng_gateway_sdk::{
 };
 use serde_json::json;
 use std::{
+    future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, OnceLock,
@@ -166,7 +167,7 @@ impl Dl645Handle {
     ) -> DriverResult<T>
     where
         F: FnOnce(Arc<dyn ProtoSession>) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<T, ProtocolError>> + Send + 'static,
+        Fut: Future<Output = Result<T, ProtocolError>> + Send + 'static,
         T: Send + 'static,
     {
         let sess = match self.load_session() {

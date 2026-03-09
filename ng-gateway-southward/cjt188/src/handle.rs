@@ -27,6 +27,7 @@ use ng_gateway_sdk::{
 };
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, OnceLock,
@@ -126,7 +127,7 @@ impl Cjt188Handle {
     ) -> DriverResult<T>
     where
         F: FnOnce(Arc<dyn ProtoSession>) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<T, ProtocolError>> + Send + 'static,
+        Fut: Future<Output = Result<T, ProtocolError>> + Send + 'static,
         T: Send + 'static,
     {
         let sess = match self.load_session() {

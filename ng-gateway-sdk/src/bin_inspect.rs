@@ -6,7 +6,7 @@ use goblin::{
     mach, Object,
 };
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::{ffi::OsStr, path::Path};
+use std::{ffi::OsStr, fs, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i16)]
@@ -193,7 +193,7 @@ pub fn ensure_current_platform_from_path(path: &Path) -> crate::DriverResult<()>
     }
 
     // Read bytes once and validate OS/Arch strictly.
-    let bytes = std::fs::read(path).map_err(|e| {
+    let bytes = fs::read(path).map_err(|e| {
         crate::DriverError::LoadError(format!("Failed to read library {}: {}", path.display(), e))
     })?;
     ensure_current_platform_from_bytes(&bytes)

@@ -18,8 +18,7 @@ use ng_gateway_sdk::{
     supervision::{RunOutcome, Session, SessionContext},
     NorthwardError, NorthwardRuntimeApi, RuntimeDelta,
 };
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, Instrument};

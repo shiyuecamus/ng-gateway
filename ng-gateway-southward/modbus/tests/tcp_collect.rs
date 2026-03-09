@@ -9,7 +9,10 @@ use ng_gateway_sdk::{
     supervision::{Connector, SupervisorLoop, SupervisorParams},
     AccessMode, DataType, Driver, NorthwardData, SupervisedDriver,
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 // 测试持续时间（秒）
 const TEST_DURATION_SECS: u64 = 30;
@@ -107,7 +110,7 @@ async fn test_modbus_tcp_collect() {
     tracing::info!("Connected to Modbus Slave!");
 
     // 6. 循环采集测试
-    let start_time = std::time::Instant::now();
+    let start_time = Instant::now();
     let duration = Duration::from_secs(TEST_DURATION_SECS);
     let mut iteration = 0;
 

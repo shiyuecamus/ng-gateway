@@ -1,5 +1,5 @@
 use crate::{DriverError, DriverResult, NGValue, RuntimeParameter};
-use std::sync::Arc;
+use std::{any, sync::Arc};
 
 /// Validate action parameters including required presence and numeric ranges.
 ///
@@ -212,7 +212,7 @@ where
                 return Err(DriverError::ConfigurationError(format!(
                     "Parameter type mismatch for key '{}' (expected {})",
                     param.key(),
-                    std::any::type_name::<P>()
+                    any::type_name::<P>()
                 )));
             }
         };
@@ -457,7 +457,7 @@ pub fn downcast_parameters<P: RuntimeParameter + 'static>(
             DriverError::ConfigurationError(format!(
                 "Parameter type mismatch for key '{}' (expected {})",
                 key,
-                std::any::type_name::<P>()
+                any::type_name::<P>()
             ))
         })?;
         out.push((p, v));

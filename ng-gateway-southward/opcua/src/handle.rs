@@ -107,7 +107,7 @@ impl OpcUaHandle {
         Self {
             inner,
             session: ArcSwapOption::from(None),
-            reconnect: std::sync::OnceLock::new(),
+            reconnect: OnceLock::new(),
             read_chunk_size: AtomicU64::new(0),
             consecutive_timeouts: AtomicU64::new(0),
             node_id_cache: DashMap::new(),
