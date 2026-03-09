@@ -435,10 +435,15 @@ DNSMASQ
     systemctl disable ng-gateway-dnsmasq.service 2>/dev/null || true
 
     systemctl enable ng-gateway-ap-auto.service 2>/dev/null || true
+    log "Running AP auto-provision probe now..."
+    systemctl restart ng-gateway-ap-auto.service 2>/dev/null || {
+      warn "ap-auto-provision failed. Check: journalctl -u ng-gateway-ap-auto -n 50"
+    }
 
     log ""
     log "EXCLUSIVE MODE: AP auto-provision enabled (ng-gateway-ap-auto.service)."
     log "On boot: if WiFi module exists and no WiFi is connected, AP starts automatically."
+    log "Install-time probe: running once now so AP is available immediately when WiFi is not connected."
     log "Manual control: use the NG Gateway Web UI to start/stop the AP hotspot."
   else
     systemctl enable ng-gateway-ap-setup.service 2>/dev/null || true
