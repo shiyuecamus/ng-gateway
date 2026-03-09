@@ -204,25 +204,35 @@ else
   COMP_PATH="${OUTPUT}.img${COMP_EXT}"
   MANIFEST_PATH="${OUTPUT}.manifest.json"
 
-  dd if="${DEVICE}" bs=1M count="${TOTAL_BYTES}" iflag=count_bytes status=progress 2>/dev/null \
-    | tee >(sha256sum | awk '{print $1}' > "${RAW_SHA256_FILE}") \
-    | case "${COMPRESSION}" in
-        zstd) zstd -T0 -3 -o "${COMP_PATH}" ;;
-        gzip) gzip -c > "${COMP_PATH}" ;;
-        none) cat > "${IMG_PATH}" ;;
-      esac
+  # Step 6a: Always produce the raw .img first (canonical production artifact).
+  log "  6a) Writing raw image: ${IMG_PATH}"
+  dd if="${DEVICE}" bs=1M count="${TOTAL_BYTES}" iflag=count_bytes status=progress \
+    of="${IMG_PATH}" 2>/dev/null
 
-  log "  Image written: ${COMP_PATH:-${IMG_PATH}}"
+  RAW_SHA256=$(sha256sum "${IMG_PATH}" | awk '{print $1}')
+  echo "${RAW_SHA256}  $(basename "${IMG_PATH}")" > "${IMG_PATH}.sha256"
+  RAW_BYTES=$(stat -c%s "${IMG_PATH}" 2>/dev/null || stat -f%z "${IMG_PATH}" 2>/dev/null)
+  log "  Raw image: ${IMG_PATH} (${TOTAL_MB} MB)"
+  log "  SHA256:    ${IMG_PATH}.sha256"
 
-  log "  Generating checksums and manifest..."
+  # Step 6b: Compress for archival / distribution (skip when --compression none).
+  COMP_SHA256=""
+  COMP_BYTES=""
+  if [[ "${COMPRESSION}" != "none" ]]; then
+    log "  6b) Compressing: ${COMP_PATH}"
+    case "${COMPRESSION}" in
+      zstd) zstd -T0 -3 "${IMG_PATH}" -o "${COMP_PATH}" 2>/dev/null ;;
+      gzip) gzip -c "${IMG_PATH}" > "${COMP_PATH}" ;;
+    esac
+    COMP_SHA256=$(sha256sum "${COMP_PATH}" | awk '{print $1}')
+    COMP_BYTES=$(stat -c%s "${COMP_PATH}" 2>/dev/null || stat -f%z "${COMP_PATH}" 2>/dev/null)
+    echo "${COMP_SHA256}  $(basename "${COMP_PATH}")" > "${COMP_PATH}.sha256"
+    log "  Compressed: ${COMP_PATH} ($(( ${COMP_BYTES} / 1048576 )) MB)"
+    log "  SHA256:     ${COMP_PATH}.sha256"
+  fi
 
-  FINAL_PATH="${COMP_PATH:-${IMG_PATH}}"
-  COMP_SHA256=$(sha256sum "${FINAL_PATH}" | awk '{print $1}')
-  RAW_SHA256=$(cat "${RAW_SHA256_FILE}")
-  COMP_BYTES=$(stat -c%s "${FINAL_PATH}" 2>/dev/null || stat -f%z "${FINAL_PATH}" 2>/dev/null)
-
-  echo "${COMP_SHA256}  $(basename "${FINAL_PATH}")" > "${FINAL_PATH}.sha256"
-  log "  SHA256: ${FINAL_PATH}.sha256"
+  # Step 6c: Generate manifest with both raw and compressed artifact info.
+  log "  6c) Generating manifest..."
 
   KERNEL_VER=$(uname -r 2>/dev/null || echo "unknown")
   OS_INFO=$(lsb_release -ds 2>/dev/null || cat /etc/os-release 2>/dev/null | head -1 || echo "unknown")
@@ -239,10 +249,10 @@ else
     --arg source_device "${DEVICE}" \
     --argjson source_sectors "${TOTAL_SECTORS}" \
     --argjson source_bytes "${TOTAL_BYTES}" \
-    --argjson compressed_bytes "${COMP_BYTES}" \
-    --arg compression "${COMPRESSION}" \
-    --arg sha256_compressed "${COMP_SHA256}" \
     --arg sha256_raw "${RAW_SHA256}" \
+    --arg compression "${COMPRESSION}" \
+    --arg sha256_compressed "${COMP_SHA256:-}" \
+    --argjson compressed_bytes "${COMP_BYTES:-0}" \
     --arg partition_table "gpt" \
     --argjson partitions "[
       {\"number\": ${BOOT_PARTNUM}, \"label\": \"boot\", \"fs\": \"${BOOT_FS}\", \"size_mb\": ${BOOT_SIZE_MB}},
@@ -258,10 +268,10 @@ else
       source_device: $source_device,
       source_sectors: $source_sectors,
       source_bytes: $source_bytes,
-      compressed_bytes: $compressed_bytes,
+      sha256_raw: $sha256_raw,
       compression: $compression,
       sha256_compressed: $sha256_compressed,
-      sha256_raw: $sha256_raw,
+      compressed_bytes: $compressed_bytes,
       partition_table: $partition_table,
       partitions: $partitions,
       ng_gateway_version: $ng_gateway_version,
@@ -280,7 +290,16 @@ log "=========================================="
 log "Golden Image Creation Complete"
 log "=========================================="
 log ""
-log "Image size: ${TOTAL_MB} MB (raw) → ${COMP_BYTES:-N/A} bytes (compressed)"
+if [[ "${OUTPUT}" != "-" ]]; then
+  log "Artifacts:"
+  log "  Raw image:  ${IMG_PATH} (${TOTAL_MB} MB)"
+  [[ -n "${COMP_BYTES:-}" ]] && \
+  log "  Compressed: ${COMP_PATH} ($(( ${COMP_BYTES} / 1048576 )) MB)"
+  log "  Manifest:   ${MANIFEST_PATH}"
+  log ""
+  log "For RKDevTool / Windows mass-production flashing, use the raw .img file."
+  log "For archival or network transfer, use the compressed .img${COMP_EXT} file."
+fi
 log ""
 log "IMPORTANT: The rootfs partition in this image has been shrunk."
 log "Do NOT resize it back on the golden sample. If you need to boot"

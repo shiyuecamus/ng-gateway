@@ -186,8 +186,19 @@ fi
 
 # ─── Finalize ───
 
+MACHINE_ID=$(cat /etc/machine-id 2>/dev/null || echo "unknown")
+SSH_KEY_COUNT=$(ls /etc/ssh/ssh_host_*_key 2>/dev/null | wc -l)
+ROOT_SIZE=$(df -h "${ROOT_DEV}" 2>/dev/null | awk 'NR==2{print $2}' || echo "unknown")
+
 mkdir -p "$(dirname "${MARKER_FILE}")"
-date -Iseconds > "${MARKER_FILE}"
+cat > "${MARKER_FILE}" <<MARKER_EOF
+completed_at=$(date -Iseconds)
+root_disk=${ROOT_DISK}
+root_dev=${ROOT_DEV}
+root_size=${ROOT_SIZE}
+machine_id=${MACHINE_ID}
+ssh_key_count=${SSH_KEY_COUNT}
+MARKER_EOF
 log "  Marker written: ${MARKER_FILE}"
 
 log ""
@@ -196,9 +207,9 @@ log "First-Boot Initialization Complete"
 log "=========================================="
 log ""
 log "Summary:"
-log "  Root partition: expanded to fill ${ROOT_DISK}"
-log "  Machine ID:     $(cat /etc/machine-id 2>/dev/null || echo 'pending')"
-log "  SSH keys:       regenerated"
+log "  Root partition: expanded to ${ROOT_SIZE} on ${ROOT_DISK}"
+log "  Machine ID:     ${MACHINE_ID}"
+log "  SSH keys:       ${SSH_KEY_COUNT} key pair(s) generated"
 log "  AP hotspot:     re-initialized with device-specific SSID"
 log ""
 
