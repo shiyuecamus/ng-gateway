@@ -719,7 +719,7 @@ impl LinuxNetworkManager {
             }
 
             let ts = settings_u64(conn_section, conn::TIMESTAMP).unwrap_or(0);
-            if best.as_ref().map_or(true, |(_, prev_ts)| ts > *prev_ts) {
+            if best.as_ref().is_none_or(|(_, prev_ts)| ts > *prev_ts) {
                 best = Some((conn_path.to_string(), ts));
             }
         }
@@ -1991,14 +1991,10 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let firmware_version = prop_str(&dev_props, "FirmwareVersion").filter(|v| !v.is_empty());
 
         // Read NM connection UUID from active connection if present.
-        let nm_connection_uuid = prop_object_path(&dev_props, prop::ACTIVE_CONNECTION)
-            .filter(|p| !p.is_empty() && p != "/")
-            .and_then(|active_path| {
-                // Will be resolved asynchronously below.
-                Some(active_path)
-            });
+        let active_connection_path = prop_object_path(&dev_props, prop::ACTIVE_CONNECTION)
+            .filter(|p| !p.is_empty() && p != "/");
 
-        let nm_connection_uuid = if let Some(active_path) = nm_connection_uuid {
+        let nm_connection_uuid = if let Some(active_path) = active_connection_path {
             let active_ref = ObjectPath::try_from(active_path.as_str()).ok();
             if let Some(active_ref) = active_ref {
                 self.get_all_properties(&active_ref, iface::ACTIVE_CONN)
@@ -2718,7 +2714,7 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                     method::MANUAL => {
                         let (ip_address, prefix_length) = settings
                             .get(conn::IPV4)
-                            .and_then(|ipv4_s| parse_settings_address_data(ipv4_s))
+                            .and_then(parse_settings_address_data)
                             .unwrap_or((
                                 "0.0.0.0"
                                     .parse()
@@ -2731,11 +2727,11 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                             .and_then(|g| g.parse::<IpAddr>().ok());
                         let dns = settings
                             .get(conn::IPV4)
-                            .map(|ipv4_s| parse_settings_dns(ipv4_s))
+                            .map(parse_settings_dns)
                             .filter(|d| !d.is_empty());
                         let search_domains = settings
                             .get(conn::IPV4)
-                            .map(|ipv4_s| parse_settings_search_domains(ipv4_s))
+                            .map(parse_settings_search_domains)
                             .filter(|d| !d.is_empty());
                         IpConfig::Static {
                             config: StaticIpConfig {
