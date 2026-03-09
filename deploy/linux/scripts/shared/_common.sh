@@ -18,8 +18,9 @@
 #   Logging:       log, warn, die
 #   Guards:        require_root, require_commands
 #   Block device:  parse_block_device, partition_path
-#   Network:       find_uplink_iface, release_iface_from_nm, setup_ap_interface,
-#                  setup_nat_rules, remove_nat_rules
+#   Network:       find_uplink_iface, find_managed_wifi_iface, nm_device_state,
+#                  release_iface_from_nm, setup_ap_interface, setup_nat_rules,
+#                  remove_nat_rules
 #   Systemd:       sanitize_conflicting_services
 #   Package mgmt:  detect_package_manager, install_packages
 
@@ -110,6 +111,89 @@ partition_path() {
 # Returns the interface carrying the default route (uplink for NAT).
 find_uplink_iface() {
   ip route show default 2>/dev/null | awk '{print $5; exit}'
+}
+
+# Returns 0 if the interface exists and is backed by cfg80211/mac80211.
+is_wireless_iface() {
+  local iface="$1"
+  [[ -n "${iface}" ]] || return 1
+  [[ -e "/sys/class/net/${iface}" ]] || return 1
+  [[ -d "/sys/class/net/${iface}/wireless" || -e "/sys/class/net/${iface}/phy80211" ]]
+}
+
+# Returns the current nl80211 interface type for a wireless interface.
+wifi_iface_type() {
+  local iface="$1"
+  iw dev "${iface}" info 2>/dev/null | awk '/type/{print $2; exit}'
+}
+
+# Returns the NetworkManager device state string for a specific interface.
+nm_device_state() {
+  local iface="$1"
+  local state=""
+  command -v nmcli >/dev/null 2>&1 || return 1
+  state=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v dev="${iface}" '$1 == dev {print $2; exit}')
+  [[ -n "${state}" ]] || return 1
+  printf "%s\n" "${state}"
+}
+
+# Returns 0 if the NetworkManager state represents an active connection.
+nm_state_is_connected() {
+  local state="${1:-}"
+  [[ "${state}" == connected* ]]
+}
+
+# Returns the best station-capable Wi-Fi interface for AP provisioning.
+#
+# Priority:
+#   1. NetworkManager-managed Wi-Fi devices already connected
+#   2. NetworkManager-managed Wi-Fi devices still connecting
+#   3. NetworkManager-managed Wi-Fi devices in disconnected/unavailable states
+#   4. Fallback to the first `iw dev` interface whose type is `managed`
+#
+# Important: we intentionally do NOT filter by interface name patterns such as
+# "P2p" because some Realtek drivers expose the primary STA interface with such
+# names (for example `wlP2p33s0` on Orange Pi boards).
+find_managed_wifi_iface() {
+  local preferred_states=("connected" "connecting" "disconnected" "unavailable")
+  local desired_state=""
+  local device=""
+  local type=""
+  local state=""
+  local iface_type=""
+
+  if command -v nmcli >/dev/null 2>&1; then
+    for desired_state in "${preferred_states[@]}"; do
+      while IFS=: read -r device type state; do
+        [[ "${type}" == "wifi" ]] || continue
+        [[ "${state}" == "${desired_state}" ]] || continue
+        is_wireless_iface "${device}" || continue
+        iface_type=$(wifi_iface_type "${device}")
+        [[ -z "${iface_type}" || "${iface_type}" == "managed" ]] || continue
+        printf "%s\n" "${device}"
+        return 0
+      done < <(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null)
+    done
+
+    while IFS=: read -r device type state; do
+      [[ "${type}" == "wifi" ]] || continue
+      is_wireless_iface "${device}" || continue
+      iface_type=$(wifi_iface_type "${device}")
+      [[ -z "${iface_type}" || "${iface_type}" == "managed" ]] || continue
+      printf "%s\n" "${device}"
+      return 0
+    done < <(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null)
+  fi
+
+  while IFS= read -r device; do
+    [[ -n "${device}" ]] || continue
+    iface_type=$(wifi_iface_type "${device}")
+    [[ "${iface_type}" == "managed" ]] || continue
+    printf "%s\n" "${device}"
+    return 0
+  done < <(iw dev 2>/dev/null | awk '/Interface/{print $2}')
+
+  return 1
 }
 
 # Release a wireless interface from NetworkManager control.

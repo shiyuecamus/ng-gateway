@@ -42,16 +42,6 @@ DEFAULT_AP_DHCP_LEASE="12h"
 
 # ─── Wi-Fi Detection Helpers ───
 
-find_wifi_interface() {
-  local iface
-  iface=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
-  if [[ -n "$iface" ]]; then
-    echo "$iface"
-    return 0
-  fi
-  return 1
-}
-
 get_phy_name() {
   local iface="$1"
   local phy_path="/sys/class/net/${iface}/phy80211/name"
@@ -271,7 +261,7 @@ main() {
 
   # 1. Detect Wi-Fi hardware.
   local wifi_iface
-  wifi_iface=$(find_wifi_interface) || {
+  wifi_iface=$(find_managed_wifi_iface) || {
     log "No wireless interface detected. AP hotspot will not be configured."
     log "This is normal for devices without Wi-Fi hardware (pure wired gateways)."
     exit 0

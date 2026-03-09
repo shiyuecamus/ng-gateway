@@ -24,15 +24,65 @@ else
   source "${SCRIPT_DIR}/../shared/_common.sh"
 fi
 
+NM_AUTOCONNECT_TIMEOUT_SEC="${NM_AUTOCONNECT_TIMEOUT_SEC:-20}"
+NM_AUTOCONNECT_POLL_SEC="${NM_AUTOCONNECT_POLL_SEC:-1}"
+
+resolve_sta_iface() {
+  local iface="${STA_IFACE:-}"
+
+  if [[ -n "${iface}" ]] && is_wireless_iface "${iface}"; then
+    printf "%s\n" "${iface}"
+    return 0
+  fi
+
+  [[ -n "${iface}" ]] && warn "Configured STA_IFACE=${iface} is not present — probing runtime interface"
+  find_managed_wifi_iface
+}
+
+wait_for_wifi_connection() {
+  local iface="$1"
+  local timeout_sec="$2"
+  local poll_sec="$3"
+  local attempts=1
+  local attempt=1
+  local state=""
+  local last_state="__unset__"
+
+  command -v nmcli >/dev/null 2>&1 || return 1
+  (( poll_sec > 0 )) || poll_sec=1
+  attempts=$(( (timeout_sec + poll_sec - 1) / poll_sec ))
+  (( attempts > 0 )) || attempts=1
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    state=$(nm_device_state "${iface}" 2>/dev/null || true)
+
+    if [[ -z "${state}" ]]; then
+      if [[ "${last_state}" != "__missing__" ]]; then
+        log "NetworkManager does not yet report a state for ${iface}"
+        last_state="__missing__"
+      fi
+    else
+      if [[ "${state}" != "${last_state}" ]]; then
+        log "NetworkManager state for ${iface}: ${state} (attempt ${attempt}/${attempts})"
+        last_state="${state}"
+      fi
+      if nm_state_is_connected "${state}"; then
+        return 0
+      fi
+    fi
+
+    (( attempt < attempts )) && sleep "${poll_sec}"
+  done
+
+  return 1
+}
+
 # ─── Gate: only run in exclusive mode ───
 
 if [ "${AP_EXCLUSIVE:-}" != "true" ]; then
   log "Not in exclusive mode — skipping (concurrent mode uses ap-setup.service)"
   exit 0
 fi
-
-# ─── Allow NM time to auto-connect to known WiFi networks ───
-sleep 5
 
 # ─── Check: WiFi module exists? ───
 
@@ -41,12 +91,17 @@ if ! command -v iw >/dev/null 2>&1; then
   exit 0
 fi
 
-wifi_iface=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
+wifi_iface=$(resolve_sta_iface || true)
 if [ -z "$wifi_iface" ]; then
   log "No WiFi module detected — skipping"
   exit 0
 fi
-log "WiFi module detected: ${wifi_iface}"
+log "Using station interface: ${wifi_iface}"
+
+if [[ "${AP_IFACE:-}" != "${wifi_iface}" ]]; then
+  log "Aligning AP interface with runtime station interface in exclusive mode: ${AP_IFACE:-unset} -> ${wifi_iface}"
+  AP_IFACE="${wifi_iface}"
+fi
 
 # ─── Safety: ensure interface is in managed mode ───
 #
@@ -54,7 +109,7 @@ log "WiFi module detected: ${wifi_iface}"
 # NM cannot manage it and WiFi autoconnect will never happen.
 # Restore to managed mode before checking WiFi state.
 
-iface_type=$(iw dev "$wifi_iface" info 2>/dev/null | awk '/type/{print $2}')
+iface_type=$(wifi_iface_type "$wifi_iface")
 if [ "$iface_type" = "__ap" ] || [ "$iface_type" = "AP" ]; then
   log "Interface ${wifi_iface} stuck in ${iface_type} mode — restoring to managed"
   ip link set "$wifi_iface" down 2>/dev/null || true
@@ -63,23 +118,18 @@ if [ "$iface_type" = "__ap" ] || [ "$iface_type" = "AP" ]; then
   if command -v nmcli >/dev/null 2>&1; then
     nmcli device set "$wifi_iface" managed yes 2>/dev/null || true
   fi
-  # Give NM time to recognize the restored interface and attempt autoconnect.
-  sleep 8
 fi
 
 # ─── Check: WiFi already connected via NM? ───
 
-if command -v nmcli >/dev/null 2>&1; then
-  wifi_state=$(nmcli -t -f TYPE,STATE device 2>/dev/null | grep '^wifi:' | head -1)
-  if echo "$wifi_state" | grep -q "connected"; then
-    log "WiFi is connected — not starting AP"
-    exit 0
-  fi
+if wait_for_wifi_connection "${wifi_iface}" "${NM_AUTOCONNECT_TIMEOUT_SEC}" "${NM_AUTOCONNECT_POLL_SEC}"; then
+  log "WiFi management channel is available on ${wifi_iface} — not starting AP"
+  exit 0
 fi
 
 # ─── No management channel — start AP ───
 
-log "WiFi module present but not connected — starting AP hotspot"
+log "No active WiFi management channel on ${wifi_iface} — starting AP hotspot"
 
 setup_ap_interface_exclusive "${AP_IFACE}" "${AP_IP}" "${AP_PREFIX}"
 setup_nat_rules "${AP_IFACE}" "${UPLINK_IFACE:-}"
