@@ -115,7 +115,18 @@ else
   check_fail "boot" "SSH host keys missing" "Found ${SSH_KEY_COUNT}, expected ≥2"
 fi
 
-KERNEL_ERRORS=$(dmesg 2>/dev/null | grep -ciE "(panic|oops|bug:|rcu.*stall)" || echo 0)
+KERNEL_ERRORS=$(dmesg 2>/dev/null | awk '
+  {
+    line=tolower($0)
+    if (line ~ /(^|[^[:alnum:]_])panic([^[:alnum:]_]|$)/ ||
+        line ~ /(^|[^[:alnum:]_])oops([^[:alnum:]_]|$)/ ||
+        line ~ /bug:/ ||
+        line ~ /rcu.*stall/) {
+      count++
+    }
+  }
+  END { print count+0 }
+')
 if [[ ${KERNEL_ERRORS} -eq 0 ]]; then
   check_pass "boot" "Kernel boot clean" "No panics or oops"
 else
@@ -223,7 +234,17 @@ else
   check_fail "data" "Gateway config missing"
 fi
 
-EMMC_ERRORS=$(dmesg 2>/dev/null | grep -ciE "(mmcblk.*error|mmcblk.*fail|I/O error)" || echo 0)
+EMMC_ERRORS=$(dmesg 2>/dev/null | awk '
+  {
+    line=tolower($0)
+    if (line ~ /mmcblk.*error/ ||
+        line ~ /mmcblk.*fail/ ||
+        line ~ /i\/o error/) {
+      count++
+    }
+  }
+  END { print count+0 }
+')
 if [[ ${EMMC_ERRORS} -eq 0 ]]; then
   check_pass "data" "eMMC health" "No I/O errors in dmesg"
 else

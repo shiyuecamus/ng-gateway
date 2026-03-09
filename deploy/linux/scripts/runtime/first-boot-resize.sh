@@ -41,6 +41,27 @@ log "=========================================="
 
 require_root
 
+# Ensure the root filesystem is writable before mutating identity files.
+ensure_root_writable() {
+  local probe_file="/etc/.ng-gateway-rw-test.$$"
+
+  if touch "${probe_file}" 2>/dev/null; then
+    rm -f "${probe_file}" 2>/dev/null || true
+    return 0
+  fi
+
+  warn "Root filesystem appears read-only; attempting remount as read-write..."
+  mount -o remount,rw / 2>/dev/null || die "Failed to remount / as read-write"
+
+  if touch "${probe_file}" 2>/dev/null; then
+    rm -f "${probe_file}" 2>/dev/null || true
+    log "  Root filesystem remounted read-write"
+    return 0
+  fi
+
+  die "Root filesystem is still read-only; cannot regenerate identity files"
+}
+
 # ─── Step 1: Identify root device and partition ───
 
 log "Step 1/7: Identifying root filesystem device..."
@@ -121,6 +142,8 @@ fi
 # ─── Step 5: Regenerate machine identity ───
 
 log "Step 5/7: Regenerating machine identity..."
+
+ensure_root_writable
 
 if [[ -f /etc/machine-id ]]; then
   truncate -s 0 /etc/machine-id
