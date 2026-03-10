@@ -38,6 +38,8 @@ D:\ng-gateway-factory\
 │       ├── ng-gateway-v1.0.0.img.zst           ← 归档/传输用
 │       ├── ng-gateway-v1.0.0.img.zst.sha256
 │       └── ng-gateway-v1.0.0.manifest.json
+├── scripts\
+│   └── flash-preflight.ps1                      ← 工位预检脚本
 └── docs\
     └── FLASH-SOP.md                            ← 本文件
 ```
@@ -49,6 +51,19 @@ D:\ng-gateway-factory\
 ---
 
 ## 2. 逐台烧录操作步骤
+
+### Step 0: 运行工位预检 (必做)
+
+在 PowerShell 中执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+D:\ng-gateway-factory\scripts\flash-preflight.ps1 `
+  -FactoryRoot "D:\ng-gateway-factory" `
+  -ImageVersion "v1.0.0"
+```
+
+预检通过后，才允许打开 RKDevTool 继续烧录。
 
 ### Step 1: 设备进入 Maskrom 模式
 
@@ -69,10 +84,12 @@ D:\ng-gateway-factory\
 
 ### Step 3: 执行写入
 
-1. 点击 **"Download Image"** 或 **"按地址写"**
-2. 起始地址: `0x00000000`
+1. 点击 **"按地址写"** (Write by Address)
+2. 起始地址固定为: `0x00000000`
 3. 等待进度条完成
 4. 显示 **"Download image OK"** 表示写入成功
+
+> 为避免工位操作歧义，量产统一使用 **"按地址写" + `0x00000000`** 作为唯一标准动作，不混用其他按钮路径。
 
 ### Step 4: 完成
 
@@ -93,6 +110,8 @@ D:\ng-gateway-factory\
 6. AP 热点重新初始化（SSID 含当前设备 MAC 后缀）
 
 整个过程约 30-60 秒，完成后设备自动进入正常运行状态。
+
+> 若 first-boot 中的关键步骤（扩容、machine-id、SSH host key）失败，脚本会**直接失败退出且不会写入完成标记**，便于 QA 或返修工位发现并重试，不会出现“初始化没做完却永远跳过”的隐蔽状态。
 
 ---
 

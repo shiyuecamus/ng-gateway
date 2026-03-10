@@ -113,7 +113,7 @@ if command -v growpart >/dev/null 2>&1; then
     if [[ $rc -eq 1 ]]; then
       log "  Partition already at maximum size (NOCHANGE)"
     else
-      warn "growpart failed with exit code ${rc}"
+      die "growpart failed with exit code ${rc}"
     fi
   }
   log "  Partition expanded"
@@ -130,13 +130,13 @@ log "Step 4/7: Expanding ext4 filesystem..."
 
 if [[ $(blkid -o value -s TYPE "${ROOT_DEV}" 2>/dev/null) == "ext4" ]]; then
   resize2fs "${ROOT_DEV}" 2>&1 || {
-    warn "resize2fs failed — filesystem may need manual repair"
+    die "resize2fs failed — filesystem may need manual repair"
   }
   log "  Filesystem expanded"
   NEW_SIZE=$(df -h "${ROOT_DEV}" 2>/dev/null | awk 'NR==2{print $2}') || true
   log "  New rootfs size: ${NEW_SIZE}"
 else
-  warn "Root filesystem is not ext4 — skipping resize"
+  die "Root filesystem is not ext4 — unsupported first-boot resize target"
 fi
 
 # ─── Step 5: Regenerate machine identity ───
@@ -148,9 +148,10 @@ ensure_root_writable
 if [[ -f /etc/machine-id ]]; then
   truncate -s 0 /etc/machine-id
   if command -v systemd-machine-id-setup >/dev/null 2>&1; then
-    systemd-machine-id-setup 2>/dev/null || true
+    systemd-machine-id-setup 2>/dev/null || die "systemd-machine-id-setup failed"
   fi
-  log "  machine-id: $(cat /etc/machine-id 2>/dev/null || echo '(will be generated on next boot)')"
+  [[ -s /etc/machine-id ]] || die "machine-id regeneration failed"
+  log "  machine-id: $(cat /etc/machine-id 2>/dev/null || echo '(unavailable)')"
 fi
 
 rm -f /var/lib/dbus/machine-id 2>/dev/null || true
@@ -165,10 +166,12 @@ log "Step 6/7: Regenerating SSH host keys..."
 rm -f /etc/ssh/ssh_host_* 2>/dev/null || true
 
 if command -v ssh-keygen >/dev/null 2>&1; then
-  ssh-keygen -A 2>/dev/null || warn "ssh-keygen -A failed"
-  log "  SSH host keys regenerated"
+  ssh-keygen -A 2>/dev/null || die "ssh-keygen -A failed"
+  generated_ssh_key_count=$(ls /etc/ssh/ssh_host_*_key 2>/dev/null | wc -l)
+  [[ ${generated_ssh_key_count} -ge 2 ]] || die "SSH host key regeneration failed"
+  log "  SSH host keys regenerated (${generated_ssh_key_count} key pair(s))"
 else
-  log "  ssh-keygen not found — sshd will regenerate keys on first start"
+  die "ssh-keygen not found — cannot regenerate SSH host keys"
 fi
 
 # ─── Step 7: Re-initialize AP hotspot (MAC-specific SSID) ───
