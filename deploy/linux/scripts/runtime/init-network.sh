@@ -16,6 +16,11 @@ set -euo pipefail
 #
 # Configuration directory: /etc/ng-gateway/
 # Runtime directory:       /var/lib/ng-gateway/
+#
+# Environment knobs:
+#   FORCE_REGENERATE=1            Regenerate AP config files even if they exist.
+#   DEFER_SERVICE_ACTIVATION=1    Do not start/restart AP services in this run;
+#                                 only deploy/enable them for later boot stages.
 
 LOG_TAG="[init-network]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -245,6 +250,8 @@ main() {
 
   log "Starting network initialization..."
 
+  local defer_service_activation="${DEFER_SERVICE_ACTIVATION:-0}"
+
   # 0. Check prerequisites.
   if ! command -v iw >/dev/null 2>&1; then
     local pkg_manager
@@ -428,38 +435,50 @@ DNSMASQ
 
   systemctl daemon-reload || true
 
-  # 10. Enable and start AP services.
+  # 10. Enable and optionally start AP services.
   if [[ "$ap_exclusive" == "true" ]]; then
     systemctl disable ng-gateway-ap-setup.service 2>/dev/null || true
     systemctl disable ng-gateway-hostapd.service 2>/dev/null || true
     systemctl disable ng-gateway-dnsmasq.service 2>/dev/null || true
 
     systemctl enable ng-gateway-ap-auto.service 2>/dev/null || true
-    log "Running AP auto-provision probe now..."
-    systemctl restart ng-gateway-ap-auto.service 2>/dev/null || {
-      warn "ap-auto-provision failed. Check: journalctl -u ng-gateway-ap-auto -n 50"
-    }
+    if [[ "${defer_service_activation}" == "1" ]]; then
+      log "Deferring AP auto-provision start to later boot stage (DEFER_SERVICE_ACTIVATION=1)"
+    else
+      log "Running AP auto-provision probe now..."
+      systemctl restart ng-gateway-ap-auto.service 2>/dev/null || {
+        warn "ap-auto-provision failed. Check: journalctl -u ng-gateway-ap-auto -n 50"
+      }
+    fi
 
     log ""
     log "EXCLUSIVE MODE: AP auto-provision enabled (ng-gateway-ap-auto.service)."
     log "On boot: if WiFi module exists and no WiFi is connected, AP starts automatically."
-    log "Install-time probe: running once now so AP is available immediately when WiFi is not connected."
+    if [[ "${defer_service_activation}" == "1" ]]; then
+      log "Install-time probe: deferred because this run occurs inside an earlier boot stage."
+    else
+      log "Install-time probe: running once now so AP is available immediately when WiFi is not connected."
+    fi
     log "Manual control: use the NG Gateway Web UI to start/stop the AP hotspot."
   else
     systemctl enable ng-gateway-ap-setup.service 2>/dev/null || true
     systemctl enable ng-gateway-hostapd.service 2>/dev/null || true
     systemctl enable ng-gateway-dnsmasq.service 2>/dev/null || true
 
-    log "Starting AP services..."
-    systemctl start ng-gateway-ap-setup.service 2>/dev/null || {
-      warn "ap-setup failed (virtual interface may not be available). Continuing..."
-    }
-    systemctl start ng-gateway-hostapd.service 2>/dev/null || {
-      warn "hostapd failed to start. Check: journalctl -u ng-gateway-hostapd -n 20"
-    }
-    systemctl start ng-gateway-dnsmasq.service 2>/dev/null || {
-      warn "dnsmasq failed to start. Check: journalctl -u ng-gateway-dnsmasq -n 20"
-    }
+    if [[ "${defer_service_activation}" == "1" ]]; then
+      log "Deferring AP service start to later boot stage (DEFER_SERVICE_ACTIVATION=1)"
+    else
+      log "Starting AP services..."
+      systemctl start ng-gateway-ap-setup.service 2>/dev/null || {
+        warn "ap-setup failed (virtual interface may not be available). Continuing..."
+      }
+      systemctl start ng-gateway-hostapd.service 2>/dev/null || {
+        warn "hostapd failed to start. Check: journalctl -u ng-gateway-hostapd -n 20"
+      }
+      systemctl start ng-gateway-dnsmasq.service 2>/dev/null || {
+        warn "dnsmasq failed to start. Check: journalctl -u ng-gateway-dnsmasq -n 20"
+      }
+    fi
   fi
 
   # 11. Verify.

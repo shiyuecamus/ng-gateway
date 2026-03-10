@@ -13,8 +13,9 @@ set -euo pipefail
 #   4. AP hotspot re-initialization  (MAC-specific SSID)
 #   5. Marker file creation to prevent re-execution
 #
-# Called by ng-gateway-first-boot.service (oneshot, Before=local-fs-pre.target).
-# Idempotent — safe to re-run, but will skip if marker file exists.
+# Called by ng-gateway-first-boot.service after local filesystems are fully
+# mounted/remounted and before SSH / NG Gateway services start. Idempotent —
+# safe to re-run, but will skip if marker file exists.
 #
 # Required tools: growpart (cloud-guest-utils), resize2fs, sgdisk, ssh-keygen
 
@@ -44,22 +45,64 @@ require_root
 # Ensure the root filesystem is writable before mutating identity files.
 ensure_root_writable() {
   local probe_file="/etc/.ng-gateway-rw-test.$$"
+  local attempt=0
 
-  if touch "${probe_file}" 2>/dev/null; then
-    rm -f "${probe_file}" 2>/dev/null || true
-    return 0
+  for attempt in $(seq 1 10); do
+    if touch "${probe_file}" 2>/dev/null; then
+      rm -f "${probe_file}" 2>/dev/null || true
+      if [[ ${attempt} -gt 1 ]]; then
+        log "  Root filesystem is writable after ${attempt} attempt(s)"
+      fi
+      return 0
+    fi
+
+    if [[ ${attempt} -eq 1 ]]; then
+      warn "Root filesystem appears read-only; retrying remount as read-write..."
+    else
+      warn "Root filesystem still not writable (attempt ${attempt}/10); retrying..."
+    fi
+
+    mount -o remount,rw / 2>/dev/null || true
+    sync
+    sleep 1
+  done
+
+  local mount_info="unknown"
+  if command -v findmnt >/dev/null 2>&1; then
+    mount_info=$(findmnt -n -o SOURCE,TARGET,FSTYPE,OPTIONS / 2>/dev/null || echo "unknown")
   fi
 
-  warn "Root filesystem appears read-only; attempting remount as read-write..."
-  mount -o remount,rw / 2>/dev/null || die "Failed to remount / as read-write"
+  die "Root filesystem is still not writable after retries (${mount_info})"
+}
 
-  if touch "${probe_file}" 2>/dev/null; then
-    rm -f "${probe_file}" 2>/dev/null || true
-    log "  Root filesystem remounted read-write"
-    return 0
+# Ensure a specific file path can be opened for write after online resize.
+ensure_file_writable() {
+  local file_path="$1"
+  local file_label="${2:-$1}"
+  local attempt=0
+
+  for attempt in $(seq 1 10); do
+    ensure_root_writable
+
+    if : >> "${file_path}" 2>/dev/null; then
+      if [[ ${attempt} -gt 1 ]]; then
+        log "  ${file_label} is writable after ${attempt} attempt(s)"
+      fi
+      return 0
+    fi
+
+    warn "${file_label} is not writable yet (attempt ${attempt}/10); waiting for filesystem to settle..."
+    mount -o remount,rw / 2>/dev/null || true
+    sync
+    sleep 1
+  done
+
+  local mount_info="unknown"
+  if command -v findmnt >/dev/null 2>&1; then
+    mount_info=$(findmnt -n -o SOURCE,TARGET,FSTYPE,OPTIONS / 2>/dev/null || echo "unknown")
   fi
 
-  die "Root filesystem is still read-only; cannot regenerate identity files"
+  die "${file_label} is still not writable after retries (${mount_info})"
 }
 
 # ─── Step 1: Identify root device and partition ───
@@ -133,6 +176,12 @@ if [[ $(blkid -o value -s TYPE "${ROOT_DEV}" 2>/dev/null) == "ext4" ]]; then
     die "resize2fs failed — filesystem may need manual repair"
   }
   log "  Filesystem expanded"
+  log "  Waiting for filesystem state to settle after online resize..."
+  sync
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle 2>/dev/null || true
+  fi
+  sleep 1
   NEW_SIZE=$(df -h "${ROOT_DEV}" 2>/dev/null | awk 'NR==2{print $2}') || true
   log "  New rootfs size: ${NEW_SIZE}"
 else
@@ -144,6 +193,7 @@ fi
 log "Step 5/7: Regenerating machine identity..."
 
 ensure_root_writable
+ensure_file_writable /etc/machine-id "/etc/machine-id"
 
 if [[ -f /etc/machine-id ]]; then
   truncate -s 0 /etc/machine-id
@@ -180,7 +230,7 @@ log "Step 7/7: Re-initializing AP hotspot configuration..."
 
 init_script="${OPT_DIR}/scripts/init-network.sh"
 if [[ -f "${init_script}" ]]; then
-  FORCE_REGENERATE=1 bash "${init_script}" || {
+  FORCE_REGENERATE=1 DEFER_SERVICE_ACTIVATION=1 bash "${init_script}" || {
     warn "AP re-initialization had issues (non-fatal)"
   }
 else

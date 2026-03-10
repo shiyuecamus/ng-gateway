@@ -79,8 +79,11 @@ if command -v systemctl >/dev/null 2>&1; then
   if [[ -f "$fb_unit" ]]; then
     cp -f "$fb_unit" "$fb_dst"
     systemctl daemon-reload || true
-    systemctl enable ng-gateway-first-boot.service 2>/dev/null || true
-    echo "[postinstall] First-boot service deployed and enabled"
+    # Recreate install symlinks from the current unit definition so upgrades do
+    # not keep stale Wants/targets from older revisions.
+    systemctl reenable ng-gateway-first-boot.service 2>/dev/null || \
+      systemctl enable ng-gateway-first-boot.service 2>/dev/null || true
+    echo "[postinstall] First-boot service deployed and re-enabled"
   fi
 fi
 

@@ -8,15 +8,15 @@
 # The script creates /var/lib/ng-gateway/.first-boot-done on success.
 # Subsequent boots skip execution via ConditionPathExists.
 #
-# Must run very early — before local-fs-pre.target — because resize2fs
-# can operate on an online ext4 filesystem but growpart needs the kernel
-# to re-read the partition table.
+# Run after local filesystems are fully mounted/remounted so identity writes
+# (machine-id, SSH host keys) are not racing early-boot remount timing. The
+# script still runs before SSH and NG Gateway services, so the device reaches
+# its final unique identity before network-facing services start.
 
 [Unit]
 Description=NG-Gateway First-Boot Initialization (partition resize + identity)
-DefaultDependencies=no
-Before=local-fs-pre.target
-After=systemd-remount-fs.service
+After=systemd-remount-fs.service local-fs.target
+Before=ssh.service ng-gateway.service ng-gateway-ap-auto.service ng-gateway-hostapd.service ng-gateway-dnsmasq.service
 ConditionPathExists=!/var/lib/ng-gateway/.first-boot-done
 
 [Service]
@@ -28,4 +28,4 @@ StandardOutput=journal+console
 StandardError=journal+console
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=multi-user.target
