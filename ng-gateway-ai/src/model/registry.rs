@@ -44,12 +44,12 @@ mod inner {
     /// Model registry — DB-backed write-through cache with full lifecycle.
     ///
     /// Keyed by `model_id` (i32). All mutations are DB-first, then cache.
-    /// Maintains a secondary `key_index` for O(1) lookup by `model_key`,
+    /// Maintains a secondary `key_index` for O(1) lookup by `key`,
     /// which is critical for the per-frame inference hot path.
     pub struct ModelRegistry {
         /// Cached model info keyed by model id.
         cache: DashMap<i32, Arc<ModelInfo>>,
-        /// Reverse index: model_key -> model_id for O(1) key-based lookup.
+        /// Reverse index: key -> model_id for O(1) key-based lookup.
         key_index: DashMap<String, i32>,
         /// Root directory for model artifact files.
         models_dir: PathBuf,
@@ -107,26 +107,20 @@ mod inner {
                 batch_router,
             };
 
-            let db_models = if let Some(conn) = db_conn {
-                ModelRepository::list_all_with(conn)
-                    .await
-                    .map_err(|e| AiEngineError::IoError(e.to_string()))?
-            } else {
-                ModelRepository::list_all()
-                    .await
-                    .map_err(|e| AiEngineError::IoError(e.to_string()))?
-            };
+            let db_models = ModelRepository::list_all(db_conn)
+                .await
+                .map_err(|e| AiEngineError::IoError(e.to_string()))?;
 
             for entity in db_models {
                 let info = ModelInfo::from(entity);
                 let artifact_path = Path::new(&info.path);
                 if artifact_path.exists() {
-                    registry.key_index.insert(info.model_key.clone(), info.id);
+                    registry.key_index.insert(info.key.clone(), info.id);
                     registry.cache.insert(info.id, Arc::new(info));
                 } else {
                     warn!(
                         model_id = info.id,
-                        model_key = %info.model_key,
+                        key = %info.key,
                         path = %info.path,
                         "model artifact missing while restoring from DB"
                     );
@@ -146,9 +140,9 @@ mod inner {
             self.cache.get(&model_id).map(|r| Arc::clone(r.value()))
         }
 
-        /// Look up a model by model_key from cache using O(1) reverse index.
-        pub fn get_by_key(&self, model_key: &str) -> Option<Arc<ModelInfo>> {
-            let model_id = *self.key_index.get(model_key)?;
+        /// Look up a model by key from cache using O(1) reverse index.
+        pub fn get_by_key(&self, key: &str) -> Option<Arc<ModelInfo>> {
+            let model_id = *self.key_index.get(key)?;
             self.cache.get(&model_id).map(|r| Arc::clone(r.value()))
         }
 
@@ -208,12 +202,12 @@ mod inner {
         /// `DeviceMemory(DMA-buf uint8 NHWC)`.
         pub async fn infer_by_key(
             &self,
-            model_key: &str,
+            key: &str,
             input: PreprocessOutput,
         ) -> Result<(RawInferenceOutput, InferTiming), AiEngineError> {
             let info = self
-                .get_by_key(model_key)
-                .ok_or(AiEngineError::ModelNotFound(model_key.to_string()))?;
+                .get_by_key(key)
+                .ok_or(AiEngineError::ModelNotFound(key.to_string()))?;
 
             let backend = self
                 .backend_for(info.format)
@@ -237,13 +231,7 @@ mod inner {
                                 info.format
                             )))?;
                     return router
-                        .submit(
-                            model_key,
-                            info.id,
-                            input,
-                            backend_arc,
-                            Path::new(&info.path),
-                        )
+                        .submit(key, info.id, input, backend_arc, Path::new(&info.path))
                         .await;
                 }
             }
@@ -289,12 +277,12 @@ mod inner {
             // 1. Probe
             let probe_info = self.probe_model(file_path).await?;
 
-            // 2. Derive model_key from filename stem
+            // 2. Derive key from filename stem
             let file_stem = file_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("model");
-            let model_key = user_meta
+            let key = user_meta
                 .name
                 .as_deref()
                 .map(|n| n.to_lowercase().replace(' ', "-"))
@@ -303,7 +291,7 @@ mod inner {
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("onnx");
-            let dest_filename = format!("{model_key}.{ext}");
+            let dest_filename = format!("{key}.{ext}");
             let dest_path = self.models_dir.join(&dest_filename);
 
             // 3. Determine task from probe or user override
@@ -320,7 +308,7 @@ mod inner {
 
             // 5. Build NewModel
             let new_model = NewModel {
-                model_key: model_key.clone(),
+                key: key.clone(),
                 name: user_meta.name.unwrap_or(file_stem.to_string()),
                 version: user_meta.version.unwrap_or("1.0.0".into()),
                 task,
@@ -364,19 +352,18 @@ mod inner {
             // 6. Copy artifact to models directory
             if let Err(e) = tokio::fs::copy(file_path, &dest_path).await {
                 let _ =
-                    ModelRepository::delete_by_key::<sea_orm::DatabaseConnection>(&model_key, None)
-                        .await;
+                    ModelRepository::delete_by_key::<sea_orm::DatabaseConnection>(&key, None).await;
                 return Err(AiEngineError::IoError(format!("copy model file: {e}")));
             }
 
             // 7. Cache + reverse index
             let info = ModelInfo::from(entity);
-            self.key_index.insert(info.model_key.clone(), info.id);
+            self.key_index.insert(info.key.clone(), info.id);
             self.cache.insert(info.id, Arc::new(info.clone()));
 
             info!(
                 model_id = info.id,
-                model_key = %info.model_key,
+                key = %info.key,
                 format = ?info.format,
                 "model installed"
             );
@@ -397,15 +384,15 @@ mod inner {
             let _ = tokio::fs::remove_file(&info.path).await;
 
             // 3. DB delete
-            ModelRepository::delete_by_key::<sea_orm::DatabaseConnection>(&info.model_key, None)
+            ModelRepository::delete_by_key::<sea_orm::DatabaseConnection>(&info.key, None)
                 .await
                 .map_err(|e| AiEngineError::IoError(format!("DB delete: {e}")))?;
 
             // 4. Evict cache + reverse index
-            self.key_index.remove(&info.model_key);
+            self.key_index.remove(&info.key);
             self.cache.remove(&model_id);
 
-            info!(model_id, model_key = %info.model_key, "model uninstalled");
+            info!(model_id, key = %info.key, "model uninstalled");
             Ok(())
         }
 
@@ -423,10 +410,10 @@ mod inner {
             .map_err(|e| AiEngineError::IoError(format!("DB update: {e}")))?;
 
             let info = ModelInfo::from(entity);
-            if existing.model_key != info.model_key {
-                self.key_index.remove(&existing.model_key);
+            if existing.key != info.key {
+                self.key_index.remove(&existing.key);
             }
-            self.key_index.insert(info.model_key.clone(), info.id);
+            self.key_index.insert(info.key.clone(), info.id);
             self.cache.insert(info.id, Arc::new(info.clone()));
             Ok(info)
         }
@@ -448,7 +435,7 @@ mod inner {
             }
 
             backend.load(model_id, Path::new(&info.path)).await?;
-            info!(model_id, model_key = %info.model_key, "model loaded into backend");
+            info!(model_id, key = %info.key, "model loaded into backend");
             Ok(())
         }
 
@@ -459,7 +446,7 @@ mod inner {
 
             if let Some(backend) = self.backend_for(info.format) {
                 backend.unload(model_id);
-                info!(model_id, model_key = %info.model_key, "model unloaded from backend");
+                info!(model_id, key = %info.key, "model unloaded from backend");
             }
             Ok(())
         }

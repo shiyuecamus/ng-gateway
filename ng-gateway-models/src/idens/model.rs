@@ -132,7 +132,7 @@ fn create_model_table(_: DatabaseBackend) -> TableCreateStatement {
 fn create_model_indexes(_: DatabaseBackend) -> Option<Vec<IndexCreateStatement>> {
     Some(vec![
         Index::create()
-            .name("uk_ai_model_key")
+            .name("uk_model_key")
             .table(Model::Table)
             .col(Model::Key)
             .unique()

@@ -90,30 +90,80 @@ gst-inspect-1.0 vaapijpegenc  # 硬件 JPEG 编码
 ### 1.2 RK3588 开发板
 
 **硬件**：Orange Pi 5 Plus / Rock 5B / Firefly RK3588 等  
-**系统**：Ubuntu 22.04 for Rockchip BSP (推荐 Armbian 或官方 BSP)
+**系统**：Ubuntu 22.04 / Orange Pi OS / Rockchip BSP  
+
+> 说明：RK3588 需要同时具备 **内核驱动** 和 **用户态多媒体组件**。  
+> 像 `Orange Pi 1.2.0 Jammy` 这类系统通常已经带有 `rga` / `mpp_service` 设备节点，
+> 但默认 `ubuntu-ports` 软件源里**没有** `gstreamer1.0-rockchip1`、`librga2`、`librga-dev`，
+> 需要额外添加 Rockchip 多媒体仓库。
 
 ```bash
-# Rockchip BSP GStreamer 插件
+# 先确认内核侧驱动是否存在
+ls -l /dev/rga /dev/mpp_service
+
+# 先确认当前软件源里是否已提供 Rockchip 用户态包
+apt-cache policy gstreamer1.0-rockchip1 librga2 librga-dev
+
+# 如果上面的包显示 "Unable to locate package"，
+# 先添加 Rockchip multimedia 仓库（Jammy 可用）
+sudo add-apt-repository -y ppa:jjriek/rockchip-multimedia
+sudo apt update
+
+# 安装 GStreamer 基础组件 + Rockchip 用户态组件
+# 注意：该 PPA 中的包名是 gstreamer1.0-rockchip1
 sudo apt install -y \
-  gstreamer1.0-rockchip gstreamer1.0-plugins-base \
+  gstreamer1.0-rockchip1 gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-libav librga2 librga-dev
 
-# RKNN Runtime (SDK v2.3.2)
-# 从 https://github.com/airockchip/rknn-toolkit2/releases 下载
-# 将 librknnrt.so 复制到 /usr/lib/aarch64-linux-gnu/
-sudo cp librknnrt.so /usr/lib/aarch64-linux-gnu/
+# RKNN Runtime
+# 一些 Orange Pi / BSP 镜像会自带旧版 librknnrt.so（例如 1.4.0）
+# 如果你的 .rknn 模型由较新的 rknn-toolkit2（如 v2.3.2）导出，
+# 建议同步升级 runtime，避免出现 "Invalid RKNN model version"。
+strings /usr/lib/librknnrt.so 2>/dev/null | grep -i "librknnrt version" || true
+
+# 从 rknn-toolkit2 对应版本获取 runtime
+# 仓库路径：
+# https://github.com/airockchip/rknn-toolkit2/tree/v2.3.2/rknpu2/runtime/Linux/librknn_api/aarch64
+# 建议先备份旧库，再安装到 /usr/local/lib（该目录默认在 ldconfig 搜索路径内）
+# 实测：Orange Pi 1.2.0 Jammy 预装的 librknnrt.so 常见为 1.4.0，
+# 升级后 ldconfig 会优先解析 /usr/local/lib/librknnrt.so
+sudo mkdir -p /usr/local/lib
+sudo cp /usr/lib/librknnrt.so /usr/lib/librknnrt.so.bak 2>/dev/null || true
+sudo install -m 0755 librknnrt.so /usr/local/lib/librknnrt.so
 sudo ldconfig
 
-# 验证 Rockchip GStreamer 插件
-gst-inspect-1.0 mppvideodec   # MPP 硬件解码
-gst-inspect-1.0 rkrgafilter    # RGA 色彩转换/缩放
+# 验证 Rockchip GStreamer 插件（核心能力）
+gst-inspect-1.0 mppvideodec    # MPP 硬件解码
 gst-inspect-1.0 mpph264enc     # MPP H.264 编码
 gst-inspect-1.0 mppjpegenc     # MPP JPEG 硬件编码
 
+# 验证 Rockchip RGA 路径
+# 当前 Gateway 统一走 `mppvideodec` 内置 RGA，而不是独立的 `rgaconvert` / `rkrgafilter` 插件。
+# 只要 `mppvideodec` 可以正常实例化，并且系统具备 `/dev/rga` + `librga2`，
+# Gateway 就会将 Rockchip 视为具备硬件 CSC/resize 能力。
+gst-inspect-1.0 mppvideodec
+ls -l /dev/rga
+ldconfig -p | grep librga
+
 # 验证 RKNN
-ls -la /usr/lib/aarch64-linux-gnu/librknnrt.so
+ldconfig -p | grep librknnrt
+strings /usr/local/lib/librknnrt.so 2>/dev/null | grep -i "librknnrt version" || \
+  strings /usr/lib/librknnrt.so 2>/dev/null | grep -i "librknnrt version"
+dmesg | grep -i rknpu | tail -n 5
 ```
+
+如果 `gst-inspect-1.0 mppvideodec` / `mpph264enc` / `mppjpegenc` 提示 `No such element or plugin`，通常说明：
+
+- 当前镜像没有接入 Rockchip 多媒体用户态仓库
+- 或者所用镜像并未提供与当前内核匹配的 Rockchip GStreamer 插件
+- 此时优先选择带完整多媒体支持的 BSP / 社区镜像，或者手动编译 `gstreamer1.0-rockchip1` 与 `librga`
+
+如果 `mppvideodec` / `mpph264enc` / `mppjpegenc` 正常，但你担心 RGA 是否可用：
+
+- 先确认 `/dev/rga` 存在，并且 `ldconfig -p | grep librga` 能看到 `librga.so`
+- 对当前 Gateway 实现来说，不需要额外安装 `rgaconvert` / `rkrgafilter`
+- 只要 `mppvideodec` 可用，Rockchip 路径就会启用内置 RGA 做硬件 CSC/resize
 
 ### 1.3 NVIDIA Jetson
 
@@ -984,7 +1034,10 @@ grep -E "platform|hw_decode|hw_csc|dma_buf|hw_encoder|hw_jpeg" gateway.log
 # 期望:
 #   platform: Rockchip
 #   hw_decode: true
-#   hw_csc: true (rkrgafilter)
+#   hw_csc: true
+#   hw_resize: true
+#   说明：当前实现中，Rockchip 的 hw_csc/hw_resize 来自 mppvideodec 内置 RGA，
+#         不再依赖独立的 rkrgafilter / rgaconvert 插件
 #   dma_buf: true
 #   hw_encoder: Some("mpph264enc")
 #   hw_jpeg_encoder: Some("mppjpegenc")
@@ -992,6 +1045,81 @@ grep -E "platform|hw_decode|hw_csc|dma_buf|hw_encoder|hw_jpeg" gateway.log
 # 验证 DMA-buf 零拷贝
 grep "DMA-buf" gateway.log
 # 期望: 不应看到 "DMA-buf extraction failed"
+```
+
+### 13.1.1 验证 `decodebin3 -> mppvideodec -> 内置 RGA`
+
+```bash
+# 1) 先验证 decodebin3 在 Rockchip 上会选中 mppvideodec
+# 这里用本地合成 H.264 码流，避免依赖外部 RTSP 源
+gst-launch-1.0 -v \
+  videotestsrc num-buffers=10 ! video/x-raw,format=NV12,width=640,height=480 \
+  ! mpph264enc ! h264parse ! decodebin3 ! fakesink 2>&1 | grep -E "GstMppVideoDec|mppvideodec"
+
+# 期望输出中出现类似：
+#   GstDecodebin3:decodebin3-0/GstMppVideoDec:mppvideodec0
+
+# 2) 再直接验证 mppvideodec 的内置 RGA 能完成 RGB 输出 + resize
+gst-launch-1.0 -v \
+  videotestsrc num-buffers=10 ! video/x-raw,format=NV12,width=640,height=480 \
+  ! mpph264enc ! h264parse \
+  ! mppvideodec format=RGB width=320 height=320 \
+  ! identity silent=false ! fakesink 2>&1 | grep -E "GstMppVideoDec|identity0|caps = video/x-raw"
+
+# 期望输出中出现类似：
+#   GstMppVideoDec:mppvideodec0.GstPad:src: caps = video/x-raw, format=(string)RGB, width=(int)320, height=(int)320
+
+# 3) 最后验证 Gateway 运行时，decodebin3 内部创建的 mppvideodec
+#    已被我们的 deep-element-added 回调配置为 RGA CSC/resize 路径
+grep -E "configuring mppvideodec built-in RGA|mppvideodec RGA resize configured" gateway.log
+
+# 期望：
+#   configuring mppvideodec built-in RGA for hardware CSC + resize
+#   mppvideodec RGA resize configured
+#
+# 如果你的 channel / model 没配置 target_resolution，则第二条 resize 日志可能不存在，属正常。
+```
+
+### 13.1.2 验证 RTSP 实流走到 Rockchip 硬件链路
+
+```bash
+# 建议直接复用第 3 节准备好的 RTSP_URL
+# 例如：
+# RTSP_URL="rtsp://localhost:8554/test-cam"
+
+# 1) 如果测试流是 H.264，先在 GStreamer 层验证 RTSP -> depay -> parse -> decodebin3
+#    最终是否落到 mppvideodec
+gst-launch-1.0 -v \
+  rtspsrc location="$RTSP_URL" latency=100 protocols=tcp \
+  ! rtph264depay ! h264parse ! decodebin3 ! fakesink 2>&1 \
+  | grep -E "GstMppVideoDec|mppvideodec|caps = video/x-raw"
+
+# 期望输出中出现类似：
+#   GstDecodebin3:decodebin3-0/GstMppVideoDec:mppvideodec0
+#
+# 如果你的 RTSP 实流是 H.265 / H.265+，把上面的 depay/parser 改成：
+#   ! rtph265depay ! h265parse !
+
+# 2) 启动 Gateway 后，直接从日志确认 RTSP 场景下已经进入 Rockchip 硬件路径
+grep -E "RTSP stream codec detected|decodebin3 produced video pad|configuring mppvideodec built-in RGA|mppvideodec RGA resize configured" gateway.log
+
+# 期望日志中至少出现：
+#   RTSP stream codec detected
+#   decodebin3 produced video pad, building postprocess chain
+#   configuring mppvideodec built-in RGA for hardware CSC + resize
+#
+# 如果 pipeline/channel 配置了目标分辨率，还应看到：
+#   mppvideodec RGA resize configured
+
+# 3) 结合平台能力日志，确认 RTSP 运行时仍保持硬件链路
+grep -E "platform|hw_decode|hw_csc|hw_resize|dma_buf" gateway.log
+
+# 期望：
+#   platform: Rockchip
+#   hw_decode: true
+#   hw_csc: true
+#   hw_resize: true
+#   dma_buf: true
 ```
 
 ### 13.2 RKNN NPU 推理

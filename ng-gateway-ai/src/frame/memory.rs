@@ -8,6 +8,9 @@
 
 use ng_gateway_error::ai::AiEngineError;
 
+#[cfg(feature = "dmabuf")]
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+
 /// Pixel format of a decoded frame.
 ///
 /// Distinct from the encoded [`FrameFormat`](ng_gateway_models::enums::ai::FrameFormat)
@@ -115,10 +118,16 @@ pub enum FrameMemory {
     /// **CPU access**: Possible via `mmap(fd)`, but strongly discouraged on
     /// the hot path due to cache coherence overhead. Use only for fallback
     /// paths (annotation, snapshot capture).
+    /// Linux DMA-buf exported memory.
+    ///
+    /// Uses `OwnedFd` for RAII-safe file descriptor management — the fd
+    /// is automatically closed on drop, preventing double-close and leak
+    /// bugs that plagued the previous `RawFd` + manual `libc::close()`
+    /// approach.
     #[cfg(feature = "dmabuf")]
     DmaBuf {
-        /// DMA-buf file descriptor (owned; closed on drop).
-        fd: std::os::unix::io::RawFd,
+        /// DMA-buf file descriptor (owned; automatically closed on drop).
+        fd: OwnedFd,
         /// Total buffer size in bytes.
         size: usize,
         /// Byte offset within the DMA-buf (typically 0).
@@ -210,16 +219,18 @@ impl FrameMemory {
         }
     }
 
-    /// Extract DMA-buf file descriptor, size, and byte offset if this is a
-    /// `DmaBuf` variant. Used by consumers that support zero-copy DMA import
-    /// (e.g. RKNN `create_mem_from_fd`, VA-API).
+    /// Borrow the DMA-buf file descriptor, size, and byte offset.
+    ///
+    /// Returns a `BorrowedFd` that cannot outlive this `FrameMemory`,
+    /// ensuring the fd is not used after close. Consumers needing the
+    /// raw integer (e.g. `rknn_create_mem_from_fd`) can call `.as_raw_fd()`.
     #[cfg(feature = "dmabuf")]
     #[inline]
-    pub fn dma_fd_info(&self) -> Option<(std::os::unix::io::RawFd, usize, u64)> {
+    pub fn dma_fd_info(&self) -> Option<(BorrowedFd<'_>, usize, u64)> {
         match self {
             Self::DmaBuf {
                 fd, size, offset, ..
-            } => Some((*fd, *size, *offset)),
+            } => Some((fd.as_fd(), *size, *offset)),
             _ => None,
         }
     }
@@ -300,20 +311,21 @@ impl FrameMemory {
             Self::DmaBuf {
                 fd, size, offset, ..
             } => {
-                // SAFETY: fd is valid (owned by this FrameMemory) and we
-                // only read `size` bytes starting at `offset`.
+                let raw_fd = fd.as_raw_fd();
+                // SAFETY: fd is valid (owned by this FrameMemory, kept alive
+                // by the borrow) and we only read `size` bytes at `offset`.
                 let mapped = unsafe {
                     let ptr = libc::mmap(
                         std::ptr::null_mut(),
                         *size,
                         libc::PROT_READ,
                         libc::MAP_SHARED,
-                        *fd,
+                        raw_fd,
                         *offset as libc::off_t,
                     );
                     if ptr == libc::MAP_FAILED {
                         return Err(AiEngineError::FrameError(format!(
-                            "mmap DMA-buf fd={fd} failed: {}",
+                            "mmap DMA-buf fd={raw_fd} failed: {}",
                             std::io::Error::last_os_error()
                         )));
                     }
@@ -350,13 +362,12 @@ impl FrameMemory {
                 drm_modifier,
                 device,
             } => {
-                let new_fd = unsafe { libc::dup(*fd) };
-                if new_fd < 0 {
-                    return Err(AiEngineError::FrameError(format!(
-                        "dup(DMA-buf fd={fd}) failed: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
+                let new_fd = fd.try_clone().map_err(|e| {
+                    AiEngineError::FrameError(format!(
+                        "dup(DMA-buf fd={}) failed: {e}",
+                        fd.as_raw_fd()
+                    ))
+                })?;
                 Ok(Self::DmaBuf {
                     fd: new_fd,
                     size: *size,
@@ -409,7 +420,7 @@ impl std::fmt::Debug for FrameMemory {
                 fd, size, device, ..
             } => f
                 .debug_struct("FrameMemory::DmaBuf")
-                .field("fd", fd)
+                .field("fd", &fd.as_raw_fd())
                 .field("size", size)
                 .field("device", device)
                 .finish(),
@@ -443,22 +454,16 @@ impl std::fmt::Debug for FrameMemory {
 impl Drop for FrameMemory {
     fn drop(&mut self) {
         match self {
+            // DmaBuf: OwnedFd automatically closes the fd on drop — no
+            // manual libc::close() needed. This eliminates the double-close
+            // risk that existed with the previous RawFd approach.
             #[cfg(feature = "dmabuf")]
-            Self::DmaBuf { fd, .. } => {
-                // SAFETY: fd is owned by this instance and has not been closed.
-                unsafe {
-                    libc::close(*fd);
-                }
-            }
+            Self::DmaBuf { .. } => {}
             #[cfg(feature = "cuda")]
             Self::CudaPinned { host_ptr, .. } => {
                 if !host_ptr.is_null() {
-                    // SAFETY: host_ptr was allocated by cudaMallocHost and has
-                    // not been freed. We own it exclusively.
-                    //
                     // NOTE: actual cudaFreeHost call is deferred to the CUDA
-                    // runtime wrapper — this placeholder logs a warning if the
-                    // pointer leaks. The caller must use the CUDA allocator's
+                    // runtime wrapper. The caller must use the CUDA allocator's
                     // drop path to free pinned memory properly.
                     tracing::trace!(
                         ptr = ?*host_ptr,

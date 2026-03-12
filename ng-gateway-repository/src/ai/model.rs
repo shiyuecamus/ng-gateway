@@ -11,27 +11,33 @@ use sea_orm::{
 pub struct ModelRepository;
 
 impl ModelRepository {
-    /// Find a model row by unique `model_key`.
-    pub async fn find_by_key(model_key: &str) -> StorageResult<Option<ModelModel>> {
+    /// Find a model row by unique `key`.
+    pub async fn find_by_key(key: &str) -> StorageResult<Option<ModelModel>> {
         let db = get_db_connection().await?;
         Ok(Model::find()
-            .filter(ModelColumn::ModelKey.eq(model_key))
+            .filter(ModelColumn::Key.eq(key))
             .one(&db)
             .await?)
     }
 
     /// List all model rows ordered by identifier.
-    pub async fn list_all() -> StorageResult<Vec<ModelModel>> {
-        let db = get_db_connection().await?;
-        Ok(Model::find().order_by_asc(ModelColumn::Id).all(&db).await?)
-    }
-
-    /// List all model rows with an externally provided connection.
-    ///
-    /// Used during engine initialization when `NGAppContext` is not yet
-    /// available (the gateway passes its own DB connection).
-    pub async fn list_all_with<C: ConnectionTrait>(db: &C) -> StorageResult<Vec<ModelModel>> {
-        Ok(Model::find().order_by_asc(ModelColumn::Id).all(db).await?)
+    pub async fn list_all<C>(db: Option<&C>) -> StorageResult<Vec<ModelModel>>
+    where
+        C: ConnectionTrait,
+    {
+        match db {
+            Some(conn) => Ok(Model::find()
+                .order_by_asc(ModelColumn::Id)
+                .all(conn)
+                .await?),
+            None => {
+                let conn = get_db_connection().await?;
+                Ok(Model::find()
+                    .order_by_asc(ModelColumn::Id)
+                    .all(&conn)
+                    .await?)
+            }
+        }
     }
 
     /// Paginate model rows with optional filters.
@@ -102,22 +108,22 @@ impl ModelRepository {
         }
     }
 
-    /// Delete one model row by `model_key`.
-    pub async fn delete_by_key<C>(model_key: &str, db: Option<&C>) -> StorageResult<()>
+    /// Delete one model row by `key`.
+    pub async fn delete_by_key<C>(key: &str, db: Option<&C>) -> StorageResult<()>
     where
         C: ConnectionTrait,
     {
         match db {
             Some(conn) => {
                 Model::delete_many()
-                    .filter(ModelColumn::ModelKey.eq(model_key))
+                    .filter(ModelColumn::Key.eq(key))
                     .exec(conn)
                     .await?;
             }
             None => {
                 let conn = get_db_connection().await?;
                 Model::delete_many()
-                    .filter(ModelColumn::ModelKey.eq(model_key))
+                    .filter(ModelColumn::Key.eq(key))
                     .exec(&conn)
                     .await?;
             }

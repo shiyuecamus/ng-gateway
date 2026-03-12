@@ -200,7 +200,7 @@ impl PlatformCapabilities {
     pub fn probe(platform: HardwarePlatform) -> Self {
         match platform {
             HardwarePlatform::Rockchip => {
-                let has_rga = can_instantiate("rkrgafilter");
+                let has_rga = can_instantiate("mppvideodec");
                 Self {
                     platform,
                     supports_dma_buf: true,

@@ -219,10 +219,12 @@ impl AiEngine {
             )
             .await?,
         );
-        let algorithm_registry = Arc::new(AlgorithmRegistry::new(Arc::clone(&wasm_host)).await?);
+        let algorithm_registry =
+            Arc::new(AlgorithmRegistry::new(Arc::clone(&wasm_host), db_conn).await?);
 
         // Initialize pipeline registry
-        let pipeline_registry = Arc::new(PipelineRegistry::new(Arc::clone(&model_registry)).await?);
+        let pipeline_registry =
+            Arc::new(PipelineRegistry::new(Arc::clone(&model_registry), db_conn).await?);
 
         // Annotation worker
         let inference_semaphore = Arc::new(Semaphore::new(config.max_concurrent_inferences));
@@ -611,7 +613,6 @@ impl AiInferenceRuntime for AiEngine {
                                 stage_data.model.0
                             )),
                         )?;
-                        let model_key = compiled_model.info.model_key.as_str();
 
                         // Preprocess (Engine-side, before backend dispatch)
                         let preprocess_input = PreprocessInput {
@@ -628,7 +629,7 @@ impl AiInferenceRuntime for AiEngine {
                         // Inference (backend only does inference, no preprocessing)
                         let (raw_output, infer_timing) = self
                             .model_registry
-                            .infer_by_key(model_key, preprocess_output)
+                            .infer_by_key(compiled_model.info.key.as_str(), preprocess_output)
                             .await?;
 
                         let postprocess_start = Instant::now();
@@ -759,7 +760,7 @@ impl AiInferenceRuntime for AiEngine {
         for stage in binding.compiled.stages.iter() {
             if let CompiledStage::Inference(compiled_stage) = stage {
                 if let Some(model) = binding.compiled.model(compiled_stage.model) {
-                    ai.record_inference(latency, model.info.model_key.as_str());
+                    ai.record_inference(latency, model.info.key.as_str());
                 }
             }
         }
@@ -1175,7 +1176,6 @@ impl ChannelFrameProcessor for EngineFrameProcessor {
                                 stage_data.model.0
                             )),
                         )?;
-                        let model_key = compiled_model.info.model_key.as_str();
 
                         // Preprocess (Engine-side, before backend dispatch)
                         let preprocess_input = PreprocessInput {
@@ -1192,7 +1192,7 @@ impl ChannelFrameProcessor for EngineFrameProcessor {
                         // Inference (backend only does inference, no preprocessing)
                         let (raw_output, infer_timing) = self
                             .model_registry
-                            .infer_by_key(model_key, preprocess_output)
+                            .infer_by_key(compiled_model.info.key.as_str(), preprocess_output)
                             .await?;
 
                         let postprocess_start = Instant::now();
@@ -1360,7 +1360,7 @@ impl ChannelFrameProcessor for EngineFrameProcessor {
         for stage in binding.compiled.stages.iter() {
             if let CompiledStage::Inference(compiled_stage) = stage {
                 if let Some(model) = binding.compiled.model(compiled_stage.model) {
-                    ai.record_inference(latency, model.info.model_key.as_str());
+                    ai.record_inference(latency, model.info.key.as_str());
                 }
             }
         }

@@ -150,7 +150,7 @@ version = "2.0"
 
 # System Information
 [workspace.dependencies.sysinfo]
-version = "0.37"
+version = "0.38"
 
 [workspace.dependencies.libc]
 version = "0.2"
@@ -233,7 +233,7 @@ version = "1.1"
 
 # WebSockets over Actix (for HTTP upgrade handling in ng-gateway-web)
 [workspace.dependencies.actix-ws]
-version = "0.3"
+version = "0.4"
 
 # WebSockets over Tokio
 [workspace.dependencies.tokio-tungstenite]
@@ -364,7 +364,7 @@ version = "0.5"
 
 # hashing
 [workspace.dependencies.bcrypt]
-version = "0.18"
+version = "0.19"
 [workspace.dependencies.md-5]
 version = "0.10"
 [workspace.dependencies.hex]
@@ -398,7 +398,7 @@ version = "0.17"
 version = "5.4"
 [workspace.dependencies.async-opcua]
 features = ["client"]
-version = "0.17"
+version = "0.18"
 
 # Atomic Arc swapping for lock-free hot-path reads of session handles
 [workspace.dependencies.arc-swap]

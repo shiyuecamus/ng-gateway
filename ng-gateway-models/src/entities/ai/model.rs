@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub model_key: String,
+    pub key: String,
     pub name: String,
     pub version: String,
     pub task: ModelTask,

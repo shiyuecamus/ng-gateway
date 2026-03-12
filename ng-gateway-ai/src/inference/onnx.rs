@@ -235,7 +235,7 @@ impl OnnxBackend {
                 .with_intra_threads(intra_threads)
                 .map_err(|e| AiEngineError::ModelLoadError(e.to_string()))?;
 
-            let (builder, effective_ep) = apply_execution_provider(builder, &ep_name)?;
+            let (mut builder, effective_ep) = apply_execution_provider(builder, &ep_name)?;
 
             let session = builder
                 .commit_from_file(&path)

@@ -29,7 +29,7 @@ pub struct ModelInfo {
     /// Unique model identifier (derived from filename by default).
     pub id: i32,
     /// Model key.
-    pub model_key: String,
+    pub key: String,
     /// Human-readable name.
     pub name: String,
     /// Model version string.
@@ -65,7 +65,7 @@ impl From<ModelModel> for ModelInfo {
     fn from(model: ModelModel) -> Self {
         Self {
             id: model.id,
-            model_key: model.model_key,
+            key: model.key,
             name: model.name,
             version: model.version,
             task: model.task,
@@ -125,7 +125,7 @@ impl ModelInfo {
 #[derive(Clone, Debug, PartialEq, DeriveIntoActiveModel, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct NewModel {
-    pub model_key: String,
+    pub key: String,
     pub name: String,
     #[serde(default = "NewModel::default_version")]
     pub version: String,
@@ -160,7 +160,7 @@ impl SeedableTrait for NewModel {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateModel {
     pub id: i32,
-    pub model_key: String,
+    pub key: String,
     pub name: String,
     pub version: String,
     pub task: ModelTask,

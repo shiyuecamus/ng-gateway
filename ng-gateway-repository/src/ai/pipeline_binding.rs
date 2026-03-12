@@ -24,13 +24,25 @@ impl PipelineBindingRepository {
     }
 
     /// List all enabled bindings.
-    pub async fn list_enabled() -> StorageResult<Vec<PipelineBindingModel>> {
-        let db = get_db_connection().await?;
-        Ok(PipelineBinding::find()
-            .filter(PipelineBindingColumn::Status.eq(Status::Enabled))
-            .order_by_asc(PipelineBindingColumn::ChannelId)
-            .all(&db)
-            .await?)
+    pub async fn list_enabled<C>(db: Option<&C>) -> StorageResult<Vec<PipelineBindingModel>>
+    where
+        C: ConnectionTrait,
+    {
+        match db {
+            Some(conn) => Ok(PipelineBinding::find()
+                .filter(PipelineBindingColumn::Status.eq(Status::Enabled))
+                .order_by_asc(PipelineBindingColumn::ChannelId)
+                .all(conn)
+                .await?),
+            None => {
+                let conn = get_db_connection().await?;
+                Ok(PipelineBinding::find()
+                    .filter(PipelineBindingColumn::Status.eq(Status::Enabled))
+                    .order_by_asc(PipelineBindingColumn::ChannelId)
+                    .all(&conn)
+                    .await?)
+            }
+        }
     }
 
     /// Insert one binding row.

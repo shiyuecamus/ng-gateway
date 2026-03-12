@@ -13,7 +13,7 @@ use crate::{
     frame::{
         memory::{FrameMemory, PixelFormat},
         platform::{detect_hardware_platform, PlatformCapabilities},
-        source::{FrameSource, GstFrameSource, GstFrameSourceConfig, RtspTransport},
+        source::{FrameSource, GstFrameSource, GstFrameSourceConfig, RtspTransport, SourceEvent},
     },
     pipeline::sampler::FrameSampler,
     DecodedFrame,
@@ -176,9 +176,9 @@ impl ChannelRuntime {
                         tracing::info!(channel_id, "channel frame loop cancelled");
                         break;
                     }
-                    frame_result = source.next_frame() => {
-                        match frame_result {
-                            Ok(Some(decoded)) => {
+                    source_event = source.next_event() => {
+                        match source_event {
+                            Ok(SourceEvent::Frame(decoded)) => {
                                 restart_attempts = 0;
                                 frame_seq = frame_seq.wrapping_add(1);
 
@@ -275,19 +275,27 @@ impl ChannelRuntime {
                                     }
                                 }
                             }
-                            Ok(None) => {
-                                // EOS: attempt auto-restart with exponential backoff.
+                            Ok(event @ (SourceEvent::EndOfStream | SourceEvent::Stalled)) => {
+                                let restart_reason = match event {
+                                    SourceEvent::EndOfStream => "end-of-stream",
+                                    SourceEvent::Stalled => "watchdog stall",
+                                    SourceEvent::Frame(_) => unreachable!("frame handled above"),
+                                };
+
+                                // Attempt auto-restart with exponential backoff when
+                                // the source ends cleanly or the watchdog detects a stall.
                                 restart_attempts += 1;
                                 if restart_attempts > MAX_RESTART_ATTEMPTS {
                                     tracing::error!(
                                         channel_id,
                                         attempts = MAX_RESTART_ATTEMPTS,
+                                        restart_reason,
                                         "pipeline restart limit reached, giving up"
                                     );
                                     if let Some(ref tx) = error_tx {
                                         let _ = tx
                                             .send(format!(
-                                                "pipeline restart limit reached ({MAX_RESTART_ATTEMPTS})"
+                                                "pipeline restart limit reached ({MAX_RESTART_ATTEMPTS}), reason={restart_reason}"
                                             ))
                                             .await;
                                     }
@@ -299,9 +307,10 @@ impl ChannelRuntime {
                                 );
                                 tracing::warn!(
                                     channel_id,
+                                    restart_reason,
                                     attempt = restart_attempts,
                                     backoff_ms = backoff.as_millis() as u64,
-                                    "frame source ended (EOS), restarting pipeline"
+                                    "frame source emitted terminal event, restarting pipeline"
                                 );
 
                                 tokio::select! {

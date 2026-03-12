@@ -34,7 +34,7 @@ use ng_gateway_models::{
 use ng_gateway_repository::{
     AlarmRuleRepository, PipelineBindingRepository, PipelineRepository, PipelineStageRepository,
 };
-use sea_orm::IntoActiveModel;
+use sea_orm::{DatabaseConnection, IntoActiveModel};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -69,7 +69,15 @@ impl PipelineRegistry {
     ///
     /// Hydrates all pipeline definitions and restores active bindings
     /// using batch-loaded relation queries (3 queries total, no N+1).
-    pub async fn new(model_registry: Arc<ModelRegistry>) -> Result<Self, AiEngineError> {
+    ///
+    /// `db_conn` provides an externally-owned database connection for use
+    /// during gateway startup before `NGAppContext` is initialized. When
+    /// `None`, the repository falls back to `NGAppContext` (which must
+    /// already be set).
+    pub async fn new(
+        model_registry: Arc<ModelRegistry>,
+        db_conn: Option<&DatabaseConnection>,
+    ) -> Result<Self, AiEngineError> {
         let registry = Self {
             definitions: DashMap::new(),
             bindings: DashMap::new(),
@@ -78,7 +86,7 @@ impl PipelineRegistry {
         };
 
         // Hydrate pipeline definitions with batch-loaded relations.
-        let all_pipelines = PipelineRepository::list_all_with_relations()
+        let all_pipelines = PipelineRepository::list_all_with_relations(db_conn)
             .await
             .map_err(|e| storage_err("load pipeline definitions", e))?;
 
@@ -88,7 +96,7 @@ impl PipelineRegistry {
         }
 
         // Restore active bindings.
-        let active_bindings = PipelineBindingRepository::list_enabled()
+        let active_bindings = PipelineBindingRepository::list_enabled(db_conn)
             .await
             .map_err(|e| storage_err("load active bindings", e))?;
 

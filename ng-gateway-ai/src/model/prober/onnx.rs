@@ -12,7 +12,10 @@ use ng_gateway_models::{
     entities::ai::model::TensorDesc,
     enums::ai::{ModelFormat, TensorDType},
 };
-use ort::{session::Session, tensor::TensorElementType, value::ValueType};
+use ort::{
+    session::Session,
+    value::{TensorElementType, ValueType},
+};
 use prost::Message;
 use std::{collections::HashMap, path::Path};
 use tracing::{debug, warn};

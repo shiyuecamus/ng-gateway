@@ -185,7 +185,7 @@ mod engine_utils {
     ) -> ng_gateway_models::domain::prelude::ModelInfo {
         ng_gateway_models::domain::prelude::ModelInfo {
             id: 0,
-            model_key: "test_model".to_string(),
+            key: "test_model".to_string(),
             name: "Test Model".to_string(),
             version: "1.0.0".to_string(),
             format,

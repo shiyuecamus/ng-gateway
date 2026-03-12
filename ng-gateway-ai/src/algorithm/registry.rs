@@ -22,7 +22,7 @@ use ng_gateway_models::{
     AiAlgorithmRegistry,
 };
 use ng_gateway_repository::AlgorithmRepository;
-use sea_orm::IntoActiveModel;
+use sea_orm::{DatabaseConnection, IntoActiveModel};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -39,13 +39,21 @@ impl AlgorithmRegistry {
     ///
     /// The host may already contain algorithms discovered from the filesystem
     /// scan. This method reconciles the host state with DB records.
-    pub async fn new(host: Arc<WasmAlgorithmHost>) -> Result<Self, AiEngineError> {
+    ///
+    /// `db_conn` provides an externally-owned database connection for use
+    /// during gateway startup before `NGAppContext` is initialized. When
+    /// `None`, the repository falls back to `NGAppContext` (which must
+    /// already be set).
+    pub async fn new(
+        host: Arc<WasmAlgorithmHost>,
+        db_conn: Option<&DatabaseConnection>,
+    ) -> Result<Self, AiEngineError> {
         let registry = Self {
             host,
             cache: DashMap::new(),
         };
 
-        let db_algorithms = AlgorithmRepository::list_all()
+        let db_algorithms = AlgorithmRepository::list_all(db_conn)
             .await
             .map_err(|e| AiEngineError::IoError(e.to_string()))?;
 

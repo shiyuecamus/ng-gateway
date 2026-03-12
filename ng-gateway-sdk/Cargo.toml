@@ -75,8 +75,8 @@ sha2 = { version = "0.10" }
 hex = { version = "0.4" }
 
 # Excel read/write
-rust_xlsxwriter = { version = "0.93" }
-calamine = { version = "0.32" }
+rust_xlsxwriter = { version = "0.94" }
+calamine = { version = "0.34" }
 regex = { version = "1.11" }
 
 # Mqtt Client

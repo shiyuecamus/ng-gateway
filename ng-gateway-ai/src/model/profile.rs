@@ -113,7 +113,7 @@ mod inner {
         };
 
         ModelProfile {
-            model_id: model_info.model_key.clone(),
+            model_id: model_info.key.clone(),
             preprocessor: pre,
             postprocessor: post,
             annotator: Some(Arc::new(DefaultFrameAnnotator)),
@@ -472,7 +472,7 @@ mod inner {
 
             ModelInfo {
                 id: 0,
-                model_key: "det_model".to_string(),
+                key: "det_model".to_string(),
                 name: "det".to_string(),
                 version: "1.0.0".to_string(),
                 format: ModelFormat::Onnx,
@@ -566,7 +566,7 @@ mod inner {
 
             let model = ModelInfo {
                 id: 0,
-                model_key: "cls_model".to_string(),
+                key: "cls_model".to_string(),
                 name: "cls".to_string(),
                 version: "1.0.0".to_string(),
                 format: ModelFormat::Onnx,
@@ -601,7 +601,7 @@ mod inner {
 
             let model = ModelInfo {
                 id: 0,
-                model_key: "seg_model".to_string(),
+                key: "seg_model".to_string(),
                 name: "seg".to_string(),
                 version: "1.0.0".to_string(),
                 format: ModelFormat::Onnx,
@@ -636,7 +636,7 @@ mod inner {
 
             let model = ModelInfo {
                 id: 0,
-                model_key: "rknn_model".to_string(),
+                key: "rknn_model".to_string(),
                 name: "rknn".to_string(),
                 version: "1.0.0".to_string(),
                 format: ModelFormat::Rknn,

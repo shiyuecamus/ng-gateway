@@ -8,11 +8,11 @@
 //!
 //! ```text
 //!   channel_1 ──┐
-//!   channel_2 ──┤  submit(model_key, tensor)
+//!   channel_2 ──┤  submit(key, tensor)
 //!   channel_N ──┘          │
 //!                          ▼
 //!              ┌─── BatchRouter ────────────────┐
-//!              │  model_key → CollectorHandle    │
+//!              │  key → CollectorHandle    │
 //!              │                                 │
 //!              │  CollectorHandle (per model):    │
 //!              │    mpsc::Sender<BatchItem>       │
@@ -233,13 +233,13 @@ impl AdaptiveController {
 ///
 /// Thread-safe: all internal state is protected by `DashMap` / atomics.
 pub struct BatchRouter {
-    /// Per-model-key collector handles.
+    /// Per-key collector handles.
     collectors: DashMap<String, CollectorHandle>,
-    /// Per-model-key metrics.
+    /// Per-key metrics.
     metrics: Arc<DashMap<String, Arc<CollectorMetrics>>>,
     /// Shared batching configuration.
     config: BatchingConfig,
-    /// Guards concurrent collector spawns for the same model_key.
+    /// Guards concurrent collector spawns for the same key.
     spawn_guards: DashMap<String, Arc<Mutex<()>>>,
 }
 
@@ -260,7 +260,7 @@ impl BatchRouter {
     /// The caller awaits the batch result transparently.
     pub async fn submit(
         &self,
-        model_key: &str,
+        key: &str,
         model_id: i32,
         input: PreprocessOutput,
         backend: Arc<dyn ModelBackend>,
@@ -274,24 +274,24 @@ impl BatchRouter {
         })?;
 
         // Lazy collector spawn (double-check with guard).
-        if !self.collectors.contains_key(model_key) {
+        if !self.collectors.contains_key(key) {
             let guard = self
                 .spawn_guards
-                .entry(model_key.to_string())
+                .entry(key.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone();
             let _lock = guard.lock().await;
 
-            if !self.collectors.contains_key(model_key) {
-                self.spawn_collector(model_key, model_id, Arc::clone(&backend), model_path)
+            if !self.collectors.contains_key(key) {
+                self.spawn_collector(key, model_id, Arc::clone(&backend), model_path)
                     .await?;
             }
         }
 
-        let handle = self.collectors.get(model_key).ok_or_else(|| {
+        let handle = self.collectors.get(key).ok_or_else(|| {
             AiEngineError::InternalError(format!(
                 "batch collector for model '{}' disappeared after spawn",
-                model_key
+                key
             ))
         })?;
 
@@ -312,13 +312,13 @@ impl BatchRouter {
         if handle.tx.send(item).await.is_err() {
             handle.queue_depth.fetch_sub(1, Ordering::Relaxed);
             return Err(AiEngineError::InferenceError(format!(
-                "batch collector channel closed for model '{model_key}'"
+                "batch collector channel closed for model '{key}'"
             )));
         }
 
         response_rx.await.map_err(|_| {
             AiEngineError::InferenceError(format!(
-                "batch response channel dropped for model '{model_key}'"
+                "batch response channel dropped for model '{key}'"
             ))
         })?
     }
@@ -326,7 +326,7 @@ impl BatchRouter {
     /// Spawn the collector loop for a model.
     async fn spawn_collector(
         &self,
-        model_key: &str,
+        key: &str,
         model_id: i32,
         backend: Arc<dyn ModelBackend>,
         model_path: &std::path::Path,
@@ -338,10 +338,9 @@ impl BatchRouter {
         let (tx, rx) = mpsc::channel(self.config.max_queue_depth);
         let queue_depth = Arc::new(AtomicUsize::new(0));
         let metrics = Arc::new(CollectorMetrics::default());
-        let model_key_owned = model_key.to_string();
 
         info!(
-            model_key,
+            key,
             max_batch_size = self.config.max_batch_size,
             timeout_ms = self.config.collect_timeout_ms,
             adaptive = self.config.adaptive,
@@ -349,7 +348,7 @@ impl BatchRouter {
         );
 
         let task = spawn_collector_loop(
-            model_key_owned.clone(),
+            key.to_string(),
             model_id,
             backend,
             rx,
@@ -358,10 +357,9 @@ impl BatchRouter {
             Arc::clone(&metrics),
         );
 
-        self.metrics
-            .insert(model_key_owned.clone(), Arc::clone(&metrics));
+        self.metrics.insert(key.to_string(), Arc::clone(&metrics));
         self.collectors.insert(
-            model_key_owned,
+            key.to_string(),
             CollectorHandle {
                 tx,
                 queue_depth,
@@ -402,7 +400,7 @@ impl BatchRouter {
 
 /// Spawn the batch collector loop as a dedicated tokio task.
 fn spawn_collector_loop(
-    model_key: String,
+    key: String,
     model_id: i32,
     backend: Arc<dyn ModelBackend>,
     mut rx: mpsc::Receiver<BatchItem>,
@@ -432,7 +430,7 @@ fn spawn_collector_loop(
                         pending.push(item);
                     }
                     Ok(None) => {
-                        debug!(model_key = %model_key, "batch collector channel closed");
+                        debug!(key = %key, "batch collector channel closed");
                         return;
                     }
                     Err(_) => break,
@@ -446,7 +444,7 @@ fn spawn_collector_loop(
                         pending.push(item);
                     }
                     None => {
-                        debug!(model_key = %model_key, "batch collector channel closed");
+                        debug!(key = %key, "batch collector channel closed");
                         return;
                     }
                 }
@@ -476,7 +474,7 @@ fn spawn_collector_loop(
                 Ok(t) => t,
                 Err(e) => {
                     let err_msg = format!("batch tensor concat failed: {e}");
-                    warn!(model_key = %model_key, batch_size, "{}", err_msg);
+                    warn!(key = %key, batch_size, "{}", err_msg);
                     for item in batch {
                         let _ = item
                             .response_tx
@@ -518,7 +516,7 @@ fn spawn_collector_loop(
                             let _ = item.response_tx.send(Ok((batched_output, timing)));
                         } else {
                             warn!(
-                                model_key = %model_key,
+                                key = %key,
                                 batch_size,
                                 "batch unexpectedly empty during single-item scatter"
                             );

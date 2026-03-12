@@ -48,16 +48,28 @@ pub use codec::VideoCodec;
 pub use extractor::{create_extractor, BufferExtractor};
 pub use gst_source::{GstFrameSource, GstFrameSourceConfig, RtspTransport};
 
+/// Event emitted by a running frame source.
+#[derive(Debug)]
+pub enum SourceEvent {
+    /// A decoded frame is ready for downstream processing.
+    Frame(DecodedFrame),
+    /// The underlying stream reached end-of-stream or was stopped.
+    EndOfStream,
+    /// The source stopped producing frames without a clean EOS.
+    Stalled,
+}
+
 /// Asynchronous video frame source.
 ///
-/// Implementors produce [`DecodedFrame`]s from an underlying stream.
+/// Implementors produce [`SourceEvent`]s from an underlying stream.
 /// The lifecycle is: `new` → [`start`](Self::start) → repeated
-/// [`next_frame`](Self::next_frame) → [`stop`](Self::stop).
+/// [`next_event`](Self::next_event) → [`stop`](Self::stop).
 ///
 /// # Contract
 ///
-/// - `start()` must be called before `next_frame()`.
-/// - `next_frame()` returns `Ok(None)` on end-of-stream (EOS).
+/// - `start()` must be called before `next_event()`.
+/// - `next_event()` returns [`SourceEvent::EndOfStream`] when the stream ends
+///   cleanly or after [`stop`](Self::stop).
 /// - `stop()` is idempotent; calling it on an already-stopped source is a no-op.
 /// - Dropping a started source must release all resources (pipeline, fd, etc.).
 #[async_trait::async_trait]
@@ -65,10 +77,8 @@ pub trait FrameSource: Send + 'static {
     /// Start the underlying media pipeline.
     async fn start(&mut self) -> Result<(), AiEngineError>;
 
-    /// Pull the next decoded frame.
-    ///
-    /// Returns `Ok(None)` when the stream has ended (EOS) or after `stop()`.
-    async fn next_frame(&mut self) -> Result<Option<DecodedFrame>, AiEngineError>;
+    /// Pull the next source event.
+    async fn next_event(&mut self) -> Result<SourceEvent, AiEngineError>;
 
     /// Stop the pipeline and release all resources.
     ///

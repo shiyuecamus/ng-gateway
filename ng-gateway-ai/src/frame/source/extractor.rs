@@ -12,8 +12,6 @@
 //! | VAAPI | DMA-buf fd extraction | `FrameMemory::DmaBuf` |
 //! | Generic | GstBuffer map or copy | `FrameMemory::GstBufferRef` / `FrameMemory::Cpu` |
 
-use ng_gateway_error::ai::AiEngineError;
-
 use crate::{
     decoded::DecodedFrame,
     frame::{
@@ -21,6 +19,7 @@ use crate::{
         platform::PlatformCapabilities,
     },
 };
+use ng_gateway_error::ai::AiEngineError;
 
 /// Extracts a [`DecodedFrame`] from a GStreamer [`Sample`](gstreamer::Sample).
 ///
@@ -244,14 +243,18 @@ fn try_extract_dmabuf(
 
     let original_fd = dmabuf_ref.fd();
 
-    // `dup()` the fd so we own it independently of GStreamer's buffer pool.
-    let owned_fd = unsafe { libc::dup(original_fd) };
-    if owned_fd < 0 {
+    // `dup()` via OwnedFd for RAII-safe ownership independent of
+    // GStreamer's buffer pool. OwnedFd::from_raw_fd + dup avoids the
+    // double-close risk of bare RawFd.
+    let raw_dup = unsafe { libc::dup(original_fd) };
+    if raw_dup < 0 {
         return Err(AiEngineError::FrameError(format!(
             "dup() DMA-buf fd={original_fd} failed: {}",
             std::io::Error::last_os_error()
         )));
     }
+    // SAFETY: raw_dup is a valid fd just returned by dup().
+    let owned_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(raw_dup) };
 
     Ok(Some(DecodedFrame {
         memory: FrameMemory::DmaBuf {

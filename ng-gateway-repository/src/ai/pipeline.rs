@@ -188,12 +188,27 @@ impl PipelineRepository {
     /// Uses batch-load pattern (same as `page()`) instead of N+1 per-pipeline
     /// queries, returning `(pipeline, stages, rules)` tuples ready for
     /// `PipelineInfo::with_relations`.
-    pub async fn list_all_with_relations(
+    pub async fn list_all_with_relations<C>(
+        db: Option<&C>,
+    ) -> StorageResult<Vec<(PipelineModel, Vec<PipelineStageModel>, Vec<AlarmRuleModel>)>>
+    where
+        C: ConnectionTrait,
+    {
+        match db {
+            Some(conn) => Self::list_all_with_relations_inner(conn).await,
+            None => {
+                let conn = get_db_connection().await?;
+                Self::list_all_with_relations_inner(&conn).await
+            }
+        }
+    }
+
+    async fn list_all_with_relations_inner<C: ConnectionTrait>(
+        db: &C,
     ) -> StorageResult<Vec<(PipelineModel, Vec<PipelineStageModel>, Vec<AlarmRuleModel>)>> {
-        let db = get_db_connection().await?;
         let pipelines = Pipeline::find()
             .order_by_asc(PipelineColumn::Id)
-            .all(&db)
+            .all(db)
             .await?;
 
         if pipelines.is_empty() {
@@ -206,14 +221,14 @@ impl PipelineRepository {
             .filter(PipelineStageColumn::PipelineId.is_in(ids.iter().copied()))
             .order_by_asc(PipelineStageColumn::PipelineId)
             .order_by_asc(PipelineStageColumn::StageOrder)
-            .all(&db)
+            .all(db)
             .await?;
 
         let rule_rows = AlarmRule::find()
             .filter(AlarmRuleColumn::PipelineId.is_in(ids.iter().copied()))
             .order_by_asc(AlarmRuleColumn::PipelineId)
             .order_by_asc(AlarmRuleColumn::RuleOrder)
-            .all(&db)
+            .all(db)
             .await?;
 
         let mut stages_map: HashMap<i32, Vec<PipelineStageModel>> =

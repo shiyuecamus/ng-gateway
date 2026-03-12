@@ -40,6 +40,8 @@ mod inner {
         rknn::{NpuCores, RKNN},
         tensor::{DataTypeKind, QuantTypeKind, TensorFormatKind},
     };
+    #[cfg(feature = "dmabuf")]
+    use std::os::unix::io::AsRawFd;
     use std::{path::Path, sync::Arc, time::Instant};
     use tracing::{debug, info, warn};
 
@@ -264,8 +266,9 @@ mod inner {
         #[cfg(feature = "dmabuf")]
         if let PreprocessOutput::DeviceMemory { ref memory, .. } = input {
             if memory.is_dma_buf() {
-                if let Some((fd, size, offset)) = memory.dma_fd_info() {
-                    match run_rknn_dma_inference(model, fd, size, offset) {
+                if let Some((borrowed_fd, size, offset)) = memory.dma_fd_info() {
+                    let raw_fd = borrowed_fd.as_raw_fd();
+                    match run_rknn_dma_inference(model, raw_fd, size, offset) {
                         Ok(result) => return Ok(result),
                         Err(e) => {
                             warn!(

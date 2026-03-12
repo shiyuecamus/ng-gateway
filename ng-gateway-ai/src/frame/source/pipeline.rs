@@ -13,8 +13,6 @@
 //! The source element and decodebin3 have dynamic pads that are connected
 //! at runtime via `pad-added` signals.
 
-use std::str::FromStr;
-
 use gstreamer::prelude::*;
 use ng_gateway_error::ai::AiEngineError;
 
@@ -154,7 +152,7 @@ impl<'a> PipelineBuilder<'a> {
         caps: &PlatformCapabilities,
     ) -> Result<(), AiEngineError> {
         let rtspsrc = self.create_rtspsrc()?;
-        let decodebin = self.create_decodebin()?;
+        let decodebin = self.create_decodebin(caps)?;
 
         pipeline.add_many([&rtspsrc, &decodebin]).map_err(|e| {
             AiEngineError::FrameError(format!("failed to add RTSP elements to pipeline: {e}"))
@@ -359,7 +357,7 @@ impl<'a> PipelineBuilder<'a> {
             .build()
             .map_err(|e| AiEngineError::FrameError(format!("failed to create filesrc: {e}")))?;
 
-        let decodebin = self.create_decodebin()?;
+        let decodebin = self.create_decodebin(caps)?;
 
         pipeline
             .add_many([&source, &decodebin])
@@ -380,7 +378,15 @@ impl<'a> PipelineBuilder<'a> {
     ///
     /// `decodebin3` automatically detects the media type, selects the optimal
     /// decoder (hardware-preferred via element ranking), and outputs raw video.
-    fn create_decodebin(&self) -> Result<gstreamer::Element, AiEngineError> {
+    ///
+    /// On Rockchip platforms with RGA support, installs a `deep-element-added`
+    /// signal handler that configures `mppvideodec`'s built-in RGA engine for
+    /// hardware color-space conversion and resize, avoiding the need for
+    /// separate postprocess elements.
+    fn create_decodebin(
+        &self,
+        caps: &PlatformCapabilities,
+    ) -> Result<gstreamer::Element, AiEngineError> {
         let decodebin = gstreamer::ElementFactory::make("decodebin3")
             .name("decoder")
             .build()
@@ -391,6 +397,31 @@ impl<'a> PipelineBuilder<'a> {
             .any_features()
             .build();
         decodebin.set_property("caps", &video_caps);
+
+        // On Rockchip with RGA: configure mppvideodec's built-in RGA engine
+        // when decodebin3 instantiates it, so CSC (NV12→RGB) and resize are
+        // performed in the decoder's output path by the RGA 2D hardware.
+        if caps.platform == HardwarePlatform::Rockchip && caps.supports_hw_csc {
+            let target_resolution = self.config.target_resolution;
+            decodebin.connect("deep-element-added", false, move |args| {
+                let element = args[2].get::<gstreamer::Element>().ok()?;
+                let factory = element.factory()?;
+                if factory.name() != "mppvideodec" {
+                    return None;
+                }
+
+                tracing::info!("configuring mppvideodec built-in RGA for hardware CSC + resize");
+                element.set_property_from_str("format", "RGB");
+
+                if let Some((w, h)) = target_resolution {
+                    element.set_property("width", w);
+                    element.set_property("height", h);
+                    tracing::info!(width = w, height = h, "mppvideodec RGA resize configured");
+                }
+
+                None
+            });
+        }
 
         Ok(decodebin)
     }
@@ -515,31 +546,24 @@ fn build_postprocess_elements(
     elements.push(queue);
 
     // Platform-specific CSC and optional resize.
+    //
+    // Rockchip: When mppvideodec has built-in RGA support, CSC and resize
+    // are configured directly on the decoder via `deep-element-added`
+    // (see `connect_decodebin_to_postprocess`). The postprocess chain only
+    // needs a capsfilter to enforce the expected output format.
     match caps.platform {
         HardwarePlatform::Rockchip if caps.supports_hw_csc => {
-            let mut rga_builder = gstreamer::ElementFactory::make("rkrgafilter")
-                .name("rga_csc")
-                .property_from_str("output-format", "RGB");
+            let mut caps_builder = gstreamer::Caps::builder("video/x-raw").field("format", "RGB");
 
             if let Some((w, h)) = config.target_resolution {
-                rga_builder = rga_builder
-                    .property("output-width", w as i32)
-                    .property("output-height", h as i32);
+                caps_builder = caps_builder
+                    .field("width", w as i32)
+                    .field("height", h as i32);
             }
-
-            let rga = rga_builder.build().map_err(|e| {
-                AiEngineError::FrameError(format!("failed to create rkrgafilter: {e}"))
-            })?;
-            elements.push(rga);
-
-            let dmabuf_rgb_caps =
-                gstreamer::Caps::from_str("video/x-raw(memory:DMABuf),format=RGB").map_err(
-                    |e| AiEngineError::FrameError(format!("failed to parse DMA-buf RGB caps: {e}")),
-                )?;
 
             let capsfilter = gstreamer::ElementFactory::make("capsfilter")
                 .name("rga_caps")
-                .property("caps", dmabuf_rgb_caps)
+                .property("caps", caps_builder.build())
                 .build()
                 .map_err(|e| {
                     AiEngineError::FrameError(format!("failed to create RGA capsfilter: {e}"))

@@ -23,12 +23,23 @@ impl AlgorithmRepository {
     }
 
     /// List all algorithm rows ordered by identifier.
-    pub async fn list_all() -> StorageResult<Vec<AlgorithmModel>> {
-        let db = get_db_connection().await?;
-        Ok(Algorithm::find()
-            .order_by_asc(AlgorithmColumn::Id)
-            .all(&db)
-            .await?)
+    pub async fn list_all<C>(db: Option<&C>) -> StorageResult<Vec<AlgorithmModel>>
+    where
+        C: ConnectionTrait,
+    {
+        match db {
+            Some(conn) => Ok(Algorithm::find()
+                .order_by_asc(AlgorithmColumn::Id)
+                .all(conn)
+                .await?),
+            None => {
+                let conn = get_db_connection().await?;
+                Ok(Algorithm::find()
+                    .order_by_asc(AlgorithmColumn::Id)
+                    .all(&conn)
+                    .await?)
+            }
+        }
     }
 
     /// Paginate algorithm rows with optional filters.
