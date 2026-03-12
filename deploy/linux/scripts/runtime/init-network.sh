@@ -302,6 +302,11 @@ main() {
     log "STA+AP NOT supported — exclusive mode, AP uses primary interface: ${ap_iface}"
   fi
 
+  # Concurrent mode uses a virtual AP interface that must stay outside
+  # NetworkManager control, otherwise NM can clear the static AP address and
+  # break DHCP for hotspot clients. Exclusive mode removes any stale rule.
+  configure_nm_ap_unmanaged "${ap_iface}" "${ap_exclusive}"
+
   # 4. Detect uplink interface for NAT.
   local uplink_iface
   uplink_iface=$(find_uplink_iface) || true

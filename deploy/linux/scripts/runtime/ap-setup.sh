@@ -28,6 +28,11 @@ if [ "${AP_EXCLUSIVE}" != "true" ]; then
   # Concurrent mode: create a virtual AP interface on the same phy.
   iw dev "${STA_IFACE}" interface add "${AP_IFACE}" type __ap 2>/dev/null || true
 
+  # Best effort immediate handoff: even with the persistent NM rule in place,
+  # the just-created virtual interface may already have been discovered by NM.
+  # Releasing it here prevents NM from racing our static AP address assignment.
+  release_iface_from_nm "${AP_IFACE}"
+
   # Derive a locally-administered MAC to avoid conflicts with STA.
   BASE_MAC=$(cat "/sys/class/net/${STA_IFACE}/address" 2>/dev/null || echo "02:00:00:00:00:00")
   OCTET1=$(echo "$BASE_MAC" | cut -d: -f1)
@@ -46,6 +51,7 @@ if [ "${AP_EXCLUSIVE}" != "true" ]; then
     setup_ap_interface_exclusive "${AP_IFACE}" "${AP_IP}" "${AP_PREFIX}"
     log "Exclusive fallback: released ${AP_IFACE} from NetworkManager"
   else
+    release_iface_from_nm "${AP_IFACE}"
     ip addr flush dev "${AP_IFACE}"
     ip addr add "${AP_IP}/${AP_PREFIX}" dev "${AP_IFACE}"
   fi
