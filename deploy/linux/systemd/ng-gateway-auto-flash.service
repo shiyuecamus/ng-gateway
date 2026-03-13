@@ -1,0 +1,29 @@
+# ng-gateway auto-flash service (TF maintenance card)
+#
+# Automatically flashes the golden image to eMMC when booted from a
+# TF maintenance card. Runs once at boot, after filesystems are mounted,
+# and before normal user services start.
+#
+# The auto-flash script is idempotent: if eMMC already contains a valid
+# image (marker file present), the service exits immediately.
+#
+# This service is ONLY installed on TF maintenance cards — it is NOT
+# part of the normal ng-gateway .deb package.
+
+[Unit]
+Description=NG-Gateway Auto-Flash eMMC (TF maintenance card)
+After=local-fs.target
+Before=multi-user.target
+ConditionPathExists=/opt/ng-images
+ConditionPathExists=/opt/ng-gateway-factory/scripts/factory/auto-flash-emmc.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/ng-gateway-factory/scripts/factory/auto-flash-emmc.sh
+TimeoutStartSec=600
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

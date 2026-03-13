@@ -8,14 +8,20 @@ set -euo pipefail
 # capacity (32GB / 64GB / 256GB) because the rootfs partition is shrunk
 # to its minimum size. The first-boot service will expand it at runtime.
 #
+# Supports both single-partition (e.g. Orange Pi 4 Pro, MBR) and
+# dual-partition (e.g. Orange Pi 5 Plus, GPT boot+rootfs) layouts.
+# When partition numbers are not explicitly provided, the script
+# auto-detects the disk layout.
+#
 # Usage:
-#   sudo bash create-golden-image.sh --device /dev/mmcblk1 --output /mnt/usb/ng-gateway-v1.0.0 --version v1.0.0
+#   sudo bash create-golden-image.sh --device /dev/mmcblk0 --output /mnt/usb/ng-gateway-v1.0.0 --version v1.0.0
 #   sudo bash create-golden-image.sh --device /dev/mmcblk1 --output - --version v1.0.0 | ssh server "cat > image.img.zst"
 #
 # Prerequisites:
 #   - Must run from an SD-card-booted system (eMMC must be fully unmounted)
-#   - Required tools: parted, partprobe, resize2fs, e2fsck, dumpe2fs, sgdisk,
-#                     sfdisk, dd, zstd, jq
+#   - Required tools: parted, partprobe, resize2fs, e2fsck, dumpe2fs,
+#                     sfdisk, dd, jq, blkid, findmnt
+#   - GPT disks additionally require: sgdisk
 
 SCRIPT_NAME="$(basename "$0")"
 LOG_TAG="[create-image]"
@@ -28,8 +34,8 @@ DEVICE=""
 OUTPUT=""
 VERSION="unknown"
 COMPRESSION="zstd"
-BOOT_PARTNUM=1
-ROOT_PARTNUM=2
+USER_ROOT_PARTNUM=""
+USER_BOOT_PARTNUM=""
 BUFFER_MB=64
 
 usage() {
@@ -37,30 +43,34 @@ usage() {
 Usage: ${SCRIPT_NAME} [OPTIONS]
 
 Options:
-  --device DEVICE       Source eMMC block device (e.g. /dev/mmcblk1)
+  --device DEVICE       Source eMMC block device (e.g. /dev/mmcblk0)
   --output PATH         Output image path (without .zst extension) or '-' for stdout
   --version VERSION     Image version string (e.g. v1.0.0)
-  --root-partnum N      Root partition number (default: 2)
-  --boot-partnum N      Boot partition number (default: 1)
+  --root-partnum N      Root partition number (auto-detected if omitted)
+  --boot-partnum N      Boot partition number (auto-detected if omitted; may not exist)
   --buffer-mb N         Extra buffer in MB after shrunk rootfs (default: 64)
   --compression ALGO    Compression algorithm: zstd, gzip, none (default: zstd)
   -h, --help            Show this help
 
-Example:
-  sudo ${SCRIPT_NAME} --device /dev/mmcblk1 --output /mnt/usb/ng-gateway --version v1.0.0
+Examples:
+  # Auto-detect layout (recommended):
+  sudo ${SCRIPT_NAME} --device /dev/mmcblk0 --output /mnt/usb/ng-gateway --version v1.0.0
+
+  # Explicit partition numbers (override auto-detection):
+  sudo ${SCRIPT_NAME} --device /dev/mmcblk1 --root-partnum 2 --boot-partnum 1 --output /mnt/usb/ng-gateway --version v1.0.0
 EOF
   exit 0
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --device)       DEVICE="$2";       shift 2 ;;
-    --output)       OUTPUT="$2";       shift 2 ;;
-    --version)      VERSION="$2";      shift 2 ;;
-    --root-partnum) ROOT_PARTNUM="$2"; shift 2 ;;
-    --boot-partnum) BOOT_PARTNUM="$2"; shift 2 ;;
-    --buffer-mb)    BUFFER_MB="$2";    shift 2 ;;
-    --compression)  COMPRESSION="$2";  shift 2 ;;
+    --device)       DEVICE="$2";            shift 2 ;;
+    --output)       OUTPUT="$2";            shift 2 ;;
+    --version)      VERSION="$2";           shift 2 ;;
+    --root-partnum) USER_ROOT_PARTNUM="$2"; shift 2 ;;
+    --boot-partnum) USER_BOOT_PARTNUM="$2"; shift 2 ;;
+    --buffer-mb)    BUFFER_MB="$2";         shift 2 ;;
+    --compression)  COMPRESSION="$2";       shift 2 ;;
     -h|--help)      usage ;;
     *)              die "Unknown option: $1" ;;
   esac
@@ -72,7 +82,7 @@ done
 # ─── Validate Environment ───
 
 require_root
-require_commands parted partprobe resize2fs e2fsck dumpe2fs sfdisk sgdisk dd jq blkid findmnt sha256sum
+require_commands parted partprobe resize2fs e2fsck dumpe2fs sfdisk dd jq blkid findmnt sha256sum
 
 case "${COMPRESSION}" in
   zstd) require_commands zstd; COMP_EXT=".zst" ;;
@@ -81,26 +91,96 @@ case "${COMPRESSION}" in
   *)    die "Unsupported compression: ${COMPRESSION}" ;;
 esac
 
-# ─── Validate Source Device ───
+# ─── Detect / Validate Source Device Layout ───
 
 [[ -b "${DEVICE}" ]] || die "Not a block device: ${DEVICE}"
 
-ROOT_PART=$(partition_path "${DEVICE}" "${ROOT_PARTNUM}")
-BOOT_PART=$(partition_path "${DEVICE}" "${BOOT_PARTNUM}")
+detect_disk_layout "${DEVICE}" || die "Cannot detect disk layout on ${DEVICE}"
+
+DISK_LABEL="${_DL_LABEL}"
+
+if [[ -n "${USER_ROOT_PARTNUM}" ]]; then
+  ROOT_PARTNUM="${USER_ROOT_PARTNUM}"
+  ROOT_PART=$(partition_path "${DEVICE}" "${ROOT_PARTNUM}")
+  ROOT_FS=$(blkid -o value -s TYPE "${ROOT_PART}" 2>/dev/null || echo "ext4")
+  log "Using user-specified root partition: ${ROOT_PART}"
+else
+  ROOT_PARTNUM="${_DL_ROOT_PARTNUM}"
+  ROOT_PART="${_DL_ROOT_PART}"
+  ROOT_FS="${_DL_ROOT_FS}"
+fi
+
+BOOT_SEPARATE="${_DL_BOOT_SEPARATE}"
+BOOT_PARTNUM="${_DL_BOOT_PARTNUM}"
+BOOT_PART="${_DL_BOOT_PART:-}"
+BOOT_FS="${_DL_BOOT_FS:-}"
+
+if [[ -n "${USER_BOOT_PARTNUM}" ]]; then
+  BOOT_PARTNUM="${USER_BOOT_PARTNUM}"
+  BOOT_PART=$(partition_path "${DEVICE}" "${BOOT_PARTNUM}")
+  BOOT_FS=$(blkid -o value -s TYPE "${BOOT_PART}" 2>/dev/null || echo "vfat")
+  BOOT_SEPARATE="true"
+  log "Using user-specified boot partition: ${BOOT_PART}"
+fi
 
 [[ -b "${ROOT_PART}" ]] || die "Root partition not found: ${ROOT_PART}"
-[[ -b "${BOOT_PART}" ]] || die "Boot partition not found: ${BOOT_PART}"
+if [[ "${BOOT_SEPARATE}" == "true" ]] && [[ -n "${BOOT_PART}" ]]; then
+  [[ -b "${BOOT_PART}" ]] || die "Boot partition not found: ${BOOT_PART}"
+fi
 
-if findmnt "${ROOT_PART}" >/dev/null 2>&1 || findmnt "${BOOT_PART}" >/dev/null 2>&1; then
-  die "Source partitions are mounted. Boot from SD card and ensure eMMC is fully unmounted."
+# Ensure source partitions are not mounted.
+if findmnt "${ROOT_PART}" >/dev/null 2>&1; then
+  die "Root partition ${ROOT_PART} is mounted. Boot from SD card and ensure eMMC is fully unmounted."
+fi
+if [[ "${BOOT_SEPARATE}" == "true" ]] && [[ -n "${BOOT_PART}" ]]; then
+  if findmnt "${BOOT_PART}" >/dev/null 2>&1; then
+    die "Boot partition ${BOOT_PART} is mounted. Ensure eMMC is fully unmounted."
+  fi
+fi
+
+# ─── Detect Allwinner (sunxi) bootloader overlap ───
+#
+# On Allwinner SoCs, the boot_package (U-Boot) is written at a fixed raw
+# offset (sector 32800 ≈ 16MB) that physically overlaps with the rootfs
+# partition when the partition starts at sector 8192 (4MB). Shrinking the
+# ext4 filesystem (resize2fs -M) may relocate data blocks into that region
+# and destroy the bootloader.
+#
+# Strategy: before any filesystem modifications, back up the raw bootloader
+# sectors. After the dd export, stamp the bootloader back onto the .img file.
+
+SUNXI_BOOTLOADER="false"
+SUNXI_BL_BACKUP=""
+SUNXI_UBOOT_DIR=""
+
+if is_sunxi_platform || has_sunxi_bootloader "${DEVICE}"; then
+  log "Allwinner (sunxi) platform detected — bootloader overlap protection enabled"
+
+  SUNXI_BOOTLOADER="true"
+  SUNXI_BL_BACKUP=$(mktemp -d)
+
+  # Back up the bootloader raw sectors BEFORE any filesystem operations.
+  backup_sunxi_bootloader "${DEVICE}" "${SUNXI_BL_BACKUP}"
+
+  # Also try to locate firmware files for flash-image.sh use.
+  # On a live system these are in /usr/lib/linux-u-boot-*; when running from
+  # an SD maintenance system we may need to mount the eMMC rootfs briefly.
+  SUNXI_UBOOT_DIR=$(find_sunxi_uboot_dir 2>/dev/null || true)
+  if [[ -n "${SUNXI_UBOOT_DIR}" ]]; then
+    log "  Firmware files found: ${SUNXI_UBOOT_DIR}"
+  else
+    log "  No firmware files on this system — will use raw backup instead"
+  fi
 fi
 
 log "=========================================="
 log "NG Gateway Golden Image Creator"
 log "=========================================="
 log "Source device:  ${DEVICE}"
-log "Root partition: ${ROOT_PART}"
-log "Boot partition: ${BOOT_PART}"
+print_disk_layout
+if [[ "${SUNXI_BOOTLOADER}" == "true" ]]; then
+  log "Platform:       Allwinner (sunxi) — bootloader overlap protection active"
+fi
 log "Output:         ${OUTPUT}"
 log "Version:        ${VERSION}"
 log "Compression:    ${COMPRESSION}"
@@ -167,23 +247,38 @@ sleep 1
 log "Step 4/6: Calculating clone boundary..."
 
 LAST_SECTOR=$((NEW_END_SECTOR + 1))
-GPT_BACKUP_SECTORS=34
+
+if [[ "${DISK_LABEL}" == "gpt" ]]; then
+  GPT_BACKUP_SECTORS=34
+else
+  GPT_BACKUP_SECTORS=0
+fi
+
 TOTAL_SECTORS=$((LAST_SECTOR + GPT_BACKUP_SECTORS))
 TOTAL_BYTES=$((TOTAL_SECTORS * SECTOR_SIZE))
 TOTAL_MB=$((TOTAL_BYTES / 1048576))
 
 log "  Last data sector:     ${LAST_SECTOR}"
-log "  GPT backup:           +${GPT_BACKUP_SECTORS} sectors"
+if [[ ${GPT_BACKUP_SECTORS} -gt 0 ]]; then
+  log "  GPT backup:           +${GPT_BACKUP_SECTORS} sectors"
+else
+  log "  MBR layout:           no GPT backup sectors needed"
+fi
 log "  Total sectors to copy: ${TOTAL_SECTORS}"
 log "  Total image size:     ${TOTAL_MB} MB (before compression)"
 
-# ─── Step 5: Fix GPT backup before export ───
+# ─── Step 5: Fix GPT backup before export (GPT only) ───
 
-log "Step 5/6: Repairing GPT backup header before export..."
-sgdisk -e "${DEVICE}" >/dev/null 2>&1 || die "Failed to relocate GPT backup header with sgdisk -e"
-partprobe "${DEVICE}" 2>/dev/null || true
-sleep 1
-log "  GPT backup header relocated to current disk end"
+if [[ "${DISK_LABEL}" == "gpt" ]]; then
+  log "Step 5/6: Repairing GPT backup header before export..."
+  require_commands sgdisk
+  sgdisk -e "${DEVICE}" >/dev/null 2>&1 || die "Failed to relocate GPT backup header with sgdisk -e"
+  partprobe "${DEVICE}" 2>/dev/null || true
+  sleep 1
+  log "  GPT backup header relocated to current disk end"
+else
+  log "Step 5/6: Skipping GPT repair (disk uses ${DISK_LABEL} partition table)"
+fi
 
 # ─── Step 6: Export image ───
 
@@ -204,10 +299,18 @@ else
   COMP_PATH="${OUTPUT}.img${COMP_EXT}"
   MANIFEST_PATH="${OUTPUT}.manifest.json"
 
-  # Step 6a: Always produce the raw .img first (canonical production artifact).
   log "  6a) Writing raw image: ${IMG_PATH}"
   dd if="${DEVICE}" bs=1M count="${TOTAL_BYTES}" iflag=count_bytes status=progress \
     of="${IMG_PATH}" 2>/dev/null
+
+  # 6a-sunxi) Stamp Allwinner bootloader back into the raw image.
+  # The resize2fs -M in Step 2 may have relocated ext4 data blocks into
+  # the raw sectors where boot0 and boot_package reside. We restore the
+  # bootloader from the pre-shrink backup to guarantee a bootable image.
+  if [[ "${SUNXI_BOOTLOADER}" == "true" ]] && [[ -n "${SUNXI_BL_BACKUP}" ]]; then
+    log "  6a-sunxi) Restoring Allwinner bootloader into raw image..."
+    restore_sunxi_bootloader "${IMG_PATH}" "${SUNXI_BL_BACKUP}"
+  fi
 
   RAW_SHA256=$(sha256sum "${IMG_PATH}" | awk '{print $1}')
   echo "${RAW_SHA256}  $(basename "${IMG_PATH}")" > "${IMG_PATH}.sha256"
@@ -215,7 +318,6 @@ else
   log "  Raw image: ${IMG_PATH} (${TOTAL_MB} MB)"
   log "  SHA256:    ${IMG_PATH}.sha256"
 
-  # Step 6b: Compress for archival / distribution (skip when --compression none).
   COMP_SHA256=""
   COMP_BYTES=""
   if [[ "${COMPRESSION}" != "none" ]]; then
@@ -231,17 +333,32 @@ else
     log "  SHA256:     ${COMP_PATH}.sha256"
   fi
 
-  # Step 6c: Generate manifest with both raw and compressed artifact info.
+  # Step 6c: Generate layout-aware manifest.
   log "  6c) Generating manifest..."
 
   KERNEL_VER=$(uname -r 2>/dev/null || echo "unknown")
-  OS_INFO=$(lsb_release -ds 2>/dev/null || cat /etc/os-release 2>/dev/null | head -1 || echo "unknown")
-
-  BOOT_SIZE_MB=$(parted -ms "${DEVICE}" unit MB print 2>/dev/null \
-    | awk -F: "/^${BOOT_PARTNUM}:/{gsub(/MB/,\"\",\$4); print \$4}" || echo "256")
+  OS_INFO=$(lsb_release -ds 2>/dev/null || head -1 /etc/os-release 2>/dev/null || echo "unknown")
   ROOT_SIZE_MB="${TARGET_PART_MB}"
-  BOOT_FS=$(blkid -o value -s TYPE "${BOOT_PART}" 2>/dev/null || echo "ext4")
-  ROOT_FS=$(blkid -o value -s TYPE "${ROOT_PART}" 2>/dev/null || echo "ext4")
+
+  # Build partition list dynamically based on detected layout.
+  PARTITIONS_JSON="["
+  if [[ "${BOOT_SEPARATE}" == "true" ]] && [[ -n "${BOOT_PARTNUM}" ]]; then
+    BOOT_SIZE_MB=$(parted -ms "${DEVICE}" unit MB print 2>/dev/null \
+      | awk -F: "/^${BOOT_PARTNUM}:/{gsub(/MB/,\"\",\$4); print \$4}" || echo "256")
+    PARTITIONS_JSON+="{\"number\": ${BOOT_PARTNUM}, \"label\": \"boot\", \"fs\": \"${BOOT_FS}\", \"size_mb\": ${BOOT_SIZE_MB}}, "
+  fi
+  PARTITIONS_JSON+="{\"number\": ${ROOT_PARTNUM}, \"label\": \"rootfs\", \"fs\": \"${ROOT_FS}\", \"size_mb\": ${ROOT_SIZE_MB}}"
+  PARTITIONS_JSON+="]"
+
+  # Detect board model from device-tree if available, fall back to hostname.
+  BOARD_MODEL=""
+  if [[ -f /proc/device-tree/model ]]; then
+    BOARD_MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)
+  fi
+  if [[ -f /sys/firmware/devicetree/base/model ]]; then
+    BOARD_MODEL=$(tr -d '\0' < /sys/firmware/devicetree/base/model 2>/dev/null || true)
+  fi
+  [[ -z "${BOARD_MODEL}" ]] && BOARD_MODEL=$(hostname 2>/dev/null || echo "unknown")
 
   jq -n \
     --arg version "${VERSION}" \
@@ -253,15 +370,15 @@ else
     --arg compression "${COMPRESSION}" \
     --arg sha256_compressed "${COMP_SHA256:-}" \
     --argjson compressed_bytes "${COMP_BYTES:-0}" \
-    --arg partition_table "gpt" \
-    --argjson partitions "[
-      {\"number\": ${BOOT_PARTNUM}, \"label\": \"boot\", \"fs\": \"${BOOT_FS}\", \"size_mb\": ${BOOT_SIZE_MB}},
-      {\"number\": ${ROOT_PARTNUM}, \"label\": \"rootfs\", \"fs\": \"${ROOT_FS}\", \"size_mb\": ${ROOT_SIZE_MB}}
-    ]" \
+    --arg partition_table "${DISK_LABEL}" \
+    --argjson root_partnum "${ROOT_PARTNUM}" \
+    --argjson boot_separate "$(if [[ "${BOOT_SEPARATE}" == "true" ]]; then echo true; else echo false; fi)" \
+    --argjson partitions "${PARTITIONS_JSON}" \
+    --argjson sunxi_bootloader "$(if [[ "${SUNXI_BOOTLOADER}" == "true" ]]; then echo true; else echo false; fi)" \
     --arg ng_gateway_version "${VERSION}" \
     --arg os "${OS_INFO}" \
     --arg kernel "${KERNEL_VER}" \
-    --arg board "orangepi5plus" \
+    --arg board "${BOARD_MODEL}" \
     '{
       version: $version,
       created_at: $created_at,
@@ -273,7 +390,10 @@ else
       sha256_compressed: $sha256_compressed,
       compressed_bytes: $compressed_bytes,
       partition_table: $partition_table,
+      root_partnum: $root_partnum,
+      boot_separate: $boot_separate,
       partitions: $partitions,
+      sunxi_bootloader: $sunxi_bootloader,
       ng_gateway_version: $ng_gateway_version,
       os: $os,
       kernel: $kernel,
@@ -284,6 +404,9 @@ else
 fi
 
 rm -f "${RAW_SHA256_FILE}"
+if [[ -n "${SUNXI_BL_BACKUP:-}" ]]; then
+  rm -rf "${SUNXI_BL_BACKUP}"
+fi
 
 log ""
 log "=========================================="
@@ -296,6 +419,10 @@ if [[ "${OUTPUT}" != "-" ]]; then
   [[ -n "${COMP_BYTES:-}" ]] && \
   log "  Compressed: ${COMP_PATH} ($(( ${COMP_BYTES} / 1048576 )) MB)"
   log "  Manifest:   ${MANIFEST_PATH}"
+  if [[ "${SUNXI_BOOTLOADER}" == "true" ]]; then
+    log ""
+    log "  Platform:   Allwinner (sunxi) — bootloader embedded in image"
+  fi
   log ""
   log "For RKDevTool / Windows mass-production flashing, use the raw .img file."
   log "For archival or network transfer, use the compressed .img${COMP_EXT} file."

@@ -176,7 +176,11 @@ pub mod device_state {
     pub const UNMANAGED: u32 = 10;
     pub const UNAVAILABLE: u32 = 20;
     pub const DISCONNECTED: u32 = 30;
+    pub const PREPARE: u32 = 40;
+    pub const CONFIG: u32 = 50;
+    pub const NEED_AUTH: u32 = 60;
     pub const ACTIVATED: u32 = 100;
+    pub const FAILED: u32 = 120;
 }
 
 /// `NM_ACTIVE_CONNECTION_STATE_*` constants.

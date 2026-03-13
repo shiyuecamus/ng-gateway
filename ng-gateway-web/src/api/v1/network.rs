@@ -266,7 +266,7 @@ async fn connect_wifi(
     let status = network
         .connect_wifi(&payload.into_inner())
         .await
-        .map_err(|e| WebError::InternalError(format!("Wi-Fi connect failed: {e}")))?;
+        .map_err(|e| WebError::BadRequest(format!("Wi-Fi connect failed: {e}")))?;
     Ok(WebResponse::ok(status))
 }
 

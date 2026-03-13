@@ -133,17 +133,22 @@ log "  Root device:    ${ROOT_DEV}"
 log "  Disk device:    ${ROOT_DISK}"
 log "  Partition:      ${ROOT_PARTNUM}"
 
-# ─── Step 2: Repair GPT backup header ───
+# ─── Step 2: Repair GPT backup header (GPT only) ───
 
 log "Step 2/7: Repairing GPT backup header..."
 
-if command -v sgdisk >/dev/null 2>&1; then
-  sgdisk -e "${ROOT_DISK}" 2>/dev/null || {
-    warn "sgdisk -e failed (non-fatal, may already be correct)"
-  }
-  log "  GPT backup header repaired"
+DISK_PTTYPE=$(blkid -o value -s PTTYPE "${ROOT_DISK}" 2>/dev/null || true)
+if [[ "${DISK_PTTYPE}" == "gpt" ]]; then
+  if command -v sgdisk >/dev/null 2>&1; then
+    sgdisk -e "${ROOT_DISK}" 2>/dev/null || {
+      warn "sgdisk -e failed (non-fatal, may already be correct)"
+    }
+    log "  GPT backup header repaired"
+  else
+    warn "sgdisk not found — skipping GPT repair (install gdisk package)"
+  fi
 else
-  warn "sgdisk not found — skipping GPT repair (install gdisk package)"
+  log "  Disk uses ${DISK_PTTYPE:-unknown} partition table — GPT repair not needed"
 fi
 
 # ─── Step 3: Expand root partition ───

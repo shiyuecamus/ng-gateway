@@ -186,12 +186,28 @@ sudo shutdown -h now
 
 ### 导出黄金镜像
 
+脚本会自动探测源设备的分区布局（GPT/MBR、单分区/双分区），无需手动指定分区号：
+
 ```bash
+# 推荐：自动探测布局（兼容所有板型）
 sudo bash deploy/linux/scripts/factory/create-golden-image.sh \
-  --device /dev/mmcblk1 \
+  --device /dev/mmcblk0 \
   --output /mnt/usb/ng-gateway-v1.0.0 \
   --version v1.0.0
 ```
+
+> **注意**：`--device` 填的是 eMMC 设备号，不是 SD 卡。请先用 `lsblk` + `findmnt /` 确认。
+> 不同板型的设备号可能不同（例如 5 Plus 常见 `mmcblk1`，4 Pro 常见 `mmcblk0`）。
+
+### 板型分区布局参考
+
+| 板型 | 典型分区表 | 分区数量 | 典型布局 |
+| --- | --- | --- | --- |
+| Orange Pi 5 Plus | GPT | 2 | `p1=boot(vfat)` + `p2=rootfs(ext4)` |
+| Orange Pi 5 Pro | GPT | 2 | `p1=boot(vfat)` + `p2=rootfs(ext4)` |
+| Orange Pi 4 Pro | MBR (dos) | 1 | `p1=rootfs(ext4)`，boot 嵌入 rootfs |
+
+脚本会自动适配以上所有布局。如需覆盖探测结果，可显式指定 `--root-partnum N` 和 `--boot-partnum N`。
 
 ### 烧录目标板
 
@@ -200,6 +216,8 @@ sudo bash deploy/linux/scripts/factory/flash-image.sh \
   --image /mnt/usb/ng-gateway-v1.0.0.img.zst \
   --device /dev/mmcblk1
 ```
+
+烧录后的 rootfs 校验会自动从 manifest 或设备布局中识别 root 分区，不再依赖固定的 `p2`。
 
 ## 当前终态原则
 

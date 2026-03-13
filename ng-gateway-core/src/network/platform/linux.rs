@@ -2470,6 +2470,11 @@ impl PlatformNetworkManager for LinuxNetworkManager {
             .await?;
         let dev_path_ref = ObjectPath::try_from(dev_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid device path: {e}")))?;
+        let dev_props = self
+            .get_all_properties(&dev_path_ref, iface::DEVICE)
+            .await
+            .unwrap_or_default();
+        let iface_name = prop_str(&dev_props, prop::INTERFACE).unwrap_or_default();
 
         let nm = self.nm_proxy().await?;
 
@@ -2534,13 +2539,14 @@ impl PlatformNetworkManager for LinuxNetworkManager {
         let start = Instant::now();
         let active_path_ref = ObjectPath::try_from(active_conn_path.as_str())
             .map_err(|e| NetworkError::DBusError(format!("Invalid active conn path: {e}")))?;
+        let mut saw_connect_progress = false;
 
         let result = loop {
             if start.elapsed() > Duration::from_secs(timeout_secs) {
-                break Err(NetworkError::WifiConnectionTimeout {
-                    ssid: request.ssid.clone(),
-                    timeout_secs,
-                });
+                break Err(NetworkError::WifiError(format!(
+                    "WIFI_TIMEOUT: connection to '{}' timed out after {}s",
+                    request.ssid, timeout_secs
+                )));
             }
 
             let state = self
@@ -2549,6 +2555,16 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 .ok()
                 .and_then(|v| v.downcast_ref::<u32>().ok())
                 .unwrap_or(0);
+            let dev_state = self
+                .get_property(&dev_path_ref, iface::DEVICE, prop::STATE)
+                .await
+                .ok()
+                .and_then(|v| v.downcast_ref::<u32>().ok())
+                .unwrap_or(0);
+
+            if dev_state >= device_state::PREPARE && dev_state != device_state::FAILED {
+                saw_connect_progress = true;
+            }
 
             match state {
                 active_conn_state::ACTIVATED => {
@@ -2557,11 +2573,26 @@ impl PlatformNetworkManager for LinuxNetworkManager {
                 }
                 active_conn_state::DEACTIVATED => {
                     break Err(NetworkError::WifiError(format!(
-                        "Connection to '{}' was rejected or failed",
+                        "WIFI_ASSOCIATION_FAILED: connection to '{}' was rejected or failed",
                         request.ssid
                     )));
                 }
                 _ => {
+                    if dev_state == device_state::FAILED {
+                        break Err(NetworkError::WifiError(format!(
+                            "WIFI_AUTH_FAILED: connection to '{}' failed during authentication or association",
+                            request.ssid
+                        )));
+                    }
+
+                    if saw_connect_progress && dev_state == device_state::DISCONNECTED {
+                        break Err(NetworkError::WifiError(format!(
+                            "WIFI_HANDSHAKE_FAILED: connection to '{}' failed before activation (device returned to disconnected state on {})",
+                            request.ssid,
+                            iface_name
+                        )));
+                    }
+
                     sleep(Duration::from_millis(500)).await;
                 }
             }

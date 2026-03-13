@@ -18,6 +18,8 @@
 #   Logging:       log, warn, die
 #   Guards:        require_root, require_commands
 #   Block device:  parse_block_device, partition_path
+#   Disk layout:   disk_label_type, detect_root_partition, detect_boot_partition,
+#                  detect_disk_layout, print_disk_layout
 #   Network:       find_uplink_iface, find_managed_wifi_iface, nm_device_state,
 #                  release_iface_from_nm, configure_nm_ap_unmanaged, setup_ap_interface,
 #                  setup_nat_rules, remove_nat_rules
@@ -101,6 +103,343 @@ partition_path() {
     echo "${disk}p${partnum}"
   else
     echo "${disk}${partnum}"
+  fi
+}
+
+# ─────────────────────────────────────────────
+# Allwinner (sunxi) bootloader helpers
+# ─────────────────────────────────────────────
+
+# Allwinner SoCs (H616, A733, H6, H5, …) store their bootloader in raw disk
+# sectors *outside* (or overlapping with) the first partition:
+#
+#   boot0 (SPL):       dd bs=8k seek=1    → offset 8KB   (sector 16)
+#   boot_package (FIT):dd bs=8k seek=2050 → offset ~16MB (sector 32800)
+#
+# On boards where the first partition starts at sector 8192 (4MB), the
+# boot_package physically overlaps with the ext4 partition area. This is
+# intentional: nand-sata-install writes boot_package *after* mkfs, so it
+# occupies raw sectors that ext4 considers free. However, if we later run
+# resize2fs -M (shrink), ext4 may relocate data into those sectors and
+# destroy the bootloader.
+#
+# The helpers below detect the Allwinner platform, locate the bootloader
+# firmware files, and provide backup/restore operations.
+
+# Returns 0 if the running system (or a mounted rootfs) is an Allwinner/sunxi
+# platform that uses the boot0 + boot_package scheme.
+is_sunxi_platform() {
+  # Check running kernel.
+  if uname -r 2>/dev/null | grep -qi 'sun[0-9]\+i'; then
+    return 0
+  fi
+  # Check /etc/orangepi-release.
+  if [[ -f /etc/orangepi-release ]]; then
+    if grep -qi 'sun[0-9]\+i' /etc/orangepi-release 2>/dev/null; then
+      return 0
+    fi
+  fi
+  # Check device-tree model.
+  local model=""
+  model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)
+  if echo "${model}" | grep -qi 'sun[0-9]\+i'; then
+    return 0
+  fi
+  return 1
+}
+
+# Returns 0 if a block device contains an Allwinner eGON.BT0 boot0 header
+# at the standard sector-16 offset. Use this to detect sunxi layout on a
+# target device when the running system itself may not be Allwinner.
+has_sunxi_bootloader() {
+  local disk="${1:?}"
+  [[ -b "${disk}" ]] || [[ -f "${disk}" ]] || return 1
+  local magic
+  magic=$(dd if="${disk}" bs=512 skip=16 count=1 status=none 2>/dev/null \
+    | head -c 12 | strings 2>/dev/null || true)
+  [[ "${magic}" == *"eGON.BT0"* ]]
+}
+
+# Locate the Allwinner u-boot directory containing boot0_sdcard.fex and
+# boot_package.fex. Prints the directory path. Returns 1 if not found.
+#
+# When called with an optional $1 = mounted rootfs prefix (e.g. /tmp/mnt),
+# searches under that prefix instead of the live root.
+find_sunxi_uboot_dir() {
+  local prefix="${1:-}"
+  local dir=""
+
+  # Primary: canonical path from platform_install.sh (set as DIR=...).
+  if [[ -f "${prefix}/usr/lib/u-boot/platform_install.sh" ]]; then
+    dir=$(grep -oP '^\s*DIR=\K\S+' "${prefix}/usr/lib/u-boot/platform_install.sh" 2>/dev/null || true)
+    dir="${prefix}${dir}"
+    if [[ -n "${dir}" ]] && [[ -f "${dir}/boot0_sdcard.fex" ]] && [[ -f "${dir}/boot_package.fex" ]]; then
+      echo "${dir}"
+      return 0
+    fi
+  fi
+
+  # Fallback: glob search.
+  for dir in "${prefix}"/usr/lib/linux-u-boot-*; do
+    if [[ -f "${dir}/boot0_sdcard.fex" ]] && [[ -f "${dir}/boot_package.fex" ]]; then
+      echo "${dir}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# Backup Allwinner bootloader raw regions from a block device to a directory.
+#
+# Usage: backup_sunxi_bootloader <disk-dev> <output-dir>
+#
+# Creates:
+#   <output-dir>/boot0.bin     (sectors 16..511, 248KB)
+#   <output-dir>/boot_pkg.bin  (sectors 32800..35391, ~1.3MB)
+#
+# The sector ranges are based on the standard Allwinner layout and sized to
+# cover the largest known boot0 (240KB) and boot_package (1.3MB) payloads
+# with generous safety margins.
+backup_sunxi_bootloader() {
+  local disk="$1"
+  local outdir="$2"
+
+  mkdir -p "${outdir}"
+
+  # boot0: sector 16, max ~240KB → read 496 sectors (248KB).
+  dd if="${disk}" of="${outdir}/boot0.bin" \
+    bs=512 skip=16 count=496 status=none 2>/dev/null \
+    || die "Failed to backup boot0 from ${disk}"
+
+  # boot_package: sector 32800, max ~1.3MB → read 2592 sectors (1296KB).
+  dd if="${disk}" of="${outdir}/boot_pkg.bin" \
+    bs=512 skip=32800 count=2592 status=none 2>/dev/null \
+    || die "Failed to backup boot_package from ${disk}"
+
+  log "  Backed up Allwinner bootloader from ${disk}"
+  log "    boot0:        ${outdir}/boot0.bin ($(stat -c%s "${outdir}/boot0.bin" 2>/dev/null || stat -f%z "${outdir}/boot0.bin") bytes)"
+  log "    boot_package: ${outdir}/boot_pkg.bin ($(stat -c%s "${outdir}/boot_pkg.bin" 2>/dev/null || stat -f%z "${outdir}/boot_pkg.bin") bytes)"
+}
+
+# Restore (rewrite) Allwinner bootloader from backup files into a block
+# device or raw image file.
+#
+# Usage: restore_sunxi_bootloader <target> <backup-dir>
+#
+# <target> can be a block device (/dev/mmcblk0) or a raw .img file.
+restore_sunxi_bootloader() {
+  local target="$1"
+  local backupdir="$2"
+
+  [[ -f "${backupdir}/boot0.bin" ]] || die "boot0.bin not found in ${backupdir}"
+  [[ -f "${backupdir}/boot_pkg.bin" ]] || die "boot_pkg.bin not found in ${backupdir}"
+
+  dd if="${backupdir}/boot0.bin" of="${target}" \
+    bs=512 seek=16 conv=notrunc status=none 2>/dev/null \
+    || die "Failed to restore boot0 to ${target}"
+
+  dd if="${backupdir}/boot_pkg.bin" of="${target}" \
+    bs=512 seek=32800 conv=notrunc status=none 2>/dev/null \
+    || die "Failed to restore boot_package to ${target}"
+
+  log "  Restored Allwinner bootloader to ${target}"
+}
+
+# Write Allwinner bootloader from firmware files (boot0_sdcard.fex +
+# boot_package.fex) to a block device or raw image.
+#
+# Usage: write_sunxi_bootloader <target> <uboot-dir>
+#
+# This mirrors the official write_uboot_platform() from platform_install.sh.
+write_sunxi_bootloader() {
+  local target="$1"
+  local uboot_dir="$2"
+
+  [[ -f "${uboot_dir}/boot0_sdcard.fex" ]] || die "boot0_sdcard.fex not found in ${uboot_dir}"
+  [[ -f "${uboot_dir}/boot_package.fex" ]] || die "boot_package.fex not found in ${uboot_dir}"
+
+  dd if="${uboot_dir}/boot0_sdcard.fex" of="${target}" \
+    bs=8k seek=1 conv=notrunc,fsync status=none 2>/dev/null \
+    || die "Failed to write boot0 to ${target}"
+
+  dd if="${uboot_dir}/boot_package.fex" of="${target}" \
+    bs=8k seek=2050 conv=notrunc,fsync status=none 2>/dev/null \
+    || die "Failed to write boot_package to ${target}"
+
+  log "  Wrote Allwinner bootloader to ${target}"
+}
+
+# ─────────────────────────────────────────────
+# Disk-layout detection helpers (factory scripts)
+# ─────────────────────────────────────────────
+
+# disk_label_type <disk-dev>
+#
+# Returns the partition table type of a disk: "gpt", "dos", or "unknown".
+# Uses blkid PTTYPE which works on both GPT and MBR disks.
+disk_label_type() {
+  local disk="$1"
+  local label
+  label=$(blkid -o value -s PTTYPE "${disk}" 2>/dev/null || true)
+  if [[ -z "${label}" ]]; then
+    label=$(parted -ms "${disk}" print 2>/dev/null | awk -F: 'NR==2{print $6}' || true)
+  fi
+  case "${label}" in
+    gpt)       echo "gpt" ;;
+    msdos|dos) echo "dos" ;;
+    *)         echo "unknown" ;;
+  esac
+}
+
+# detect_root_partition <disk-dev>
+#
+# Auto-detect the root (Linux/ext4) partition number on a disk.
+# Strategy:
+#   1. If only one Linux partition exists, use it.
+#   2. If multiple partitions exist, prefer the one labelled "opi_root",
+#      "rootfs", or "ROOT" (common Orange Pi / Armbian conventions).
+#   3. Fall back to the highest-numbered Linux/ext4 partition (typically
+#      the rootfs in dual-partition layouts where p1=boot, p2=rootfs).
+#
+# Prints the partition number. Returns 1 if no suitable partition found.
+detect_root_partition() {
+  local disk="$1"
+  local candidates=()
+  local partnum=""
+  local partdev=""
+  local fstype=""
+  local label=""
+
+  while IFS= read -r line; do
+    [[ "${line}" =~ ^[0-9]+: ]] || continue
+    partnum=$(echo "${line}" | cut -d: -f1)
+    partdev=$(partition_path "${disk}" "${partnum}")
+    [[ -b "${partdev}" ]] || continue
+
+    fstype=$(blkid -o value -s TYPE "${partdev}" 2>/dev/null || true)
+    [[ "${fstype}" == "ext4" || "${fstype}" == "ext3" || "${fstype}" == "ext2" ]] || continue
+    candidates+=("${partnum}")
+
+    label=$(blkid -o value -s LABEL "${partdev}" 2>/dev/null || true)
+    label_lower=$(echo "${label}" | tr '[:upper:]' '[:lower:]')
+    if [[ "${label_lower}" == "opi_root" || "${label_lower}" == "rootfs" || "${label_lower}" == "root" ]]; then
+      echo "${partnum}"
+      return 0
+    fi
+  done < <(parted -ms "${disk}" unit s print 2>/dev/null || true)
+
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    return 1
+  fi
+
+  if [[ ${#candidates[@]} -eq 1 ]]; then
+    echo "${candidates[0]}"
+    return 0
+  fi
+
+  local highest="${candidates[0]}"
+  for c in "${candidates[@]}"; do
+    (( c > highest )) && highest="${c}"
+  done
+  echo "${highest}"
+}
+
+# detect_boot_partition <disk-dev> <root-partnum>
+#
+# Auto-detect a separate boot partition on a disk, if one exists.
+# Returns the partition number if a dedicated boot partition is found,
+# or returns 1 if boot is embedded in the root partition (single-partition layout).
+#
+# Strategy:
+#   1. Look for a vfat partition (common boot filesystem).
+#   2. Look for a partition labelled "boot" or "BOOT".
+#   3. If a partition exists before root that is not the root, treat it as boot.
+#   4. If none found, boot is embedded in rootfs.
+detect_boot_partition() {
+  local disk="$1"
+  local root_partnum="$2"
+  local partnum=""
+  local partdev=""
+  local fstype=""
+  local label=""
+
+  while IFS= read -r line; do
+    [[ "${line}" =~ ^[0-9]+: ]] || continue
+    partnum=$(echo "${line}" | cut -d: -f1)
+    [[ "${partnum}" -ne "${root_partnum}" ]] || continue
+    partdev=$(partition_path "${disk}" "${partnum}")
+    [[ -b "${partdev}" ]] || continue
+
+    fstype=$(blkid -o value -s TYPE "${partdev}" 2>/dev/null || true)
+    label=$(blkid -o value -s LABEL "${partdev}" 2>/dev/null || true)
+    label_lower=$(echo "${label}" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "${fstype}" == "vfat" || "${label_lower}" == "boot" ]]; then
+      echo "${partnum}"
+      return 0
+    fi
+  done < <(parted -ms "${disk}" unit s print 2>/dev/null || true)
+
+  return 1
+}
+
+# detect_disk_layout <disk-dev>
+#
+# Unified disk layout detection for factory scripts.
+# Sets the following global variables:
+#   _DL_LABEL         - "gpt" or "dos"
+#   _DL_ROOT_PARTNUM  - root partition number
+#   _DL_ROOT_PART     - root partition device path
+#   _DL_ROOT_FS       - root filesystem type
+#   _DL_BOOT_SEPARATE - "true" if a dedicated boot partition exists
+#   _DL_BOOT_PARTNUM  - boot partition number (empty if embedded)
+#   _DL_BOOT_PART     - boot partition device path (empty if embedded)
+#   _DL_BOOT_FS       - boot filesystem type (empty if embedded)
+#
+# Returns 1 if no root partition can be detected.
+detect_disk_layout() {
+  local disk="$1"
+
+  _DL_LABEL=$(disk_label_type "${disk}")
+  _DL_ROOT_PARTNUM=""
+  _DL_ROOT_PART=""
+  _DL_ROOT_FS=""
+  _DL_BOOT_SEPARATE="false"
+  _DL_BOOT_PARTNUM=""
+  _DL_BOOT_PART=""
+  _DL_BOOT_FS=""
+
+  _DL_ROOT_PARTNUM=$(detect_root_partition "${disk}") || {
+    warn "No Linux root partition found on ${disk}"
+    return 1
+  }
+
+  _DL_ROOT_PART=$(partition_path "${disk}" "${_DL_ROOT_PARTNUM}")
+  _DL_ROOT_FS=$(blkid -o value -s TYPE "${_DL_ROOT_PART}" 2>/dev/null || echo "ext4")
+
+  local boot_pn=""
+  boot_pn=$(detect_boot_partition "${disk}" "${_DL_ROOT_PARTNUM}" 2>/dev/null) || true
+  if [[ -n "${boot_pn}" ]]; then
+    _DL_BOOT_SEPARATE="true"
+    _DL_BOOT_PARTNUM="${boot_pn}"
+    _DL_BOOT_PART=$(partition_path "${disk}" "${_DL_BOOT_PARTNUM}")
+    _DL_BOOT_FS=$(blkid -o value -s TYPE "${_DL_BOOT_PART}" 2>/dev/null || echo "vfat")
+  fi
+}
+
+# print_disk_layout
+#
+# Print a summary of the detected disk layout for human review.
+# Must be called after detect_disk_layout.
+print_disk_layout() {
+  log "Detected disk layout:"
+  log "  Partition table:  ${_DL_LABEL}"
+  log "  Root partition:   ${_DL_ROOT_PART} (partnum=${_DL_ROOT_PARTNUM}, fs=${_DL_ROOT_FS})"
+  if [[ "${_DL_BOOT_SEPARATE}" == "true" ]]; then
+    log "  Boot partition:   ${_DL_BOOT_PART} (partnum=${_DL_BOOT_PARTNUM}, fs=${_DL_BOOT_FS})"
+  else
+    log "  Boot partition:   embedded in rootfs (single-partition layout)"
   fi
 }
 

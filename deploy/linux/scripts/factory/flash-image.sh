@@ -165,10 +165,78 @@ if command -v fdisk >/dev/null 2>&1; then
   fdisk -l "${DEVICE}" 2>/dev/null | grep "^${DEVICE}" || true
 fi
 
-ROOT_PART=$(partition_path "${DEVICE}" 2)
-if command -v e2fsck >/dev/null 2>&1 && [[ -b "${ROOT_PART}" ]]; then
-  log "  Running quick fsck on rootfs..."
-  e2fsck -n "${ROOT_PART}" 2>&1 | tail -3 || true
+# Identify rootfs partition for quick fsck.
+# Priority: manifest root_partnum > auto-detect > skip.
+ROOT_PARTNUM=""
+MANIFEST_PATH=""
+
+# Try to locate the manifest alongside the image file.
+IMAGE_BASE="${IMAGE}"
+IMAGE_BASE="${IMAGE_BASE%.zst}"
+IMAGE_BASE="${IMAGE_BASE%.gz}"
+IMAGE_BASE="${IMAGE_BASE%.img}"
+if [[ -f "${IMAGE_BASE}.manifest.json" ]]; then
+  MANIFEST_PATH="${IMAGE_BASE}.manifest.json"
+elif [[ -f "${IMAGE%.zst}.manifest.json" ]]; then
+  MANIFEST_PATH="${IMAGE%.zst}.manifest.json"
+fi
+
+if [[ -n "${MANIFEST_PATH}" ]] && command -v jq >/dev/null 2>&1; then
+  ROOT_PARTNUM=$(jq -r '.root_partnum // empty' "${MANIFEST_PATH}" 2>/dev/null || true)
+  if [[ -n "${ROOT_PARTNUM}" ]]; then
+    log "  Root partition from manifest: partition ${ROOT_PARTNUM}"
+  fi
+fi
+
+if [[ -z "${ROOT_PARTNUM}" ]]; then
+  if detect_disk_layout "${DEVICE}" 2>/dev/null; then
+    ROOT_PARTNUM="${_DL_ROOT_PARTNUM}"
+    log "  Root partition auto-detected: partition ${ROOT_PARTNUM}"
+  fi
+fi
+
+if [[ -n "${ROOT_PARTNUM}" ]]; then
+  ROOT_PART=$(partition_path "${DEVICE}" "${ROOT_PARTNUM}")
+  if command -v e2fsck >/dev/null 2>&1 && [[ -b "${ROOT_PART}" ]]; then
+    log "  Running quick fsck on rootfs (${ROOT_PART})..."
+    e2fsck -n "${ROOT_PART}" 2>&1 | tail -3 || true
+  fi
+else
+  log "  Skipping rootfs fsck (root partition not identified)"
+fi
+
+# ─── Step 3b: Allwinner (sunxi) bootloader reinforcement ───
+#
+# The create-golden-image.sh script already stamps the bootloader into the
+# raw .img file, so in most cases this step is a no-op. However, as a
+# safety net, we re-write the bootloader from firmware files if available.
+# This handles the case where the image was transferred or re-compressed by
+# a third-party tool that might have altered raw sectors.
+
+SUNXI_FROM_MANIFEST="false"
+if [[ -n "${MANIFEST_PATH}" ]] && command -v jq >/dev/null 2>&1; then
+  SUNXI_FROM_MANIFEST=$(jq -r '.sunxi_bootloader // false' "${MANIFEST_PATH}" 2>/dev/null || echo "false")
+fi
+
+if [[ "${SUNXI_FROM_MANIFEST}" == "true" ]] || is_sunxi_platform 2>/dev/null || has_sunxi_bootloader "${DEVICE}" 2>/dev/null; then
+  log ""
+  log "  Allwinner (sunxi) platform detected — reinforcing bootloader on ${DEVICE}..."
+
+  local_uboot_dir=$(find_sunxi_uboot_dir 2>/dev/null || true)
+  if [[ -n "${local_uboot_dir}" ]]; then
+    write_sunxi_bootloader "${DEVICE}" "${local_uboot_dir}"
+    sync
+  else
+    # The image already has the bootloader stamped by create-golden-image.sh.
+    # Verify by checking for the eGON magic at sector 16.
+    egon_magic=$(dd if="${DEVICE}" bs=512 skip=16 count=1 status=none 2>/dev/null | head -c 12 | strings 2>/dev/null || true)
+    if echo "${egon_magic}" | grep -q "eGON.BT0"; then
+      log "  Bootloader already present in image (eGON.BT0 verified at sector 16)"
+    else
+      warn "No Allwinner firmware files found and no bootloader detected in image!"
+      warn "The device may not boot. Ensure boot0_sdcard.fex and boot_package.fex are available."
+    fi
+  fi
 fi
 
 log ""
