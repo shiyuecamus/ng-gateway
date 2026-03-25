@@ -1,4 +1,4 @@
-use super::common::{PageParams, TimeRangeParams};
+use super::common::{PageParams, SortParams, TimeRangeParams};
 use crate::{
     entities::point::ActiveModel,
     enums::common::{AccessMode, DataPointType, DataType},
@@ -38,6 +38,10 @@ pub struct PointPageParams {
     #[serde(flatten)]
     #[validate(nested)]
     pub time_range: TimeRangeParams,
+    /// Optional sort parameters
+    #[serde(flatten)]
+    #[validate(nested)]
+    pub sort: SortParams,
 }
 
 /// Point information used for read-only responses

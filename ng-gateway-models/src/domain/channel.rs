@@ -1,4 +1,4 @@
-use super::common::{PageParams, TimeRangeParams};
+use super::common::{PageParams, SortParams, TimeRangeParams};
 use crate::{
     entities::channel::ActiveModel,
     enums::common::{CollectionType, ReportType, Status},
@@ -22,6 +22,10 @@ pub struct ChannelPageParams {
     #[serde(flatten)]
     #[validate(nested)]
     pub time_range: TimeRangeParams,
+    /// Optional sort parameters
+    #[serde(flatten)]
+    #[validate(nested)]
+    pub sort: SortParams,
 }
 
 /// User information

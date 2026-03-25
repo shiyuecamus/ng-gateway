@@ -1,4 +1,4 @@
-use super::common::{PageParams, TimeRangeParams};
+use super::common::{PageParams, SortParams, TimeRangeParams};
 use crate::{entities::device::ActiveModel, enums::common::Status};
 use ng_gateway_sdk::{DriverError, FromValidatedRow, RowMappingContext, ValidatedRow};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, ModelTrait};
@@ -29,6 +29,10 @@ pub struct DevicePageParams {
     #[serde(flatten)]
     #[validate(nested)]
     pub time_range: TimeRangeParams,
+    /// Optional sort parameters
+    #[serde(flatten)]
+    #[validate(nested)]
+    pub sort: SortParams,
 }
 
 /// Device information used for read-only responses

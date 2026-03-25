@@ -1,7 +1,8 @@
 use crate::get_db_connection;
+use crate::sort::{apply_sort_with_tiebreaker, effective_order};
 use ng_gateway_error::StorageResult;
 use ng_gateway_models::{
-    domain::prelude::{DeviceInfo, DevicePageParams, PageResult},
+    domain::prelude::{DeviceInfo, DevicePageParams, PageResult, SortParams},
     entities::device::{
         ActiveModel as DeviceActiveModel, Column as DeviceColumn, Entity as Device,
         Model as DeviceModel,
@@ -13,6 +14,15 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use std::mem;
+
+/// Resolve `sortBy` field name to a device column.
+fn resolve_device_sort_column(sort_by: &str) -> Option<DeviceColumn> {
+    match sort_by {
+        "deviceName" => Some(DeviceColumn::DeviceName),
+        "id" => Some(DeviceColumn::Id),
+        _ => None,
+    }
+}
 
 /// Repository for device operations
 pub struct DeviceRepository;
@@ -200,7 +210,7 @@ impl DeviceRepository {
     pub async fn page(params: DevicePageParams) -> StorageResult<PageResult<DeviceInfo>> {
         let db = get_db_connection().await?;
 
-        let query = Device::find()
+        let filtered = Device::find()
             .apply_if(params.device_name.as_ref(), |q, device_name| {
                 q.filter(DeviceColumn::DeviceName.like(format!("%{device_name}%")))
             })
@@ -212,8 +222,19 @@ impl DeviceRepository {
             })
             .apply_if(params.status, |q, status| {
                 q.filter(DeviceColumn::Status.eq(status))
-            })
-            .order_by(DeviceColumn::Id, Order::Asc);
+            });
+
+        let query = if let Some(col) = params
+            .sort
+            .sort_by
+            .as_deref()
+            .and_then(resolve_device_sort_column)
+        {
+            let order = effective_order(&params.sort, Order::Asc);
+            apply_sort_with_tiebreaker(filtered, col, order, DeviceColumn::Id)
+        } else {
+            filtered.order_by(DeviceColumn::Id, Order::Asc)
+        };
 
         let (page, page_size) = (params.page.page.unwrap(), params.page.page_size.unwrap());
         let total = query.clone().count(&db).await?;
@@ -280,15 +301,25 @@ impl DeviceRepository {
         Ok(devices)
     }
 
-    /// Find devices by channel ID
-    pub async fn find_by_channel_id(channel_id: i32) -> StorageResult<Vec<DeviceInfo>> {
+    /// Find devices by channel ID with optional sort (defaults to deviceName asc).
+    pub async fn find_by_channel_id(
+        channel_id: i32,
+        sort: Option<&SortParams>,
+    ) -> StorageResult<Vec<DeviceInfo>> {
         let conn = get_db_connection().await?;
-        Ok(Device::find()
-            .filter(DeviceColumn::ChannelId.eq(channel_id))
-            .order_by_asc(DeviceColumn::Id)
-            .into_partial_model::<DeviceInfo>()
-            .all(&conn)
-            .await?)
+        let base = Device::find().filter(DeviceColumn::ChannelId.eq(channel_id));
+
+        let sorted = if let Some(col) = sort
+            .and_then(|s| s.sort_by.as_deref())
+            .and_then(resolve_device_sort_column)
+        {
+            let order = effective_order(sort.unwrap(), Order::Asc);
+            apply_sort_with_tiebreaker(base, col, order, DeviceColumn::Id)
+        } else {
+            apply_sort_with_tiebreaker(base, DeviceColumn::DeviceName, Order::Asc, DeviceColumn::Id)
+        };
+
+        Ok(sorted.into_partial_model::<DeviceInfo>().all(&conn).await?)
     }
 
     /// Find device IDs by channel ID (lightweight).

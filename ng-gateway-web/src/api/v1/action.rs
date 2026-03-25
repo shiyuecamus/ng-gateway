@@ -8,7 +8,7 @@ use ng_gateway_models::{
     constants::SYSTEM_ADMIN_ROLE_CODE,
     domain::prelude::{
         ActionInfo, ActionPageParams, BatchDeletePayload, ClearByDevicePayload, NewAction,
-        PageResult, PathId, UpdateAction,
+        PageResult, PathId, SortParams, UpdateAction,
     },
     enums::common::{EntityType, Operation},
     rbac::PermRule,
@@ -214,9 +214,12 @@ async fn page(params: Query<ActionPageParams>) -> WebResult<WebResponse<PageResu
 ///
 /// Returns
 /// - `WebResult<WebResponse<Vec<ActionInfo>>>`
-pub async fn list_by_device(path: Path<PathId>) -> WebResult<WebResponse<Vec<ActionInfo>>> {
+pub async fn list_by_device(
+    path: Path<PathId>,
+    sort: Query<SortParams>,
+) -> WebResult<WebResponse<Vec<ActionInfo>>> {
     Ok(WebResponse::ok(
-        ActionRepository::find_info_by_device_id(path.id).await?,
+        ActionRepository::find_info_by_device_id(path.id, Some(&sort)).await?,
     ))
 }
 

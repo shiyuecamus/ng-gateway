@@ -60,6 +60,48 @@ pub struct ClearByChannelPayload {
     pub channel_id: i32,
 }
 
+/// Sort direction for query results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    #[default]
+    Asc,
+    Desc,
+}
+
+impl SortOrder {
+    /// Convert to SeaORM `Order`.
+    #[inline]
+    pub fn into_sea_order(self) -> sea_orm::Order {
+        match self {
+            SortOrder::Asc => sea_orm::Order::Asc,
+            SortOrder::Desc => sea_orm::Order::Desc,
+        }
+    }
+}
+
+/// Optional sort parameters accepted by page and list endpoints.
+///
+/// Both fields are optional so callers can omit sorting entirely (the
+/// repository will fall back to its own default). When `sort_by` is
+/// provided without `sort_order`, ascending is assumed.
+#[derive(Debug, Clone, Default, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct SortParams {
+    /// Field name to sort by (validated per resource).
+    pub sort_by: Option<String>,
+    /// Sort direction. Defaults to `asc` when omitted.
+    pub sort_order: Option<SortOrder>,
+}
+
+impl SortParams {
+    /// Effective sort order, defaulting to ascending.
+    #[inline]
+    pub fn order(&self) -> SortOrder {
+        self.sort_order.unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PageResult<T> {
     pub pages: u32,

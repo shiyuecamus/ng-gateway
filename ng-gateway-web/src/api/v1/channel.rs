@@ -19,7 +19,7 @@ use ng_gateway_models::{
         ChangeChannelStatus, ChannelInfo, ChannelLogLevelView, ChannelLogOverrideView,
         ChannelPageParams, CommitResult, DeviceGroup, DeviceInfo, DeviceRef, ImportPreview,
         NewChannel, NewDevice, NewPoint, PageResult, PathId, PreparedDeviceCommit,
-        PreparedDevicePointsCommit, SetChannelLogLevelRequest, TtlRange, UpdateChannel,
+        PreparedDevicePointsCommit, SetChannelLogLevelRequest, SortParams, TtlRange, UpdateChannel,
     },
     enums::common::{EntityType, Operation},
     rbac::PermRule,
@@ -276,8 +276,11 @@ pub(crate) async fn init_rbac_rules(
 /// # Returns
 /// - `WebResult<WebResponse<Vec<ChannelInfo>>>`: List of all channels on success
 ///   or appropriate error response
-pub async fn list(state: web::Data<Arc<AppState>>) -> WebResult<WebResponse<Vec<ChannelInfo>>> {
-    let mut channels = ChannelRepository::find_all().await?;
+pub async fn list(
+    state: web::Data<Arc<AppState>>,
+    sort: Query<SortParams>,
+) -> WebResult<WebResponse<Vec<ChannelInfo>>> {
+    let mut channels = ChannelRepository::find_all(Some(&sort)).await?;
 
     // Enrich with connection states from runtime manager
     // Use trait method to get connection state without depending on concrete type
@@ -484,8 +487,11 @@ pub async fn change_status(
 /// # Returns
 /// - `WebResult<WebResponse<Vec<DeviceInfo>>>`: List of sub devices on success
 ///   or appropriate error response
-pub async fn get_sub_devices(params: Path<PathId>) -> WebResult<WebResponse<Vec<DeviceInfo>>> {
-    let devices = DeviceRepository::find_by_channel_id(params.id).await?;
+pub async fn get_sub_devices(
+    params: Path<PathId>,
+    sort: Query<SortParams>,
+) -> WebResult<WebResponse<Vec<DeviceInfo>>> {
+    let devices = DeviceRepository::find_by_channel_id(params.id, Some(&sort)).await?;
     Ok(WebResponse::ok(devices))
 }
 
@@ -1203,7 +1209,7 @@ pub async fn import_device_points_commit(
 
     // Fetch created devices to get their IDs
     // Note: We query by channel_id and match by device_name and device_type to get the correct IDs
-    let created_devices = DeviceRepository::find_by_channel_id(channel.id).await?;
+    let created_devices = DeviceRepository::find_by_channel_id(channel.id, None).await?;
 
     // Map device names to device IDs
     // Match by both device_name and device_type to handle potential duplicates

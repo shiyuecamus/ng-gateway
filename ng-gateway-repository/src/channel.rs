@@ -1,8 +1,9 @@
 use crate::get_db_connection;
+use crate::sort::{apply_sort_with_tiebreaker, effective_order};
 use crate::{ActionRepository, DeviceRepository, PointRepository};
 use ng_gateway_error::{storage::StorageError, StorageResult};
 use ng_gateway_models::{
-    domain::prelude::{ChannelInfo, ChannelPageParams, PageResult},
+    domain::prelude::{ChannelInfo, ChannelPageParams, PageResult, SortParams},
     entities::prelude::{
         Channel, ChannelActiveModel, ChannelColumn, ChannelModel, Device, DeviceModel, Driver,
     },
@@ -13,6 +14,15 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use sea_orm::{TransactionError, TransactionTrait};
+
+/// Resolve `sortBy` field name to a channel column.
+fn resolve_channel_sort_column(sort_by: &str) -> Option<ChannelColumn> {
+    match sort_by {
+        "name" => Some(ChannelColumn::Name),
+        "id" => Some(ChannelColumn::Id),
+        _ => None,
+    }
+}
 
 /// Repository for channel operations
 pub struct ChannelRepository;
@@ -96,14 +106,25 @@ impl ChannelRepository {
     pub async fn page(params: ChannelPageParams) -> StorageResult<PageResult<ChannelInfo>> {
         let db = get_db_connection().await?;
 
-        let base = Channel::find()
+        let filtered = Channel::find()
             .apply_if(params.name.as_ref(), |q, name| {
                 q.filter(ChannelColumn::Name.like(format!("%{name}%")))
             })
             .apply_if(params.status, |q, status| {
                 q.filter(ChannelColumn::Status.eq(status))
-            })
-            .order_by(ChannelColumn::Id, Order::Asc);
+            });
+
+        let base = if let Some(col) = params
+            .sort
+            .sort_by
+            .as_deref()
+            .and_then(resolve_channel_sort_column)
+        {
+            let order = effective_order(&params.sort, Order::Asc);
+            apply_sort_with_tiebreaker(filtered, col, order, ChannelColumn::Id)
+        } else {
+            filtered.order_by(ChannelColumn::Id, Order::Asc)
+        };
 
         let (page, page_size) = (params.page.page.unwrap(), params.page.page_size.unwrap());
         let total = base.clone().count(&db).await?;
@@ -170,10 +191,11 @@ impl ChannelRepository {
             .await?)
     }
 
-    /// Find all channels
-    pub async fn find_all() -> StorageResult<Vec<ChannelInfo>> {
+    /// Find all channels with optional sort (defaults to name asc).
+    pub async fn find_all(sort: Option<&SortParams>) -> StorageResult<Vec<ChannelInfo>> {
         let db = get_db_connection().await?;
-        Ok(Channel::find()
+
+        let query = Channel::find()
             .left_join(Driver)
             .select_only()
             .column_as(ChannelColumn::Id, "id")
@@ -188,10 +210,19 @@ impl ChannelRepository {
             .column_as(ChannelColumn::ReportType, "report_type")
             .column_as(ChannelColumn::Status, "status")
             .column_as(ChannelColumn::ConnectionPolicy, "connection_policy")
-            .column_as(ChannelColumn::DriverConfig, "driver_config")
-            .into_model::<ChannelInfo>()
-            .all(&db)
-            .await?)
+            .column_as(ChannelColumn::DriverConfig, "driver_config");
+
+        let sorted = if let Some(col) = sort
+            .and_then(|s| s.sort_by.as_deref())
+            .and_then(resolve_channel_sort_column)
+        {
+            let order = effective_order(sort.unwrap(), Order::Asc);
+            apply_sort_with_tiebreaker(query, col, order, ChannelColumn::Id)
+        } else {
+            apply_sort_with_tiebreaker(query, ChannelColumn::Name, Order::Asc, ChannelColumn::Id)
+        };
+
+        Ok(sorted.into_model::<ChannelInfo>().all(&db).await?)
     }
 
     /// Find channels by driver ID

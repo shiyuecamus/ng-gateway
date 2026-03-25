@@ -10,12 +10,12 @@
 use super::{DeviceInstance, NGSouthwardManager};
 use ng_gateway_error::{NGError, NGResult};
 use ng_gateway_models::entities::prelude::{ActionModel, DeviceModel, PointModel};
-use ng_gateway_sdk::{RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimePoint, Status};
+use ng_gateway_sdk::{Driver, RuntimeAction, RuntimeDelta, RuntimeDevice, RuntimePoint, Status};
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
     sync::Arc,
 };
+use tokio::sync::broadcast;
 use tracing::Instrument;
 
 impl NGSouthwardManager {
@@ -109,8 +109,14 @@ impl NGSouthwardManager {
         );
         tokio::spawn(
             async move {
-                if let Err(e) = driver.apply_runtime_delta(delta).await {
-                    tracing::error!(error = %e, "Failed to apply runtime delta");
+                match driver.apply_runtime_delta(delta).await {
+                    Ok(()) => {}
+                    Err(e) if e.is_unreachable() => {
+                        tracing::debug!(error = %e, "Driver unreachable, status delta skipped");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to apply runtime delta");
+                    }
                 }
             }
             .instrument(span),
@@ -204,12 +210,7 @@ impl NGSouthwardManager {
                 removed: Vec::new(),
                 status_changed: Vec::new(),
             },
-            |delta| async {
-                driver
-                    .apply_runtime_delta(delta)
-                    .await
-                    .map_err(|e| NGError::DriverError(e.to_string()))
-            },
+            DeltaSink::new(&driver, channel_id),
             |rec| {
                 for id in rec.added_ids.iter().copied() {
                     self.runtime
@@ -349,12 +350,7 @@ impl NGSouthwardManager {
                 removed: Vec::new(),
                 status_changed: Vec::new(),
             },
-            |delta| async {
-                driver
-                    .apply_runtime_delta(delta)
-                    .await
-                    .map_err(|e| NGError::DriverError(e.to_string()))
-            },
+            DeltaSink::new(&driver, channel_id),
             |rec| {
                 // Revert: remove added; restore updated snapshots and mappings.
                 for id in rec.added_ids.into_iter() {
@@ -494,16 +490,7 @@ impl NGSouthwardManager {
                     status_changed: Vec::new(),
                 })
             },
-            |maybe_delta| async {
-                if let Some(delta) = maybe_delta {
-                    driver
-                        .apply_runtime_delta(delta)
-                        .await
-                        .map_err(|e| NGError::DriverError(e.to_string()))
-                } else {
-                    Ok(())
-                }
-            },
+            DeltaSink::new(&driver, channel_id),
             |rec| {
                 // Revert: restore devices and indexes best-effort.
                 for (id, inst) in rec.removed_devices.into_iter() {
@@ -539,7 +526,7 @@ impl NGSouthwardManager {
         }
 
         // Snapshot factory and device/driver.
-        let (factory, _channel_id) = match self
+        let (factory, channel_id) = match self
             .runtime
             .index
             .snapshot_driver_factory_for_device(device_id)
@@ -604,13 +591,7 @@ impl NGSouthwardManager {
                     removed: Vec::new(),
                 }
             },
-            |delta| async {
-                self.broadcast_runtime_delta(delta.clone());
-                driver
-                    .apply_runtime_delta(delta)
-                    .await
-                    .map_err(|e| NGError::DriverError(e.to_string()))
-            },
+            DeltaSink::with_broadcast(&driver, channel_id, &self.runtime.index.runtime_delta_tx),
             |rec| {
                 self.runtime.index.mutate_device_points(device_id, |v| {
                     v.retain(|p| !rec.added_ids.iter().any(|id| *id == p.id()))
@@ -634,7 +615,7 @@ impl NGSouthwardManager {
         }
 
         // Snapshot channel_id and factory via helper.
-        let (factory, _channel_id) = match self
+        let (factory, channel_id) = match self
             .runtime
             .index
             .snapshot_driver_factory_for_device(device_id)
@@ -718,13 +699,7 @@ impl NGSouthwardManager {
                     removed: Vec::new(),
                 }
             },
-            |delta| async {
-                self.broadcast_runtime_delta(delta.clone());
-                driver
-                    .apply_runtime_delta(delta)
-                    .await
-                    .map_err(|e| NGError::DriverError(e.to_string()))
-            },
+            DeltaSink::with_broadcast(&driver, channel_id, &self.runtime.index.runtime_delta_tx),
             |rec| {
                 let replaced_old = rec.replaced_old.clone();
                 self.runtime
@@ -764,10 +739,11 @@ impl NGSouthwardManager {
         // Convert ids to a set to avoid O(n*m) scans when removing many points.
         let point_id_set: HashSet<i32> = point_ids.iter().copied().collect();
 
-        let (device, driver, _) = match self.runtime.index.snapshot_device_and_driver(device_id) {
-            Some(v) => v,
-            None => return Ok(()),
-        };
+        let (device, driver, channel_id) =
+            match self.runtime.index.snapshot_device_and_driver(device_id) {
+                Some(v) => v,
+                None => return Ok(()),
+            };
         let channel_name = self
             .get_channel(device.channel_id())
             .map(|c| c.config.name().to_string())
@@ -811,17 +787,7 @@ impl NGSouthwardManager {
                     removed,
                 })
             },
-            |maybe_delta| async {
-                if let Some(delta) = maybe_delta {
-                    self.broadcast_runtime_delta(delta.clone());
-                    driver
-                        .apply_runtime_delta(delta)
-                        .await
-                        .map_err(|e| NGError::DriverError(e.to_string()))
-                } else {
-                    Ok(())
-                }
-            },
+            DeltaSink::with_broadcast(&driver, channel_id, &self.runtime.index.runtime_delta_tx),
             |rec| {
                 if !rec.removed.is_empty() {
                     self.runtime
@@ -858,7 +824,7 @@ impl NGSouthwardManager {
         }
 
         // Snapshot factory via helper.
-        let (factory, _channel_id) = match self
+        let (factory, channel_id) = match self
             .runtime
             .index
             .snapshot_driver_factory_for_device(device_id)
@@ -913,12 +879,7 @@ impl NGSouthwardManager {
                 updated: Vec::new(),
                 removed: Vec::new(),
             },
-            |delta| async {
-                driver
-                    .apply_runtime_delta(delta)
-                    .await
-                    .map_err(|e| NGError::DriverError(e.to_string()))
-            },
+            DeltaSink::with_broadcast(&driver, channel_id, &self.runtime.index.runtime_delta_tx),
             |rec| {
                 self.runtime.index.mutate_device_actions(device_id, |v| {
                     v.retain(|a| !rec.added_ids.iter().any(|id| *id == a.id()))
@@ -935,7 +896,7 @@ impl NGSouthwardManager {
         }
 
         // Snapshot factory via helper.
-        let (factory, _channel_id) = match self
+        let (factory, channel_id) = match self
             .runtime
             .index
             .snapshot_driver_factory_for_device(device_id)
@@ -1007,12 +968,7 @@ impl NGSouthwardManager {
                 updated: rec.updated.clone(),
                 removed: Vec::new(),
             },
-            |delta| async {
-                driver
-                    .apply_runtime_delta(delta)
-                    .await
-                    .map_err(|e| NGError::DriverError(e.to_string()))
-            },
+            DeltaSink::with_broadcast(&driver, channel_id, &self.runtime.index.runtime_delta_tx),
             |rec| {
                 self.runtime
                     .index
@@ -1044,10 +1000,11 @@ impl NGSouthwardManager {
             removed: Vec<Arc<dyn RuntimeAction>>,
         }
 
-        let (device, driver, _) = match self.runtime.index.snapshot_device_and_driver(device_id) {
-            Some(v) => v,
-            None => return Ok(()),
-        };
+        let (device, driver, channel_id) =
+            match self.runtime.index.snapshot_device_and_driver(device_id) {
+                Some(v) => v,
+                None => return Ok(()),
+            };
 
         let result = apply_with_revert(
             || {
@@ -1079,16 +1036,7 @@ impl NGSouthwardManager {
                     removed: rec.removed.clone(),
                 })
             },
-            |maybe_delta| async {
-                if let Some(delta) = maybe_delta {
-                    driver
-                        .apply_runtime_delta(delta)
-                        .await
-                        .map_err(|e| NGError::DriverError(e.to_string()))
-                } else {
-                    Ok(())
-                }
-            },
+            DeltaSink::with_broadcast(&driver, channel_id, &self.runtime.index.runtime_delta_tx),
             |rec| {
                 if !rec.removed.is_empty() {
                     self.runtime
@@ -1111,25 +1059,123 @@ impl NGSouthwardManager {
     }
 }
 
-/// Execute a memory change followed by an async delta application.
-/// If the delta application fails, revert the in-memory change using the provided revert function.
-pub(crate) async fn apply_with_revert<R, T, Fut, BuildFn, ApplyFn, RevertFn>(
+// ---------------------------------------------------------------------------
+// Delta delivery infrastructure
+// ---------------------------------------------------------------------------
+
+/// Destination for `RuntimeDelta` delivery after an in-memory mutation.
+///
+/// Encapsulates the driver handle, channel id, and an optional broadcast sender.
+/// This eliminates per-call-site boilerplate: callers construct a `DeltaSink` once
+/// and pass it to `apply_with_revert`, which handles broadcast + best-effort driver
+/// notification + unreachable tolerance uniformly.
+struct DeltaSink<'a> {
+    driver: &'a Arc<dyn Driver>,
+    channel_id: i32,
+    broadcast_tx: Option<&'a broadcast::Sender<RuntimeDelta>>,
+}
+
+impl<'a> DeltaSink<'a> {
+    /// Driver-only sink (devices mutations that don't need northward broadcast).
+    #[inline]
+    fn new(driver: &'a Arc<dyn Driver>, channel_id: i32) -> Self {
+        Self {
+            driver,
+            channel_id,
+            broadcast_tx: None,
+        }
+    }
+
+    /// Driver + northward broadcast sink (points and actions mutations).
+    #[inline]
+    fn with_broadcast(
+        driver: &'a Arc<dyn Driver>,
+        channel_id: i32,
+        broadcast_tx: &'a broadcast::Sender<RuntimeDelta>,
+    ) -> Self {
+        Self {
+            driver,
+            channel_id,
+            broadcast_tx: Some(broadcast_tx),
+        }
+    }
+
+    /// Deliver a delta: broadcast to northward subscribers, then send to the driver.
+    ///
+    /// `DriverError::Unreachable` (mailbox closed / runtime stopped) is treated as
+    /// non-fatal — the in-memory mutation stands and the driver will pick up the full
+    /// state on its next start.
+    async fn deliver(&self, delta: RuntimeDelta) -> NGResult<()> {
+        if let Some(tx) = self.broadcast_tx {
+            let _ = tx.send(delta.clone());
+        }
+        match self.driver.apply_runtime_delta(delta).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_unreachable() => {
+                tracing::debug!(
+                    channel_id = self.channel_id,
+                    error = %e,
+                    "Driver unreachable, runtime delta deferred to next start",
+                );
+                Ok(())
+            }
+            Err(e) => Err(NGError::DriverError(e.to_string())),
+        }
+    }
+}
+
+/// Execute a memory change, build a delta, deliver it, and revert on failure.
+///
+/// # Type parameters
+/// - `R`: record type produced by the memory mutation (carries revert data).
+/// - `T`: delta payload type — either `RuntimeDelta` or `Option<RuntimeDelta>`.
+///   When `Option`, a `None` payload skips delivery entirely.
+///
+/// # Flow
+/// 1. `apply_mem()` — mutate in-memory indexes, return a record.
+/// 2. `build(&record)` — construct the delta payload from the record.
+/// 3. `sink.deliver(payload)` — broadcast + send to driver (best-effort for unreachable).
+/// 4. On error → `revert_mem(record)` rolls back the in-memory changes.
+async fn apply_with_revert<R, T, BuildFn, RevertFn>(
     apply_mem: impl FnOnce() -> R,
     build: BuildFn,
-    apply_delta: ApplyFn,
+    sink: DeltaSink<'_>,
     revert_mem: RevertFn,
 ) -> NGResult<()>
 where
+    T: IntoDelta,
     BuildFn: FnOnce(&R) -> T,
-    ApplyFn: FnOnce(T) -> Fut,
-    Fut: Future<Output = NGResult<()>>,
     RevertFn: FnOnce(R),
 {
     let record = apply_mem();
     let payload = build(&record);
-    if let Err(e) = apply_delta(payload).await {
-        revert_mem(record);
-        return Err(e);
+    if let Some(delta) = payload.into_delta() {
+        if let Err(e) = sink.deliver(delta).await {
+            revert_mem(record);
+            return Err(e);
+        }
     }
     Ok(())
+}
+
+/// Trait to unify `RuntimeDelta` and `Option<RuntimeDelta>` as build outputs.
+///
+/// This lets `apply_with_revert` accept both forms without requiring callers to
+/// wrap every non-optional delta in `Some(...)`.
+trait IntoDelta {
+    fn into_delta(self) -> Option<RuntimeDelta>;
+}
+
+impl IntoDelta for RuntimeDelta {
+    #[inline]
+    fn into_delta(self) -> Option<RuntimeDelta> {
+        Some(self)
+    }
+}
+
+impl IntoDelta for Option<RuntimeDelta> {
+    #[inline]
+    fn into_delta(self) -> Option<RuntimeDelta> {
+        self
+    }
 }

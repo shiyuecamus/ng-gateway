@@ -13,6 +13,7 @@ pub use crate::domain::{
     channel::{ChangeChannelStatus, ChannelInfo, ChannelPageParams, NewChannel, UpdateChannel},
     common::{
         BatchDeletePayload, ClearByChannelPayload, ClearByDevicePayload, PageParams, PageResult,
+        SortOrder, SortParams,
     },
     credentials::{NewCredentials, UpdateCredentials},
     device::{ChangeDeviceStatus, DeviceInfo, DevicePageParams, NewDevice, UpdateDevice},

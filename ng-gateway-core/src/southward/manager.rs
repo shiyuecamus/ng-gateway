@@ -19,7 +19,7 @@ use ng_gateway_models::{
     settings::Southward,
     SouthwardManager,
 };
-use ng_gateway_sdk::{ConnectionState, DeviceState, RuntimeAction, RuntimeDelta, RuntimePoint};
+use ng_gateway_sdk::{ConnectionState, DeviceState, RuntimeAction, RuntimePoint};
 use std::sync::{atomic::AtomicUsize, Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -73,12 +73,6 @@ impl NGSouthwardManager {
             .channels
             .get(&channel_id)
             .map(|e| Arc::clone(&e.prom))
-    }
-
-    #[inline]
-    pub(crate) fn broadcast_runtime_delta(&self, delta: RuntimeDelta) {
-        // Ignore send errors when there are no active receivers.
-        let _ = self.runtime.index.runtime_delta_tx.send(delta);
     }
 
     // === Thin delegates to `RuntimeIndex` (control-plane helpers) ===

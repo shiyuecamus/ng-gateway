@@ -1,4 +1,5 @@
 use crate::get_db_connection;
+use crate::sort::{apply_sort_with_tiebreaker, effective_order};
 use ng_gateway_error::StorageResult;
 use ng_gateway_models::{
     domain::prelude::{PageResult, PointInfo, PointPageParams},
@@ -16,6 +17,15 @@ use sea_orm::{
     EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use std::mem;
+
+/// Resolve `sortBy` field name to a point column.
+fn resolve_point_sort_column(sort_by: &str) -> Option<PointColumn> {
+    match sort_by {
+        "name" => Some(PointColumn::Name),
+        "id" => Some(PointColumn::Id),
+        _ => None,
+    }
+}
 
 /// Repository for point operations
 pub struct PointRepository;
@@ -507,7 +517,7 @@ impl PointRepository {
     pub async fn page(params: PointPageParams) -> StorageResult<PageResult<PointInfo>> {
         let db = get_db_connection().await?;
 
-        let query = Point::find()
+        let filtered = Point::find()
             .apply_if(params.name.as_ref(), |q, name| {
                 q.filter(PointColumn::Name.like(format!("%{name}%")))
             })
@@ -523,8 +533,19 @@ impl PointRepository {
             })
             .apply_if(params.access_mode, |q, am| {
                 q.filter(PointColumn::AccessMode.eq(am))
-            })
-            .order_by(PointColumn::Id, Order::Desc);
+            });
+
+        let query = if let Some(col) = params
+            .sort
+            .sort_by
+            .as_deref()
+            .and_then(resolve_point_sort_column)
+        {
+            let order = effective_order(&params.sort, Order::Asc);
+            apply_sort_with_tiebreaker(filtered, col, order, PointColumn::Id)
+        } else {
+            filtered.order_by(PointColumn::Id, Order::Desc)
+        };
 
         let (page, page_size) = (params.page.page.unwrap(), params.page.page_size.unwrap());
         let total = query.clone().count(&db).await?;

@@ -1,7 +1,8 @@
 use crate::get_db_connection;
+use crate::sort::{apply_sort_with_tiebreaker, effective_order};
 use ng_gateway_error::StorageResult;
 use ng_gateway_models::{
-    domain::prelude::{ActionInfo, ActionPageParams, PageResult},
+    domain::prelude::{ActionInfo, ActionPageParams, PageResult, SortParams},
     entities::{
         action::{
             ActiveModel as ActionActiveModel, Column as ActionColumn, Entity as Action,
@@ -15,6 +16,15 @@ use sea_orm::{
     EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use std::mem;
+
+/// Resolve `sortBy` field name to an action column.
+fn resolve_action_sort_column(sort_by: &str) -> Option<ActionColumn> {
+    match sort_by {
+        "name" => Some(ActionColumn::Name),
+        "id" => Some(ActionColumn::Id),
+        _ => None,
+    }
+}
 
 /// Repository for action operations
 pub struct ActionRepository;
@@ -266,15 +276,25 @@ impl ActionRepository {
             .await?)
     }
 
-    /// Find action infos by device ID (read-only info)
-    pub async fn find_info_by_device_id(device_id: i32) -> StorageResult<Vec<ActionInfo>> {
+    /// Find action infos by device ID with optional sort (defaults to name asc).
+    pub async fn find_info_by_device_id(
+        device_id: i32,
+        sort: Option<&SortParams>,
+    ) -> StorageResult<Vec<ActionInfo>> {
         let conn = get_db_connection().await?;
-        Ok(Action::find()
-            .filter(ActionColumn::DeviceId.eq(device_id))
-            .order_by_asc(ActionColumn::Id)
-            .into_partial_model::<ActionInfo>()
-            .all(&conn)
-            .await?)
+        let base = Action::find().filter(ActionColumn::DeviceId.eq(device_id));
+
+        let sorted = if let Some(col) = sort
+            .and_then(|s| s.sort_by.as_deref())
+            .and_then(resolve_action_sort_column)
+        {
+            let order = effective_order(sort.unwrap(), Order::Asc);
+            apply_sort_with_tiebreaker(base, col, order, ActionColumn::Id)
+        } else {
+            apply_sort_with_tiebreaker(base, ActionColumn::Name, Order::Asc, ActionColumn::Id)
+        };
+
+        Ok(sorted.into_partial_model::<ActionInfo>().all(&conn).await?)
     }
 
     /// Find actions by device IDs
@@ -430,7 +450,7 @@ impl ActionRepository {
     pub async fn page(params: ActionPageParams) -> StorageResult<PageResult<ActionInfo>> {
         let db = get_db_connection().await?;
 
-        let query = Action::find()
+        let filtered = Action::find()
             .apply_if(params.name.as_ref(), |q, name| {
                 q.filter(ActionColumn::Name.like(format!("%{name}%")))
             })
@@ -439,8 +459,19 @@ impl ActionRepository {
             })
             .apply_if(params.device_id, |q, device_id| {
                 q.filter(ActionColumn::DeviceId.eq(device_id))
-            })
-            .order_by(ActionColumn::Id, Order::Desc);
+            });
+
+        let query = if let Some(col) = params
+            .sort
+            .sort_by
+            .as_deref()
+            .and_then(resolve_action_sort_column)
+        {
+            let order = effective_order(&params.sort, Order::Asc);
+            apply_sort_with_tiebreaker(filtered, col, order, ActionColumn::Id)
+        } else {
+            filtered.order_by(ActionColumn::Id, Order::Desc)
+        };
 
         let (page, page_size) = (params.page.page.unwrap(), params.page.page_size.unwrap());
         let total = query.clone().count(&db).await?;

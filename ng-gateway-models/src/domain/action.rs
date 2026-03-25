@@ -1,4 +1,4 @@
-use super::common::{PageParams, TimeRangeParams};
+use super::common::{PageParams, SortParams, TimeRangeParams};
 use crate::entities::action::{ActiveModel, Parameter, Parameters};
 use crate::enums::common::DataType;
 use ng_gateway_sdk::{DriverError, FromValidatedRow, RowMappingContext, ValidatedRow};
@@ -27,6 +27,10 @@ pub struct ActionPageParams {
     #[serde(flatten)]
     #[validate(nested)]
     pub time_range: TimeRangeParams,
+    /// Optional sort parameters
+    #[serde(flatten)]
+    #[validate(nested)]
+    pub sort: SortParams,
 }
 
 /// Action information used for read-only responses

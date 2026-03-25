@@ -260,7 +260,7 @@ impl Driver for RuntimeAwareDriver {
         self.tx
             .send(DriverMessage::Collect { items, reply: tx })
             .await
-            .map_err(|_| DriverError::ExecutionError("Driver mailbox closed".to_string()))?;
+            .map_err(|_| DriverError::Unreachable("Driver mailbox closed".to_string()))?;
         rx.await
             .map_err(|_| DriverError::ExecutionError("Driver collect cancelled".to_string()))?
     }
@@ -286,7 +286,7 @@ impl Driver for RuntimeAwareDriver {
                 reply: tx,
             })
             .await
-            .map_err(|_| DriverError::ExecutionError("Driver mailbox closed".to_string()))?;
+            .map_err(|_| DriverError::Unreachable("Driver mailbox closed".to_string()))?;
         rx.await
             .map_err(|_| DriverError::ExecutionError("Driver execute cancelled".to_string()))?
     }
@@ -309,7 +309,7 @@ impl Driver for RuntimeAwareDriver {
                 reply: tx,
             })
             .await
-            .map_err(|_| DriverError::ExecutionError("Driver mailbox closed".to_string()))?;
+            .map_err(|_| DriverError::Unreachable("Driver mailbox closed".to_string()))?;
         rx.await
             .map_err(|_| DriverError::ExecutionError("Driver write cancelled".to_string()))?
     }
@@ -319,7 +319,7 @@ impl Driver for RuntimeAwareDriver {
         self.tx
             .send(DriverMessage::ApplyDelta { delta, reply: tx })
             .await
-            .map_err(|_| DriverError::ExecutionError("Driver mailbox closed".to_string()))?;
+            .map_err(|_| DriverError::Unreachable("Driver mailbox closed".to_string()))?;
         rx.await.map_err(|_| {
             DriverError::ExecutionError("Driver apply_runtime_delta cancelled".to_string())
         })?

@@ -34,6 +34,23 @@ pub enum DriverError {
     LoadError(String),
     #[error("Invalid entity: {0}")]
     InvalidEntity(String),
+    /// The driver actor is unreachable (mailbox closed / runtime stopped).
+    ///
+    /// Control-plane callers should treat this as a non-fatal condition:
+    /// the in-memory mutation is valid and will take effect once the driver
+    /// is restarted.
+    #[error("Driver unreachable: {0}")]
+    Unreachable(String),
+}
+
+impl DriverError {
+    /// Returns `true` when the error indicates that the driver actor is not
+    /// running (mailbox closed, runtime gone). Callers on control-plane paths
+    /// can use this to skip revert logic and treat the mutation as committed.
+    #[inline]
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self, DriverError::Unreachable(_))
+    }
 }
 
 /// Northward communication specific errors

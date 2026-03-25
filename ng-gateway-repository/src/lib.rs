@@ -18,6 +18,7 @@ pub mod plugin;
 pub mod point;
 pub mod relation;
 pub mod role;
+pub mod sort;
 pub mod user;
 
 pub use action::ActionRepository;
