@@ -18,6 +18,7 @@ use ng_gateway_sdk::{
     supervision::{RunOutcome, Session, SessionContext},
     NorthwardError, NorthwardRuntimeApi, RuntimeDelta,
 };
+use opcua::types::{DataValue, DateTime, StatusCode};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -156,7 +157,19 @@ async fn apply_batch(
                 arc
             }
         };
-        server.set_value(node_id.as_ref(), value_to_variant(&pv.value));
+        let variant = value_to_variant(&pv.value);
+        let dv = if let Some(src_ts) = pv.ts {
+            DataValue {
+                value: Some(variant),
+                source_timestamp: Some(DateTime::from(src_ts)),
+                server_timestamp: Some(DateTime::now()),
+                status: Some(StatusCode::Good),
+                ..Default::default()
+            }
+        } else {
+            DataValue::new_now(variant)
+        };
+        server.set_value(node_id.as_ref(), dv);
     }
 }
 

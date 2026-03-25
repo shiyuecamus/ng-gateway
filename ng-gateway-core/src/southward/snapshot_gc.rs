@@ -34,13 +34,13 @@ fn gc_device_snapshot_points(
     };
 
     snap.telemetry
-        .retain(|_, (ts, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
+        .retain(|_, (ts, _, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
     snap.client_attributes
-        .retain(|_, (ts, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
+        .retain(|_, (ts, _, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
     snap.shared_attributes
-        .retain(|_, (ts, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
+        .retain(|_, (ts, _, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
     snap.server_attributes
-        .retain(|_, (ts, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
+        .retain(|_, (ts, _, _)| now_ms.saturating_sub(*ts) <= ttl_ms);
 
     // Keep `point_key_by_id` best-effort: drop keys not present in any map.
     // This avoids unbounded growth when points are evicted.

@@ -546,12 +546,18 @@ impl SouthwardHandle for OpcUaHandle {
                 let Some(buf) = buffers.get_mut(&p.device_id) else {
                     continue;
                 };
+                let ts = dv
+                    .source_timestamp
+                    .as_ref()
+                    .or(dv.server_timestamp.as_ref())
+                    .map(|dt| dt.as_chrono());
                 buf.push(
                     p.r#type(),
                     PointValue {
                         point_id: p.id,
                         point_key: Arc::<str>::from(p.key.as_str()),
                         value,
+                        ts,
                     },
                 );
             }

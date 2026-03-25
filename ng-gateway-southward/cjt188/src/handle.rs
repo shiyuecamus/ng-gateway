@@ -245,6 +245,7 @@ impl SouthwardHandle for Cjt188Handle {
                     point_id: point.id,
                     point_key: Arc::<str>::from(point.key.as_str()),
                     value: v.clone(),
+                    ts: None,
                 };
                 match point.r#type {
                     DataPointType::Telemetry => {

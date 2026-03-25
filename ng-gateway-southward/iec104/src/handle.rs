@@ -8,7 +8,7 @@ use super::{
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use ng_gateway_sdk::{
     downcast_parameters, supervision::ReconnectHandle, AccessMode, AttributeData, CollectItem,
@@ -103,6 +103,53 @@ type PointsMap = HashMap<u32, PointMeta>;
 
 // Device values map: device_id -> (device_name, telemetry_values, attribute_values)
 type DeviceValuesMap = HashMap<i32, (Arc<str>, Vec<PointValue>, Vec<PointValue>)>;
+
+/// Diagnostic counters for a decoded ASDU.
+#[derive(Debug, Default)]
+struct ExtractStats {
+    /// Number of information objects decoded from the ASDU payload.
+    total_infos: usize,
+    /// Number of information objects that matched a configured `(type_id, ioa)` point.
+    matched_infos: usize,
+    /// A bounded sample of unmatched IOAs for quick troubleshooting.
+    unmatched_ioas: Vec<u16>,
+}
+
+#[inline]
+fn push_unmatched_ioa(stats: &mut ExtractStats, ioa: u16) {
+    if stats.unmatched_ioas.len() >= 8 || stats.unmatched_ioas.contains(&ioa) {
+        return;
+    }
+    stats.unmatched_ioas.push(ioa);
+}
+
+/// Push a decoded point value into the per-device buffer, respecting `DataPointType`.
+///
+/// This helper eliminates the duplicated `PointValue` construction + match-on-kind
+/// pattern across all IEC104 type branches.
+#[inline]
+fn push_point_value(
+    per_device: &mut DeviceValuesMap,
+    meta: &PointMeta,
+    value: NGValue,
+    ts: Option<DateTime<Utc>>,
+) {
+    let entry = per_device.entry(meta.device_id).or_insert((
+        Arc::clone(&meta.device_name),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let pv = PointValue {
+        point_id: meta.point_id,
+        point_key: Arc::clone(&meta.point_key),
+        value,
+        ts,
+    };
+    match meta.kind {
+        DataPointType::Telemetry => entry.1.push(pv),
+        DataPointType::Attribute => entry.2.push(pv),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CaSnapshot {
@@ -269,9 +316,41 @@ impl Iec104Handle {
     }
 
     #[inline]
-    fn extract_values_by_kind(points_map: &PointsMap, asdu: &mut Asdu) -> DeviceValuesMap {
-        // Returns: device_id -> (device_name, telemetry_values, attribute_values)
+    fn configured_ioas_for_type(points_map: &PointsMap, type_id: u8, limit: usize) -> Vec<u16> {
+        let mut ioas = points_map
+            .keys()
+            .filter_map(|key| {
+                let current_type_id = ((key >> 16) & 0xFF) as u8;
+                if current_type_id == type_id {
+                    Some((key & 0xFFFF) as u16)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        ioas.sort_unstable();
+        ioas.truncate(limit);
+        ioas
+    }
+
+    #[inline]
+    fn list_known_cas(&self) -> Vec<u16> {
+        let mut cas = self
+            .ca_to_snapshot
+            .iter()
+            .map(|entry| *entry.key())
+            .collect::<Vec<_>>();
+        cas.sort_unstable();
+        cas
+    }
+
+    #[inline]
+    fn extract_values_by_kind(
+        points_map: &PointsMap,
+        asdu: &mut Asdu,
+    ) -> (DeviceValuesMap, ExtractStats) {
         let mut per_device: DeviceValuesMap = HashMap::new();
+        let mut stats = ExtractStats::default();
         let type_id_byte = asdu.identifier.type_id as u8;
 
         match asdu.identifier.type_id {
@@ -279,35 +358,18 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_bit_string() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
-                            let v = info.bsi;
                             if let Some(value) = ValueCodec::coerce_u64_to_value(
-                                v as u64,
+                                info.bsi as u64,
                                 meta.data_type,
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    Arc::clone(&meta.device_name),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
@@ -316,35 +378,18 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_step_position() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
-                            let v = info.vti.value().get();
                             if let Some(value) = ValueCodec::coerce_i64_to_value(
-                                v.value() as i64,
+                                info.vti.value().get().value() as i64,
                                 meta.data_type,
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    Arc::clone(&meta.device_name),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
@@ -353,35 +398,18 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_single_point() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
-                            let v = info.siq.spi().get();
                             if let Some(value) = ValueCodec::coerce_bool_to_value(
-                                v,
+                                info.siq.spi().get(),
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    Arc::clone(&meta.device_name),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
@@ -390,6 +418,7 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_double_point() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
                             let v: u8 = info.diq.spi().get().value();
                             if let Some(value) = ValueCodec::coerce_u64_to_value(
@@ -397,28 +426,11 @@ impl Iec104Handle {
                                 meta.data_type,
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    meta.device_name.clone(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
@@ -427,35 +439,18 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_measured_value_float() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
-                            let v = info.r as f64;
                             if let Some(value) = ValueCodec::coerce_f64_to_value(
-                                v,
+                                info.r as f64,
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    meta.device_name.clone(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
@@ -464,35 +459,18 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_measured_value_normal() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
-                            let v = info.value();
                             if let Some(value) = ValueCodec::coerce_f64_to_value(
-                                v,
+                                info.value(),
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    meta.device_name.clone(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
@@ -501,35 +479,18 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_measured_value_scaled() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
-                            let v = info.sva as f64;
                             if let Some(value) = ValueCodec::coerce_f64_to_value(
-                                v,
+                                info.sva as f64,
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    meta.device_name.clone(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
@@ -538,42 +499,25 @@ impl Iec104Handle {
                 if let Ok(infos) = asdu.get_integrated_totals() {
                     for mut info in infos {
                         let ioa = info.ioa.addr().get();
+                        stats.total_infos += 1;
                         if let Some(meta) = points_map.get(&pack_key(ioa, type_id_byte)) {
-                            let v = info.bcr.value as i64;
                             if let Some(value) = ValueCodec::coerce_i64_to_value(
-                                v,
+                                info.bcr.value as i64,
                                 meta.logical_data_type(),
                                 &meta.transform,
                             ) {
-                                let entry = per_device.entry(meta.device_id).or_insert((
-                                    meta.device_name.clone(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ));
-                                match meta.kind {
-                                    DataPointType::Telemetry => {
-                                        entry.1.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                    DataPointType::Attribute => {
-                                        entry.2.push(PointValue {
-                                            point_id: meta.point_id,
-                                            point_key: Arc::clone(&meta.point_key),
-                                            value,
-                                        });
-                                    }
-                                }
+                                push_point_value(&mut per_device, meta, value, info.time);
+                                stats.matched_infos += 1;
                             }
+                        } else {
+                            push_unmatched_ioa(&mut stats, ioa);
                         }
                     }
                 }
             }
             _ => {}
         }
-        per_device
+        (per_device, stats)
     }
 
     /// Process a single incoming ASDU and publish northward data.
@@ -584,17 +528,54 @@ impl Iec104Handle {
     pub fn process_asdu(&self, asdu: &mut Asdu) {
         let start_ts = Instant::now();
         let ca = asdu.identifier.common_addr;
+        let type_id = asdu.identifier.type_id as u8;
         let Some(snapshot_swap) = self.ca_to_snapshot.get(&ca) else {
+            tracing::warn!(
+                channel_id = self.inner.id,
+                ca,
+                type_id,
+                known_cas = ?self.list_known_cas(),
+                "IEC104 received ASDU for unknown common address"
+            );
             return;
         };
         let snapshot = snapshot_swap.load();
-        let per_device = Self::extract_values_by_kind(&snapshot.points, asdu);
+        let (per_device, stats) = Self::extract_values_by_kind(&snapshot.points, asdu);
 
+        if stats.total_infos > 0 {
+            let configured_ioas = Self::configured_ioas_for_type(&snapshot.points, type_id, 8);
+            if stats.matched_infos == 0 {
+                tracing::warn!(
+                    channel_id = self.inner.id,
+                    ca,
+                    type_id,
+                    total_infos = stats.total_infos,
+                    unmatched_ioas = ?stats.unmatched_ioas,
+                    configured_ioas = ?configured_ioas,
+                    configured_point_count = snapshot.points.len(),
+                    "IEC104 ASDU decoded successfully but matched no configured points"
+                );
+            } else {
+                tracing::debug!(
+                    channel_id = self.inner.id,
+                    ca,
+                    type_id,
+                    total_infos = stats.total_infos,
+                    matched_infos = stats.matched_infos,
+                    unmatched_ioas = ?stats.unmatched_ioas,
+                    configured_ioas = ?configured_ioas,
+                    "IEC104 ASDU matched configured points"
+                );
+            }
+        }
+
+        let now = Utc::now();
         for (device_id, (device_name, telemetry_values, attribute_values)) in per_device {
             if !telemetry_values.is_empty() {
-                let data = NorthwardData::Telemetry(TelemetryData::new(
+                let data = NorthwardData::Telemetry(TelemetryData::new_with_ts(
                     device_id,
                     device_name.to_string(),
+                    now,
                     telemetry_values,
                 ));
                 self.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -618,9 +599,10 @@ impl Iec104Handle {
             }
 
             if !attribute_values.is_empty() {
-                let data = NorthwardData::Attributes(AttributeData::new_client_attributes(
+                let data = NorthwardData::Attributes(AttributeData::new_client_attributes_with_ts(
                     device_id,
                     device_name.to_string(),
+                    now,
                     attribute_values,
                 ));
                 self.total_requests.fetch_add(1, Ordering::Relaxed);

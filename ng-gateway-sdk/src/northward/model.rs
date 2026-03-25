@@ -254,12 +254,31 @@ pub struct TelemetryData {
 }
 
 impl TelemetryData {
-    /// Create new telemetry data
+    /// Create new telemetry data with `Utc::now()` as the batch timestamp.
     pub fn new(device_id: i32, device_name: impl Into<String>, values: Vec<PointValue>) -> Self {
         Self {
             device_id,
             device_name: device_name.into(),
             timestamp: Utc::now(),
+            values,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Create new telemetry data with an explicit batch timestamp.
+    ///
+    /// Use this when the caller already holds a meaningful timestamp (e.g. derived
+    /// from per-point source timestamps) to avoid an extra `Utc::now()` call.
+    pub fn new_with_ts(
+        device_id: i32,
+        device_name: impl Into<String>,
+        timestamp: DateTime<Utc>,
+        values: Vec<PointValue>,
+    ) -> Self {
+        Self {
+            device_id,
+            device_name: device_name.into(),
+            timestamp,
             values,
             metadata: HashMap::new(),
         }
@@ -299,7 +318,7 @@ pub struct AttributeData {
 }
 
 impl AttributeData {
-    /// Create new attribute data with client attributes
+    /// Create new attribute data with client attributes.
     pub fn new_client_attributes(
         device_id: i32,
         device_name: impl Into<String>,
@@ -315,7 +334,27 @@ impl AttributeData {
         }
     }
 
-    /// Create new attribute data with shared attributes
+    /// Create new attribute data with client attributes and an explicit batch timestamp.
+    ///
+    /// Use this when the caller already holds a meaningful timestamp (e.g. derived
+    /// from per-point source timestamps) to avoid an extra `Utc::now()` call.
+    pub fn new_client_attributes_with_ts(
+        device_id: i32,
+        device_name: impl Into<String>,
+        timestamp: DateTime<Utc>,
+        attributes: Vec<PointValue>,
+    ) -> Self {
+        Self {
+            device_id,
+            device_name: device_name.into(),
+            timestamp,
+            client_attributes: attributes,
+            shared_attributes: Vec::new(),
+            server_attributes: Vec::new(),
+        }
+    }
+
+    /// Create new attribute data with shared attributes.
     pub fn new_shared_attributes(
         device_id: i32,
         device_name: impl Into<String>,

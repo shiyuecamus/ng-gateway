@@ -5,7 +5,7 @@
 //! literals; instead it calls the helpers here.
 //!
 //! # Performance
-//! - The prefix is built once per publish batch and is reused for each chunk.
+//! - The device prefix is built once per publish batch and is reused for each chunk.
 //! - We intentionally write framing bytes directly to `Vec<u8>` for minimal overhead.
 //! - All escaping is delegated to `serde_json` to ensure correctness.
 
@@ -13,27 +13,32 @@ use ng_gateway_sdk::{NGValue, NorthwardError, NorthwardResult};
 use std::{io::Write as _, mem};
 use tracing::warn;
 
-// NOTE: keep framing bytes private to avoid leaking "magic values" into call sites.
+// === Telemetry framing constants ===
+//
+// Telemetry payload shape (per TB Gateway API):
+// `{ "<device>": [ {"ts":<ms>,"values":{ k:v, ... }}, {"ts":<ms2>,"values":{ ... }} ] }`
 
-/// Fixed bytes after the device key for telemetry.
-///
-/// Telemetry payload shape:
-/// `{ "<device>": [ { "ts": <ms>, "values": { ... } } ] }`
-const TELEMETRY_AFTER_DEVICE: &[u8] = br#":[{"ts":"#;
+/// Fixed bytes: opening `:[` after the device key string.
+const TEL_ARRAY_OPEN: &[u8] = b":[";
 
-/// Fixed bytes after the `ts` value for telemetry.
-const TELEMETRY_AFTER_TS: &[u8] = br#","values":{"#;
+/// Opening of a single ts-group entry: `{"ts":`.
+const TEL_ENTRY_OPEN: &[u8] = br#"{"ts":"#;
 
-/// Telemetry payload suffix bytes closing `values`, entry, array, and root object.
-const TELEMETRY_SUFFIX: &[u8] = br#"}}]}"#;
+/// Bytes between the ts value and the values object: `,"values":{`.
+const TEL_VALUES_OPEN: &[u8] = br#","values":{"#;
 
-/// Fixed bytes after the device key for attributes.
-///
-/// Attributes payload shape:
-/// `{ "<device>": { ... } }`
+/// Closing of a single ts-group entry: `}}`.
+const TEL_ENTRY_CLOSE: &[u8] = b"}}";
+
+/// Suffix closing the array and root object: `]}`.
+const TEL_SUFFIX: &[u8] = b"]}";
+
+// === Attributes framing constants ===
+
+/// Fixed bytes after the device key for attributes: `:{`.
 const ATTRIBUTES_AFTER_DEVICE: &[u8] = br#":{"#;
 
-/// Attributes payload suffix bytes closing the device object and root object.
+/// Attributes payload suffix: `}}`.
 const ATTRIBUTES_SUFFIX: &[u8] = br#"}}"#;
 
 /// Serialize a JSON string (including escaping) into the buffer.
@@ -46,9 +51,7 @@ pub fn write_json_str(buf: &mut Vec<u8>, s: &str) -> NorthwardResult<()> {
 
 /// Serialize an `NGValue` into JSON bytes without building a `serde_json::Value`.
 ///
-/// # Semantics
-/// Uses `NGValue`'s `Serialize` implementation (default semantics), aligned with
-/// `NGValue::to_json_value(NGValueJsonOptions::default())`.
+/// Uses `NGValue`'s `Serialize` implementation (default semantics).
 #[inline]
 pub fn write_ng_value(buf: &mut Vec<u8>, v: &NGValue) -> NorthwardResult<()> {
     serde_json::to_writer(buf, v).map_err(|e| NorthwardError::SerializationError {
@@ -56,30 +59,20 @@ pub fn write_ng_value(buf: &mut Vec<u8>, v: &NGValue) -> NorthwardResult<()> {
     })
 }
 
-/// Build telemetry prefix bytes into `buf`.
+/// Build the device-level prefix bytes into `buf`.
 ///
-/// Prefix:
-/// `{ "<device>":[{"ts":<ts_ms>,"values":{`
-pub fn build_telemetry_prefix(
-    buf: &mut Vec<u8>,
-    device_name: &str,
-    ts_ms: i64,
-) -> NorthwardResult<()> {
+/// Writes: `{"<device>":[`
+fn build_device_prefix(buf: &mut Vec<u8>, device_name: &str) -> NorthwardResult<()> {
     buf.clear();
     buf.push(b'{');
     write_json_str(buf, device_name)?;
-    buf.extend_from_slice(TELEMETRY_AFTER_DEVICE);
-    write!(buf, "{ts_ms}").map_err(|e| NorthwardError::SerializationError {
-        reason: e.to_string(),
-    })?;
-    buf.extend_from_slice(TELEMETRY_AFTER_TS);
+    buf.extend_from_slice(TEL_ARRAY_OPEN);
     Ok(())
 }
 
 /// Build attributes prefix bytes into `buf`.
 ///
-/// Prefix:
-/// `{ "<device>":{`
+/// Writes: `{"<device>":{`
 pub fn build_attributes_prefix(buf: &mut Vec<u8>, device_name: &str) -> NorthwardResult<()> {
     buf.clear();
     buf.push(b'{');
@@ -88,17 +81,41 @@ pub fn build_attributes_prefix(buf: &mut Vec<u8>, device_name: &str) -> Northwar
     Ok(())
 }
 
-/// Incremental chunker for ThingsBoard gateway telemetry payloads.
+/// Incremental chunker for ThingsBoard gateway telemetry payloads with per-point
+/// source timestamp support.
 ///
-/// It guarantees that every returned chunk is `<= max_payload_bytes`.
+/// # TB Gateway API format
+/// ```json
+/// { "<device>": [
+///   {"ts": 1483228800000, "values": {"temp": 22.5, "humidity": 80}},
+///   {"ts": 1483228801000, "values": {"pressure": 101.3}}
+/// ] }
+/// ```
+///
+/// Points with the same effective `ts` are grouped into the same `{"ts":..., "values":{...}}`
+/// entry. When the ts changes (or a chunk needs to be flushed due to size), the current
+/// entry is closed and a new one opened.
+///
+/// # Guarantees
+/// - Every returned chunk is `<= max_payload_bytes`.
+/// - Per-point order is preserved within each ts group.
 pub struct TelemetryChunker {
     max_payload_bytes: usize,
-    prefix: Vec<u8>,
+    /// Device-level prefix: `{"<device>":[`
+    device_prefix: Vec<u8>,
+    /// Current payload being built.
     payload: Vec<u8>,
+    /// Double-buffer for swap-based flushing.
     out: Vec<u8>,
+    /// Scratch buffers for key/value serialization.
     scratch_key: Vec<u8>,
     scratch_val: Vec<u8>,
-    wrote_any: bool,
+    /// Whether any key-value pair has been written in the **current ts-group entry**.
+    entry_has_values: bool,
+    /// Whether any ts-group entry has been written in the **current chunk**.
+    chunk_has_entries: bool,
+    /// The `ts_ms` of the currently open ts-group entry, or `None` if no entry is open.
+    current_ts: Option<i64>,
 }
 
 impl TelemetryChunker {
@@ -106,101 +123,182 @@ impl TelemetryChunker {
     ///
     /// # Arguments
     /// - `device_name`: sub-device name in TB gateway API.
-    /// - `ts_ms`: telemetry timestamp in milliseconds.
     /// - `max_payload_bytes`: hard cap for the serialized JSON bytes.
-    pub fn new(device_name: &str, ts_ms: i64, max_payload_bytes: usize) -> NorthwardResult<Self> {
+    pub fn new(device_name: &str, max_payload_bytes: usize) -> NorthwardResult<Self> {
         let max_payload_bytes = max_payload_bytes.max(256);
-        let mut prefix = Vec::with_capacity(128);
-        build_telemetry_prefix(&mut prefix, device_name, ts_ms)?;
+        let mut device_prefix = Vec::with_capacity(128);
+        build_device_prefix(&mut device_prefix, device_name)?;
 
-        if prefix.len() + TELEMETRY_SUFFIX.len() > max_payload_bytes {
+        let overhead = device_prefix.len()
+            + TEL_ENTRY_OPEN.len()
+            + 20 // max digits for i64 ts
+            + TEL_VALUES_OPEN.len()
+            + TEL_ENTRY_CLOSE.len()
+            + TEL_SUFFIX.len();
+        if overhead > max_payload_bytes {
             return Err(NorthwardError::ConfigurationError {
                 message: format!(
-                    "communication.max_payload_bytes too small: prefix({})+suffix({}) > {}",
-                    prefix.len(),
-                    TELEMETRY_SUFFIX.len(),
-                    max_payload_bytes
+                    "communication.max_payload_bytes too small: minimum overhead ({overhead}) > {max_payload_bytes}",
                 ),
             });
         }
 
         let mut payload = Vec::with_capacity(max_payload_bytes.min(64 * 1024));
-        payload.extend_from_slice(&prefix);
+        payload.extend_from_slice(&device_prefix);
         let out = Vec::with_capacity(payload.capacity());
 
         Ok(Self {
             max_payload_bytes,
-            prefix,
+            device_prefix,
             payload,
             out,
             scratch_key: Vec::with_capacity(64),
             scratch_val: Vec::with_capacity(64),
-            wrote_any: false,
+            entry_has_values: false,
+            chunk_has_entries: false,
+            current_ts: None,
         })
     }
 
-    /// Push one key/value pair.
+    /// Push one key/value pair with a per-point timestamp.
+    ///
+    /// `ts_ms` is the effective timestamp for this point. Points with the same `ts_ms`
+    /// are grouped into the same `{"ts":..., "values":{...}}` entry.
     ///
     /// Returns `Some(chunk_bytes)` when the current chunk was flushed due to size limit.
-    /// The current entry is always attempted to be added after flushing. If even a single
-    /// entry cannot fit, it is dropped with a warning.
-    pub fn push(&mut self, key: &str, value: &NGValue) -> NorthwardResult<Option<Vec<u8>>> {
+    pub fn push(
+        &mut self,
+        key: &str,
+        value: &NGValue,
+        ts_ms: i64,
+    ) -> NorthwardResult<Option<Vec<u8>>> {
+        // If ts changed from the current open entry, close the current entry first.
+        if self.current_ts != Some(ts_ms) && self.current_ts.is_some() {
+            self.close_entry();
+        }
+
+        // Pre-serialize key and value into scratch buffers.
         self.scratch_key.clear();
         self.scratch_val.clear();
         write_json_str(&mut self.scratch_key, key)?;
         write_ng_value(&mut self.scratch_val, value)?;
 
-        let comma_len = if self.wrote_any { 1 } else { 0 };
-        let entry_len = comma_len + self.scratch_key.len() + 1 + self.scratch_val.len();
+        // Calculate the space needed for this push.
+        let needs_new_entry = self.current_ts != Some(ts_ms);
+        let new_entry_overhead = if needs_new_entry {
+            let comma = if self.chunk_has_entries { 1 } else { 0 };
+            comma + TEL_ENTRY_OPEN.len() + 20 + TEL_VALUES_OPEN.len()
+        } else {
+            0
+        };
+        let comma_kv = if !needs_new_entry && self.entry_has_values {
+            1
+        } else {
+            0
+        };
+        let kv_len = comma_kv + self.scratch_key.len() + 1 + self.scratch_val.len();
+        let close_overhead = TEL_ENTRY_CLOSE.len() + TEL_SUFFIX.len();
+        let total_needed = new_entry_overhead + kv_len + close_overhead;
 
-        // If doesn't fit, flush current (if non-empty) and try again.
-        if self.payload.len() + entry_len + TELEMETRY_SUFFIX.len() > self.max_payload_bytes {
-            let flushed = if self.wrote_any {
-                self.payload.extend_from_slice(TELEMETRY_SUFFIX);
-                // Double-buffer swap: preserve payload capacity; publish buffer can be recycled.
-                mem::swap(&mut self.payload, &mut self.out);
-                let out = mem::take(&mut self.out);
-                self.payload.clear();
-                self.payload.extend_from_slice(&self.prefix);
-                self.wrote_any = false;
-                Some(out)
-            } else {
-                None
-            };
+        // If it doesn't fit, flush current chunk and try again.
+        if self.payload.len() + total_needed > self.max_payload_bytes {
+            let flushed = self.flush_chunk();
 
-            // Re-check for single-entry fit.
-            if self.payload.len() + entry_len + TELEMETRY_SUFFIX.len() > self.max_payload_bytes {
+            // Recalculate after flush (entry is always new after flush).
+            let fresh_entry_overhead = TEL_ENTRY_OPEN.len() + 20 + TEL_VALUES_OPEN.len();
+            let fresh_total = fresh_entry_overhead
+                + self.scratch_key.len()
+                + 1
+                + self.scratch_val.len()
+                + TEL_ENTRY_CLOSE.len()
+                + TEL_SUFFIX.len();
+
+            if self.payload.len() + fresh_total > self.max_payload_bytes {
+                warn!(
+                    key,
+                    entry_bytes = fresh_total,
+                    max_payload_bytes = self.max_payload_bytes,
+                    "ThingsBoard telemetry entry too large; dropping the point"
+                );
                 return Ok(flushed);
             }
 
-            // Add entry after flush (fallthrough to append).
-            if self.wrote_any {
-                self.payload.push(b',');
-            }
-            self.payload.extend_from_slice(&self.scratch_key);
-            self.payload.push(b':');
-            self.payload.extend_from_slice(&self.scratch_val);
-            self.wrote_any = true;
+            self.open_entry(ts_ms);
+            self.append_kv();
             return Ok(flushed);
         }
 
-        if self.wrote_any {
+        // Normal path: open new entry if needed, then append kv.
+        if needs_new_entry {
+            self.open_entry(ts_ms);
+        }
+        self.append_kv();
+        Ok(None)
+    }
+
+    /// Finish the current chunk (if any ts-group entries exist).
+    pub fn finish(mut self) -> Option<Vec<u8>> {
+        if !self.chunk_has_entries && !self.entry_has_values {
+            return None;
+        }
+        self.close_entry();
+        self.payload.extend_from_slice(TEL_SUFFIX);
+        Some(self.payload)
+    }
+
+    /// Open a new `{"ts":<ts_ms>,"values":{` entry.
+    fn open_entry(&mut self, ts_ms: i64) {
+        if self.chunk_has_entries {
+            self.payload.push(b',');
+        }
+        self.payload.extend_from_slice(TEL_ENTRY_OPEN);
+        write!(self.payload, "{ts_ms}").ok();
+        self.payload.extend_from_slice(TEL_VALUES_OPEN);
+        self.current_ts = Some(ts_ms);
+        self.entry_has_values = false;
+        self.chunk_has_entries = true;
+    }
+
+    /// Close the current `}}` entry.
+    fn close_entry(&mut self) {
+        if self.current_ts.is_some() {
+            self.payload.extend_from_slice(TEL_ENTRY_CLOSE);
+            self.current_ts = None;
+            self.entry_has_values = false;
+        }
+    }
+
+    /// Append the pre-serialized key:value from scratch buffers.
+    fn append_kv(&mut self) {
+        if self.entry_has_values {
             self.payload.push(b',');
         }
         self.payload.extend_from_slice(&self.scratch_key);
         self.payload.push(b':');
         self.payload.extend_from_slice(&self.scratch_val);
-        self.wrote_any = true;
-        Ok(None)
+        self.entry_has_values = true;
     }
 
-    /// Finish the current chunk (if any).
-    pub fn finish(mut self) -> Option<Vec<u8>> {
-        if !self.wrote_any {
+    /// Flush the current chunk and reset for a new one.
+    ///
+    /// Returns `Some(bytes)` if there was content to flush, `None` otherwise.
+    fn flush_chunk(&mut self) -> Option<Vec<u8>> {
+        if !self.chunk_has_entries && !self.entry_has_values {
             return None;
         }
-        self.payload.extend_from_slice(TELEMETRY_SUFFIX);
-        Some(self.payload)
+        self.close_entry();
+        self.payload.extend_from_slice(TEL_SUFFIX);
+
+        mem::swap(&mut self.payload, &mut self.out);
+        let out = mem::take(&mut self.out);
+
+        self.payload.clear();
+        self.payload.extend_from_slice(&self.device_prefix);
+        self.chunk_has_entries = false;
+        self.entry_has_values = false;
+        self.current_ts = None;
+
+        Some(out)
     }
 }
 
@@ -322,14 +420,15 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn telemetry_prefix_suffix_shapes_match_tb_gateway_api() {
-        let mut c = TelemetryChunker::new("Device A", 1483228800000, 10 * 1024).unwrap();
-        c.push("temperature", &NGValue::Int64(42)).unwrap();
-        c.push("humidity", &NGValue::Int64(80)).unwrap();
+    fn telemetry_single_ts_group() {
+        let mut c = TelemetryChunker::new("Device A", 10 * 1024).unwrap();
+        c.push("temperature", &NGValue::Int64(42), 1483228800000)
+            .unwrap();
+        c.push("humidity", &NGValue::Int64(80), 1483228800000)
+            .unwrap();
         let bytes = c.finish().unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(parsed.get("Device A").is_some());
         let arr = parsed.get("Device A").unwrap().as_array().unwrap();
         assert_eq!(arr.len(), 1);
         let entry = arr[0].as_object().unwrap();
@@ -337,6 +436,26 @@ mod tests {
         let values = entry.get("values").unwrap().as_object().unwrap();
         assert_eq!(values.get("temperature").unwrap().as_i64().unwrap(), 42);
         assert_eq!(values.get("humidity").unwrap().as_i64().unwrap(), 80);
+    }
+
+    #[test]
+    fn telemetry_multiple_ts_groups() {
+        let mut c = TelemetryChunker::new("Device A", 10 * 1024).unwrap();
+        c.push("temp", &NGValue::Float64(22.5), 1000).unwrap();
+        c.push("pressure", &NGValue::Float64(101.3), 2000).unwrap();
+        c.push("humidity", &NGValue::Int64(80), 2000).unwrap();
+        let bytes = c.finish().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let arr = parsed.get("Device A").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        assert_eq!(arr[0]["ts"].as_i64().unwrap(), 1000);
+        assert!(arr[0]["values"]["temp"].as_f64().is_some());
+
+        assert_eq!(arr[1]["ts"].as_i64().unwrap(), 2000);
+        assert!(arr[1]["values"]["pressure"].as_f64().is_some());
+        assert_eq!(arr[1]["values"]["humidity"].as_i64().unwrap(), 80);
     }
 
     #[test]

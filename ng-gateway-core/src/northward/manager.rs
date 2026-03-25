@@ -377,7 +377,7 @@ impl NGNorthwardManager {
                         let values = data_snapshot
                             .telemetry
                             .iter()
-                            .map(|(point_id, (_ts, value))| {
+                            .map(|(point_id, (_ts, value, src_ts))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)
@@ -387,6 +387,7 @@ impl NGNorthwardManager {
                                     point_id: *point_id,
                                     point_key,
                                     value: value.clone(),
+                                    ts: src_ts.and_then(chrono::DateTime::from_timestamp_millis),
                                 }
                             })
                             .collect::<Vec<PointValue>>();
@@ -432,7 +433,7 @@ impl NGNorthwardManager {
                         let client_attributes = data_snapshot
                             .client_attributes
                             .iter()
-                            .map(|(point_id, (_ts, value))| {
+                            .map(|(point_id, (_ts, value, src_ts))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)
@@ -442,13 +443,14 @@ impl NGNorthwardManager {
                                     point_id: *point_id,
                                     point_key,
                                     value: value.clone(),
+                                    ts: src_ts.and_then(chrono::DateTime::from_timestamp_millis),
                                 }
                             })
                             .collect::<Vec<PointValue>>();
                         let shared_attributes = data_snapshot
                             .shared_attributes
                             .iter()
-                            .map(|(point_id, (_ts, value))| {
+                            .map(|(point_id, (_ts, value, src_ts))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)
@@ -458,13 +460,14 @@ impl NGNorthwardManager {
                                     point_id: *point_id,
                                     point_key,
                                     value: value.clone(),
+                                    ts: src_ts.and_then(chrono::DateTime::from_timestamp_millis),
                                 }
                             })
                             .collect::<Vec<PointValue>>();
                         let server_attributes = data_snapshot
                             .server_attributes
                             .iter()
-                            .map(|(point_id, (_ts, value))| {
+                            .map(|(point_id, (_ts, value, src_ts))| {
                                 let point_key = data_snapshot
                                     .point_key_by_id
                                     .get(point_id)
@@ -474,6 +477,7 @@ impl NGNorthwardManager {
                                     point_id: *point_id,
                                     point_key,
                                     value: value.clone(),
+                                    ts: src_ts.and_then(chrono::DateTime::from_timestamp_millis),
                                 }
                             })
                             .collect::<Vec<PointValue>>();

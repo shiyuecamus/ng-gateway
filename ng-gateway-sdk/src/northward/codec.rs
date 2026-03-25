@@ -299,7 +299,8 @@ fn build_timeseries_rows(
     runtime: &dyn NorthwardRuntimeApi,
     include_meta: bool,
 ) -> Vec<TimeseriesRow> {
-    let mk_row = |ts_ms: i64, pv: &PointValue| -> TimeseriesRow {
+    let mk_row = |batch_ts_ms: i64, pv: &PointValue| -> TimeseriesRow {
+        let ts_ms = pv.ts.map(|t| t.timestamp_millis()).unwrap_or(batch_ts_ms);
         let data_type = if include_meta {
             runtime.get_point_meta(pv.point_id).map(|m| m.data_type)
         } else {
@@ -316,16 +317,16 @@ fn build_timeseries_rows(
 
     match data {
         NorthwardData::Telemetry(t) => {
-            let ts_ms = t.timestamp.timestamp_millis();
-            t.values.iter().map(|pv| mk_row(ts_ms, pv)).collect()
+            let batch_ts = t.timestamp.timestamp_millis();
+            t.values.iter().map(|pv| mk_row(batch_ts, pv)).collect()
         }
         NorthwardData::Attributes(a) => {
-            let ts_ms = a.timestamp.timestamp_millis();
+            let batch_ts = a.timestamp.timestamp_millis();
             a.client_attributes
                 .iter()
                 .chain(a.shared_attributes.iter())
                 .chain(a.server_attributes.iter())
-                .map(|pv| mk_row(ts_ms, pv))
+                .map(|pv| mk_row(batch_ts, pv))
                 .collect()
         }
         _ => vec![],

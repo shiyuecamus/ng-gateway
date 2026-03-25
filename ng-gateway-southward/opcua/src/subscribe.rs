@@ -1,6 +1,7 @@
 use super::capacity::SubscriptionCapacity;
 use crate::types::{MonitoredItemFailureKind, PointSnapshot};
 use arc_swap::ArcSwap;
+use chrono::{DateTime, Utc};
 use ng_gateway_sdk::{
     AttributeData, DataPointType, NorthwardData, NorthwardPublisher, PointValue, Status,
     TelemetryData,
@@ -548,6 +549,19 @@ impl SubscriptionActor {
     }
 }
 
+/// Extract source timestamp from an OPC UA `DataValue`.
+///
+/// Fallback chain: `source_timestamp` -> `server_timestamp` -> `Utc::now()`.
+/// OPC UA `DateTime` wraps `chrono::DateTime<Utc>` so `as_chrono()` is zero-cost.
+#[inline]
+fn extract_timestamp(dv: &DataValue) -> DateTime<Utc> {
+    dv.source_timestamp
+        .as_ref()
+        .or(dv.server_timestamp.as_ref())
+        .map(|dt| dt.as_chrono())
+        .unwrap_or_else(Utc::now)
+}
+
 #[inline]
 fn make_callbacks(
     publisher: Arc<dyn NorthwardPublisher>,
@@ -562,6 +576,7 @@ fn make_callbacks(
             let Some(variant) = dv.value.as_ref() else {
                 return;
             };
+            let ts = extract_timestamp(&dv);
             let node_id_ref = &item.item_to_monitor().node_id;
             let snap = snapshot.load();
             if let Some(meta) = snap.node_to_meta.get(node_id_ref) {
@@ -569,31 +584,30 @@ fn make_callbacks(
                     if let Some(dev_meta) = snap.devices.get(&meta.device_id) {
                         if dev_meta.status == Status::Enabled {
                             let device_name = dev_meta.name.clone();
+                            let pv = PointValue {
+                                point_id: meta.point.id,
+                                point_key: Arc::<str>::from(meta.point.key.as_str()),
+                                value: typed,
+                                ts: Some(ts),
+                            };
                             match meta.kind() {
                                 DataPointType::Telemetry => {
-                                    let data = NorthwardData::Telemetry(TelemetryData::new(
-                                        meta.device_id,
-                                        device_name,
-                                        vec![PointValue {
-                                            point_id: meta.point.id,
-                                            point_key: Arc::<str>::from(meta.point.key.as_str()),
-                                            value: typed,
-                                        }],
-                                    ));
+                                    let data =
+                                        NorthwardData::Telemetry(TelemetryData::new_with_ts(
+                                            meta.device_id,
+                                            device_name,
+                                            ts,
+                                            vec![pv],
+                                        ));
                                     let _ = publisher.try_publish(Arc::new(data));
                                 }
                                 DataPointType::Attribute => {
                                     let data = NorthwardData::Attributes(
-                                        AttributeData::new_client_attributes(
+                                        AttributeData::new_client_attributes_with_ts(
                                             meta.device_id,
                                             device_name,
-                                            vec![PointValue {
-                                                point_id: meta.point.id,
-                                                point_key: Arc::<str>::from(
-                                                    meta.point.key.as_str(),
-                                                ),
-                                                value: typed,
-                                            }],
+                                            ts,
+                                            vec![pv],
                                         ),
                                     );
                                     let _ = publisher.try_publish(Arc::new(data));

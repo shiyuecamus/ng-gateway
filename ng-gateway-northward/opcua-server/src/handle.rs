@@ -7,7 +7,7 @@
 use super::{
     config::{DropPolicy, OpcuaServerPluginConfig},
     node_cache::NodeCache,
-    queue::{UpdateBatch, UpdateKind, UpdateQueueTx},
+    queue::{UpdateBatch, UpdateQueueTx},
     write_dispatch::WriteDispatcher,
 };
 use async_trait::async_trait;
@@ -82,8 +82,6 @@ impl NorthwardHandle for OpcuaServerHandle {
             NorthwardData::Telemetry(t) => {
                 self.schedule_point_nodes(&t.values);
                 let batch = UpdateBatch {
-                    timestamp: t.timestamp,
-                    kind: UpdateKind::Telemetry,
                     values: Arc::from(t.values.clone().into_boxed_slice()),
                 };
                 self.enqueue_batch(batch).await?;
@@ -99,8 +97,6 @@ impl NorthwardHandle for OpcuaServerHandle {
                 all.extend_from_slice(&a.server_attributes);
                 self.schedule_point_nodes(&all);
                 let batch = UpdateBatch {
-                    timestamp: a.timestamp,
-                    kind: UpdateKind::Attributes,
                     values: Arc::from(all.into_boxed_slice()),
                 };
                 self.enqueue_batch(batch).await?;

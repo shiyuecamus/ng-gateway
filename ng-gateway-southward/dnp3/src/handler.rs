@@ -2,12 +2,13 @@ use crate::{
     codec::Dnp3Codec,
     types::{Dnp3PointGroup, PointMeta},
 };
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use dnp3::{
     app::{
         measurement::{
             AnalogInput, AnalogOutputStatus, BinaryInput, BinaryOutputStatus, Counter, DoubleBit,
-            DoubleBitBinaryInput, FrozenCounter,
+            DoubleBitBinaryInput, FrozenCounter, Time,
         },
         MaybeAsync, ResponseHeader,
     },
@@ -18,6 +19,17 @@ use ng_gateway_sdk::{
     TelemetryData,
 };
 use std::{collections::HashMap, sync::Arc};
+
+/// Convert DNP3 `Time` to `chrono::DateTime<Utc>`.
+///
+/// DNP3 `Timestamp` wraps a u64 millisecond count since Unix epoch.
+/// Both `Synchronized` and `Unsynchronized` variants carry the same
+/// raw value; we discard the sync-quality flag here because northward
+/// consumers care about the *value*, not the quality.
+#[inline]
+fn dnp3_time_to_chrono(time: &Time) -> Option<DateTime<Utc>> {
+    time.timestamp().to_datetime_utc()
+}
 
 pub struct Dnp3SoeHandler {
     pub points_map: Arc<DashMap<(Dnp3PointGroup, u16), PointMeta>>,
@@ -48,32 +60,31 @@ impl Dnp3SoeHandler {
         attribute_buffer: &mut HashMap<i32, (Arc<str>, Vec<PointValue>)>,
         group: Dnp3PointGroup,
         index: u16,
+        ts: Option<DateTime<Utc>>,
         f: F,
     ) where
         F: FnOnce(&PointMeta) -> Option<NGValue>,
     {
         if let Some(meta) = points_map.get(&(group, index)) {
             if let Some(value) = f(&meta) {
+                let pv = PointValue {
+                    point_id: meta.point_id,
+                    point_key: Arc::clone(&meta.key),
+                    value,
+                    ts,
+                };
                 match meta.kind {
                     DataPointType::Telemetry => {
                         let entry = telemetry_buffer
                             .entry(meta.device_id)
                             .or_insert((Arc::clone(&meta.device_name), Vec::new()));
-                        entry.1.push(PointValue {
-                            point_id: meta.point_id,
-                            point_key: Arc::clone(&meta.key),
-                            value,
-                        });
+                        entry.1.push(pv);
                     }
                     DataPointType::Attribute => {
                         let entry = attribute_buffer
                             .entry(meta.device_id)
                             .or_insert((Arc::clone(&meta.device_name), Vec::new()));
-                        entry.1.push(PointValue {
-                            point_id: meta.point_id,
-                            point_key: Arc::clone(&meta.key),
-                            value,
-                        });
+                        entry.1.push(pv);
                     }
                 }
             }
@@ -89,11 +100,13 @@ impl ReadHandler for Dnp3SoeHandler {
     }
 
     fn end_fragment(&mut self, _read_type: ReadType, _header: ResponseHeader) -> MaybeAsync<()> {
+        let now = Utc::now();
         for (device_id, (device_name, values)) in self.telemetry_buffer.drain() {
             if !values.is_empty() {
-                let data = NorthwardData::Telemetry(TelemetryData::new(
+                let data = NorthwardData::Telemetry(TelemetryData::new_with_ts(
                     device_id,
                     device_name.as_ref(),
+                    now,
                     values,
                 ));
                 let _ = self.publisher.try_publish(Arc::new(data));
@@ -101,9 +114,10 @@ impl ReadHandler for Dnp3SoeHandler {
         }
         for (device_id, (device_name, values)) in self.attribute_buffer.drain() {
             if !values.is_empty() {
-                let data = NorthwardData::Attributes(AttributeData::new_client_attributes(
+                let data = NorthwardData::Attributes(AttributeData::new_client_attributes_with_ts(
                     device_id,
                     device_name.as_ref(),
+                    now,
                     values,
                 ));
                 let _ = self.publisher.try_publish(Arc::new(data));
@@ -117,14 +131,15 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &mut dyn Iterator<Item = (BinaryInput, u16)>,
     ) {
-        // Group 1
         for (value, index) in iter {
+            let ts = value.time.as_ref().and_then(dnp3_time_to_chrono);
             Self::buffer_with_meta_lookup(
                 &self.points_map,
                 &mut self.telemetry_buffer,
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::BinaryInput,
                 index,
+                ts,
                 |meta| Dnp3Codec::bool_to_value(value.value, meta),
             );
         }
@@ -135,8 +150,8 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &mut dyn Iterator<Item = (DoubleBitBinaryInput, u16)>,
     ) {
-        // Group 3
         for (value, index) in iter {
+            let ts = value.time.as_ref().and_then(dnp3_time_to_chrono);
             let v = match value.value {
                 DoubleBit::Intermediate => 0,
                 DoubleBit::DeterminedOff => 1,
@@ -149,6 +164,7 @@ impl ReadHandler for Dnp3SoeHandler {
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::DoubleBitBinaryInput,
                 index,
+                ts,
                 |meta| Dnp3Codec::u64_to_value(v as u64, meta),
             );
         }
@@ -159,14 +175,15 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &mut dyn Iterator<Item = (BinaryOutputStatus, u16)>,
     ) {
-        // Group 10
         for (value, index) in iter {
+            let ts = value.time.as_ref().and_then(dnp3_time_to_chrono);
             Self::buffer_with_meta_lookup(
                 &self.points_map,
                 &mut self.telemetry_buffer,
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::BinaryOutput,
                 index,
+                ts,
                 |meta| Dnp3Codec::bool_to_value(value.value, meta),
             );
         }
@@ -177,14 +194,15 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &mut dyn Iterator<Item = (Counter, u16)>,
     ) {
-        // Group 20
         for (value, index) in iter {
+            let ts = value.time.as_ref().and_then(dnp3_time_to_chrono);
             Self::buffer_with_meta_lookup(
                 &self.points_map,
                 &mut self.telemetry_buffer,
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::Counter,
                 index,
+                ts,
                 |meta| Dnp3Codec::u64_to_value(value.value as u64, meta),
             );
         }
@@ -195,14 +213,15 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &mut dyn Iterator<Item = (FrozenCounter, u16)>,
     ) {
-        // Group 21
         for (value, index) in iter {
+            let ts = value.time.as_ref().and_then(dnp3_time_to_chrono);
             Self::buffer_with_meta_lookup(
                 &self.points_map,
                 &mut self.telemetry_buffer,
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::FrozenCounter,
                 index,
+                ts,
                 |meta| Dnp3Codec::u64_to_value(value.value as u64, meta),
             );
         }
@@ -213,14 +232,15 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &mut dyn Iterator<Item = (AnalogInput, u16)>,
     ) {
-        // Group 30
         for (value, index) in iter {
+            let ts = value.time.as_ref().and_then(dnp3_time_to_chrono);
             Self::buffer_with_meta_lookup(
                 &self.points_map,
                 &mut self.telemetry_buffer,
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::AnalogInput,
                 index,
+                ts,
                 |meta| Dnp3Codec::f64_to_value(value.value, meta),
             );
         }
@@ -231,14 +251,15 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &mut dyn Iterator<Item = (AnalogOutputStatus, u16)>,
     ) {
-        // Group 40
         for (value, index) in iter {
+            let ts = value.time.as_ref().and_then(dnp3_time_to_chrono);
             Self::buffer_with_meta_lookup(
                 &self.points_map,
                 &mut self.telemetry_buffer,
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::AnalogOutput,
                 index,
+                ts,
                 |meta| Dnp3Codec::f64_to_value(value.value, meta),
             );
         }
@@ -249,10 +270,6 @@ impl ReadHandler for Dnp3SoeHandler {
         _info: HeaderInfo,
         iter: &'a mut dyn Iterator<Item = (&'a [u8], u16)>,
     ) {
-        // Group 110 (Static) or 111 (Event)
-        // Note: DNP3 library doesn't distinguish group in this callback args,
-        // but typically OctetString is mapped to 110/111.
-        // We can use 110 as generic "Octet String" group for mapping.
         for (value, index) in iter {
             Self::buffer_with_meta_lookup(
                 &self.points_map,
@@ -260,6 +277,7 @@ impl ReadHandler for Dnp3SoeHandler {
                 &mut self.attribute_buffer,
                 Dnp3PointGroup::OctetString,
                 index,
+                None,
                 |meta| Dnp3Codec::octets_to_value(value, meta),
             );
         }

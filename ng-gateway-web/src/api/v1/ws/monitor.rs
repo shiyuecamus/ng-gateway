@@ -15,9 +15,10 @@ use actix_web::{web, Error as ActixError, HttpRequest, HttpResponse};
 use actix_ws::{Message as WsMessage, Session};
 use futures::StreamExt;
 use ng_gateway_core::southward::NGSouthwardManager;
+use ng_gateway_core::southward::PointSnapshotEntry;
 use ng_gateway_error::web::WebError;
 use ng_gateway_models::RealtimeMonitorHub;
-use ng_gateway_sdk::{NGValue, NGValueJsonOptions, NorthwardData};
+use ng_gateway_sdk::{NGValueJsonOptions, NorthwardData};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, mem, sync::Arc};
@@ -72,8 +73,8 @@ enum MonitorServerMessage {
     },
     /// Initial device snapshot.
     Snapshot {
-        #[serde(rename = "device")]
-        device: SnapshotDeviceInfo,
+        #[serde(rename = "meta")]
+        meta: MonitorDeviceMeta,
         #[serde(rename = "telemetry")]
         telemetry: HashMap<String, serde_json::Value>,
         #[serde(rename = "attributes")]
@@ -83,8 +84,8 @@ enum MonitorServerMessage {
     },
     /// Incremental update based on `NorthwardData`.
     Update {
-        #[serde(rename = "deviceId")]
-        device_id: i32,
+        #[serde(rename = "meta")]
+        meta: MonitorDeviceMeta,
         #[serde(rename = "dataType")]
         data_type: String,
         #[serde(skip_serializing_if = "Option::is_none", rename = "scope")]
@@ -110,10 +111,10 @@ enum MonitorServerMessage {
     },
 }
 
-/// Basic device info included in snapshot messages.
-#[derive(Debug, Serialize)]
+/// Basic device meta included in snapshot and update messages.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SnapshotDeviceInfo {
+struct MonitorDeviceMeta {
     id: i32,
     channel_id: i32,
     device_name: String,
@@ -168,6 +169,7 @@ impl ConnectionSubscriptions {
         &mut self,
         device_ids: Vec<i32>,
         hub: Arc<dyn RealtimeMonitorHub>,
+        southward: Arc<NGSouthwardManager>,
         session: Session,
     ) {
         self.clear();
@@ -177,6 +179,7 @@ impl ConnectionSubscriptions {
             let mut session_clone = session.clone();
             let cancel = CancellationToken::new();
             let child_token = cancel.child_token();
+            let channel_id = southward.get_device_channel_id(device_id).unwrap_or(0);
 
             tokio::spawn(async move {
                 // Batch updates to avoid flooding the UI with per-point frames.
@@ -195,6 +198,7 @@ impl ConnectionSubscriptions {
                 let mut attr_shared_buf: Map<String, Value> = Map::new();
                 let mut attr_server_buf: Map<String, Value> = Map::new();
                 let mut attr_ts: Option<String> = None;
+                let mut last_device_name = String::new();
 
                 loop {
                     tokio::select! {
@@ -208,7 +212,11 @@ impl ConnectionSubscriptions {
                                 let ts = telemetry_ts.take().unwrap_or_default();
 
                                 let msg = MonitorServerMessage::Update {
-                                    device_id,
+                                    meta: MonitorDeviceMeta {
+                                        id: device_id,
+                                        channel_id,
+                                        device_name: last_device_name.clone(),
+                                    },
                                     data_type: "telemetry".to_string(),
                                     scope: None,
                                     timestamp: ts,
@@ -243,7 +251,11 @@ impl ConnectionSubscriptions {
                                 ]));
 
                                 let msg = MonitorServerMessage::Update {
-                                    device_id,
+                                    meta: MonitorDeviceMeta {
+                                        id: device_id,
+                                        channel_id,
+                                        device_name: last_device_name.clone(),
+                                    },
                                     data_type: "attributes".to_string(),
                                     scope: None,
                                     timestamp: ts,
@@ -272,32 +284,54 @@ impl ConnectionSubscriptions {
                                 Ok(data) => {
                                     match data.as_ref() {
                                         NorthwardData::Telemetry(t) => {
+                                            last_device_name = t.device_name.clone();
                                             telemetry_ts = Some(t.timestamp.to_rfc3339());
                                             for pv in t.values.iter() {
+                                                let entry = if let Some(src_ts) = &pv.ts {
+                                                    json!({ "v": pv.value.to_json_value(opts), "ts": src_ts.to_rfc3339() })
+                                                } else {
+                                                    json!({ "v": pv.value.to_json_value(opts) })
+                                                };
                                                 telemetry_buf.insert(
                                                     pv.point_key.as_ref().to_string(),
-                                                    pv.value.to_json_value(opts),
+                                                    entry,
                                                 );
                                             }
                                         }
                                         NorthwardData::Attributes(a) => {
+                                            last_device_name = a.device_name.clone();
                                             attr_ts = Some(a.timestamp.to_rfc3339());
                                             for pv in a.client_attributes.iter() {
+                                                let entry = if let Some(src_ts) = &pv.ts {
+                                                    json!({ "v": pv.value.to_json_value(opts), "ts": src_ts.to_rfc3339() })
+                                                } else {
+                                                    json!({ "v": pv.value.to_json_value(opts) })
+                                                };
                                                 attr_client_buf.insert(
                                                     pv.point_key.as_ref().to_string(),
-                                                    pv.value.to_json_value(opts),
+                                                    entry,
                                                 );
                                             }
                                             for pv in a.shared_attributes.iter() {
+                                                let entry = if let Some(src_ts) = &pv.ts {
+                                                    json!({ "v": pv.value.to_json_value(opts), "ts": src_ts.to_rfc3339() })
+                                                } else {
+                                                    json!({ "v": pv.value.to_json_value(opts) })
+                                                };
                                                 attr_shared_buf.insert(
                                                     pv.point_key.as_ref().to_string(),
-                                                    pv.value.to_json_value(opts),
+                                                    entry,
                                                 );
                                             }
                                             for pv in a.server_attributes.iter() {
+                                                let entry = if let Some(src_ts) = &pv.ts {
+                                                    json!({ "v": pv.value.to_json_value(opts), "ts": src_ts.to_rfc3339() })
+                                                } else {
+                                                    json!({ "v": pv.value.to_json_value(opts) })
+                                                };
                                                 attr_server_buf.insert(
                                                     pv.point_key.as_ref().to_string(),
-                                                    pv.value.to_json_value(opts),
+                                                    entry,
                                                 );
                                             }
                                         }
@@ -395,6 +429,7 @@ async fn monitor_ws_loop(
                         subscriptions.replace_with(
                             next_devices.clone(),
                             Arc::clone(&monitor_hub),
+                            Arc::clone(&southward),
                             session.clone(),
                         );
                         subscribed_devices = next_devices.clone();
@@ -548,7 +583,7 @@ async fn send_device_snapshot(
     let channel_id = southward.get_device_channel_id(device_id).unwrap_or(0);
 
     let msg = MonitorServerMessage::Snapshot {
-        device: SnapshotDeviceInfo {
+        meta: MonitorDeviceMeta {
             id: snapshot.device_id,
             channel_id,
             device_name: snapshot.device_name.to_string(),
@@ -583,21 +618,31 @@ async fn send_device_snapshot(
 
 /// Convert an internal point-id keyed map into a JSON map keyed by `point_key` (fallback: `point_id`).
 ///
-/// This is used by the monitor WebSocket snapshot payload which is intentionally JSON-friendly.
+/// Each entry is encoded as `{ "v": value, "ts": "..." }` when a source timestamp
+/// is present, or `{ "v": value }` otherwise. This aligns with the Update message
+/// wire format so the frontend can uniformly handle both snapshot and incremental payloads.
 #[inline]
 fn point_map_to_json(
     point_key_by_id: &HashMap<i32, Arc<str>>,
-    input: &HashMap<i32, (u64, NGValue)>,
+    input: &HashMap<i32, PointSnapshotEntry>,
 ) -> HashMap<String, serde_json::Value> {
     let mut out = HashMap::with_capacity(input.len().saturating_mul(2));
     let opts = NGValueJsonOptions::default();
 
-    for (point_id, (_ts_ms, value)) in input.iter() {
+    for (point_id, (_ts_ms, value, src_ts)) in input.iter() {
         let key = point_key_by_id
             .get(point_id)
             .map(|k| k.as_ref().to_string())
             .unwrap_or(point_id.to_string());
-        out.insert(key, value.to_json_value(opts));
+        let entry = if let Some(epoch_ms) = src_ts {
+            match chrono::DateTime::<chrono::Utc>::from_timestamp_millis(*epoch_ms) {
+                Some(dt) => json!({ "v": value.to_json_value(opts), "ts": dt.to_rfc3339() }),
+                None => json!({ "v": value.to_json_value(opts) }),
+            }
+        } else {
+            json!({ "v": value.to_json_value(opts) })
+        };
+        out.insert(key, entry);
     }
 
     out

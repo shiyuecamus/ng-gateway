@@ -423,11 +423,14 @@ impl OpcuaServerRuntime {
         let _ = as_write.delete(&id, true);
     }
 
-    pub fn set_value(&self, node_id: &str, value: Variant) {
+    /// Update a variable node's value in the address space.
+    ///
+    /// Accepts a fully-formed `DataValue` so the caller can control
+    /// `source_timestamp` / `server_timestamp` semantics.
+    pub fn set_value(&self, node_id: &str, dv: DataValue) {
         let Ok(id) = NodeId::from_str(node_id) else {
             return;
         };
-        let dv = DataValue::new_now(value);
         let _ = self
             .node_manager
             .set_value(self.handle.subscriptions(), &id, None, dv);

@@ -579,6 +579,7 @@ impl SouthwardHandle for Dl645Handle {
                                     point_id: point.id,
                                     point_key: Arc::<str>::from(point.key.as_str()),
                                     value,
+                                    ts: None,
                                 }],
                             );
                             result.push(NorthwardData::Telemetry(data));
@@ -591,6 +592,7 @@ impl SouthwardHandle for Dl645Handle {
                                     point_id: point.id,
                                     point_key: Arc::<str>::from(point.key.as_str()),
                                     value,
+                                    ts: None,
                                 }],
                             );
                             result.push(NorthwardData::Attributes(data));

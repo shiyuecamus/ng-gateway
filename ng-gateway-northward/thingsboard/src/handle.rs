@@ -79,28 +79,27 @@ impl ThingsBoardHandle {
 
     /// Hot-path telemetry publisher (Gateway API) that enforces `max_payload_bytes`.
     ///
-    /// Payload shape:
-    /// `{ "<device>": [ { "ts": <ms>, "values": { k1:v1, k2:v2, ... } } ] }`
+    /// Payload shape (per-point ts grouping):
+    /// `{ "<device>": [ {"ts":<ms>,"values":{k1:v1,...}}, {"ts":<ms2>,"values":{...}} ] }`
     ///
-    /// # Performance notes (best practice)
-    /// - Single pass over point values.
-    /// - No backtracking / no repeated full-map serialization.
-    /// - Only per-point temporary serialization into a reusable scratch buffer.
-    /// - Uses `try_publish` (non-blocking) to avoid I/O on the AppActor worker.
+    /// Points with the same effective timestamp are grouped into a single
+    /// `{"ts":..., "values":{...}}` entry. Per-point source timestamps (`pv.ts`)
+    /// take precedence; `batch_ts_ms` is used as fallback when `pv.ts` is `None`.
     fn publish_telemetry_chunked(
         &self,
         topic: &str,
         device_name: &str,
-        ts_ms: i64,
+        batch_ts_ms: i64,
         point_values: &[ng_gateway_sdk::PointValue],
     ) -> NorthwardResult<()> {
         let qos = self.qos();
         let retain = self.retain();
         let max_bytes = self.max_payload_bytes();
 
-        let mut chunker = payload::TelemetryChunker::new(device_name, ts_ms, max_bytes)?;
+        let mut chunker = payload::TelemetryChunker::new(device_name, max_bytes)?;
         for pv in point_values.iter() {
-            if let Some(out) = chunker.push(pv.point_key.as_ref(), &pv.value)? {
+            let ts_ms = pv.ts.map(|t| t.timestamp_millis()).unwrap_or(batch_ts_ms);
+            if let Some(out) = chunker.push(pv.point_key.as_ref(), &pv.value, ts_ms)? {
                 self.client
                     .try_publish(topic, qos, retain, out)
                     .map_err(Self::map_publish_error)?;

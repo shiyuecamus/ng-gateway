@@ -1,6 +1,7 @@
 use crate::DataType;
 use base64::Engine as _;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::{borrow::Cow, sync::Arc};
 
@@ -1331,4 +1332,14 @@ pub struct PointValue {
     pub point_key: Arc<str>,
     /// Strongly-typed value.
     pub value: NGValue,
+    /// Source timestamp from the device/protocol layer.
+    ///
+    /// Represents the time the value was produced at the data source
+    /// (e.g. OPC UA `source_timestamp`, IEC 104 CP56Time2a, DNP3 event timestamp).
+    /// When present, northward plugins SHOULD prefer this over the enclosing
+    /// `TelemetryData.timestamp` for per-point time-series indexing.
+    ///
+    /// When `None`, consumers fall back to the enclosing message-level timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<DateTime<Utc>>,
 }

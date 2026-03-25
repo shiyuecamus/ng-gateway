@@ -1,6 +1,6 @@
 use super::model::{AttributeData, TelemetryData};
 use crate::{DataPointType, NorthwardData, PointValue};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 /// Per-business-device output buffers for building northward payloads.
@@ -48,19 +48,18 @@ impl DeviceBuffers {
         self.telemetry.is_empty() && self.attributes.is_empty()
     }
 
-    /// Convert these buffers into northward payload(s) with a stable timestamp.
+    /// Convert these buffers into northward payload(s) with a stable batch timestamp.
     ///
-    /// This will produce:
-    /// - `NorthwardData::Telemetry` if telemetry values exist
-    /// - `NorthwardData::Attributes` if attribute values exist
+    /// `timestamp` is the **message-level** timestamp representing when the gateway
+    /// processed this batch (typically `Utc::now()` at collection time). It is used by
+    /// northward consumers for envelope metadata, Kafka record timestamps, MQTT headers,
+    /// topic routing, etc.
     ///
-    /// If both exist, the device name is cloned once to satisfy ownership.
+    /// Per-point source timestamps (`PointValue.ts`) are preserved inside each
+    /// `PointValue` and consumed independently by northward plugins that support
+    /// per-point time-series indexing (e.g. ThingsBoard, OPC UA Server).
     #[inline]
-    pub fn into_northward(
-        self,
-        device_id: i32,
-        timestamp: chrono::DateTime<Utc>,
-    ) -> Vec<NorthwardData> {
+    pub fn into_northward(self, device_id: i32, timestamp: DateTime<Utc>) -> Vec<NorthwardData> {
         let DeviceBuffers {
             device_name,
             telemetry,

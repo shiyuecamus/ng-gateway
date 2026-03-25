@@ -154,6 +154,7 @@ impl SouthwardHandle for S7Handle {
                     point_id: p.id,
                     point_key: Arc::<str>::from(p.key.as_str()),
                     value,
+                    ts: None,
                 },
             );
         }

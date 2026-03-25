@@ -89,6 +89,12 @@ pub struct DeviceBasicSnapshot {
     pub last_data_change: Option<DateTime<Utc>>,
 }
 
+/// Per-point snapshot entry stored in `DeviceDataSnapshot`.
+///
+/// Stores the monotonic-clock timestamp for TTL/change detection, the typed value,
+/// and an optional source timestamp from the device/protocol layer (epoch milliseconds).
+pub type PointSnapshotEntry = (u64, NGValue, Option<i64>);
+
 /// Device data snapshot containing the latest telemetry and attribute values.
 ///
 /// This snapshot is maintained for each device and updated whenever new data arrives.
@@ -99,16 +105,16 @@ pub struct DeviceDataSnapshot {
     pub device_id: i32,
     /// Device name.
     pub device_name: Arc<str>,
-    /// Latest telemetry values (`point_id` -> typed value).
+    /// Latest telemetry values (`point_id` -> snapshot entry).
     ///
     /// `point_id` is the primary key for hot-path change detection.
-    pub telemetry: HashMap<i32, (u64, NGValue)>,
-    /// Latest client attributes (`point_id` -> typed value).
-    pub client_attributes: HashMap<i32, (u64, NGValue)>,
-    /// Latest shared attributes (`point_id` -> typed value).
-    pub shared_attributes: HashMap<i32, (u64, NGValue)>,
-    /// Latest server attributes (`point_id` -> typed value).
-    pub server_attributes: HashMap<i32, (u64, NGValue)>,
+    pub telemetry: HashMap<i32, PointSnapshotEntry>,
+    /// Latest client attributes (`point_id` -> snapshot entry).
+    pub client_attributes: HashMap<i32, PointSnapshotEntry>,
+    /// Latest shared attributes (`point_id` -> snapshot entry).
+    pub shared_attributes: HashMap<i32, PointSnapshotEntry>,
+    /// Latest server attributes (`point_id` -> snapshot entry).
+    pub server_attributes: HashMap<i32, PointSnapshotEntry>,
     /// Cached mapping from `point_id` to `point_key` for points that have ever appeared in this snapshot.
     pub point_key_by_id: HashMap<i32, Arc<str>>,
     /// Timestamp of the last update (wall clock).

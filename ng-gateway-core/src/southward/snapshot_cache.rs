@@ -9,14 +9,26 @@
 //! - Prefer in-place filtering with `Vec::retain`.
 //! - Use monotonic timestamps (`snapshot_now_ms`) for TTL refresh bookkeeping.
 
-use super::{DeviceDataSnapshot, NGSouthwardManager};
+use super::{DeviceDataSnapshot, NGSouthwardManager, PointSnapshotEntry};
 use crate::southward::internal::snapshot_now_ms;
 use chrono::{DateTime, Utc};
-use ng_gateway_sdk::{AttributeData, DeviceState, NorthwardData, ReportType, TelemetryData};
+use ng_gateway_sdk::{
+    AttributeData, DeviceState, NorthwardData, PointValue, ReportType, TelemetryData,
+};
 use std::{
     collections::{hash_map::Entry, HashMap},
     sync::Arc,
 };
+
+/// Build a `PointSnapshotEntry` from a `PointValue` and the current monotonic time.
+#[inline]
+fn make_entry(now_ms: u64, pv: &PointValue) -> PointSnapshotEntry {
+    (
+        now_ms,
+        pv.value.clone(),
+        pv.ts.map(|t| t.timestamp_millis()),
+    )
+}
 
 impl NGSouthwardManager {
     /// Update device data snapshot and filter changes based on `ReportType`.
@@ -39,36 +51,27 @@ impl NGSouthwardManager {
         let now = Utc::now();
         let now_ms = snapshot_now_ms();
 
-        // Get device to find channel_id.
         let device = match self.get_device(device_id) {
             Some(d) => d,
             None => {
-                // Device not found, pass through.
                 return Some(data);
             }
         };
 
         let channel_id = device.config.channel_id();
 
-        // Get channel to find ReportType.
         let report_type = match self.get_channel(channel_id) {
             Some(channel) => channel.config.report_type(),
             None => {
-                // Channel not found, pass through.
                 return Some(data);
             }
         };
 
-        // If ReportType::Always, update snapshot and return full data.
         if matches!(report_type, ReportType::Always) {
             self.update_snapshot_internal(data.as_ref(), device_id, now, now_ms);
             return Some(data);
         }
 
-        // ReportType::Change: detect changes and filter in-place when possible.
-        //
-        // - `Arc::make_mut` avoids cloning when `data` has strong_count == 1 (common in routing path).
-        // - Filtering uses `Vec::retain` to move elements in-place, removing the need to clone values.
         let data_mut = Arc::make_mut(&mut data);
         match data_mut {
             NorthwardData::Telemetry(telemetry) => {
@@ -85,10 +88,7 @@ impl NGSouthwardManager {
                     None
                 }
             }
-            _ => {
-                // Other data types don't update snapshots, pass through.
-                Some(data)
-            }
+            _ => Some(data),
         }
     }
 
@@ -130,19 +130,18 @@ impl NGSouthwardManager {
                     .device_snapshots
                     .entry(device_id)
                     .and_modify(|snapshot| {
-                        // Update in-place to avoid cloning large maps.
                         for pv in telemetry.values.iter() {
-                            // TTL refresh must only happen on value change.
                             match snapshot.telemetry.entry(pv.point_id) {
                                 Entry::Occupied(mut o) => {
-                                    let (ts, old) = o.get_mut();
+                                    let (ts, old, src_ts) = o.get_mut();
                                     if old != &pv.value {
                                         *old = pv.value.clone();
                                         *ts = now_ms;
                                     }
+                                    *src_ts = pv.ts.map(|t| t.timestamp_millis());
                                 }
                                 Entry::Vacant(v) => {
-                                    v.insert((now_ms, pv.value.clone()));
+                                    v.insert(make_entry(now_ms, pv));
                                 }
                             }
                             Self::upsert_point_key_by_id(
@@ -159,7 +158,7 @@ impl NGSouthwardManager {
                         let mut point_key_by_id =
                             HashMap::with_capacity(telemetry.values.len().saturating_mul(2));
                         for pv in telemetry.values.iter() {
-                            telemetry_map.insert(pv.point_id, (now_ms, pv.value.clone()));
+                            telemetry_map.insert(pv.point_id, make_entry(now_ms, pv));
                             point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                         }
                         DeviceDataSnapshot {
@@ -183,13 +182,14 @@ impl NGSouthwardManager {
                             snapshot
                                 .client_attributes
                                 .entry(pv.point_id)
-                                .and_modify(|(ts, old)| {
+                                .and_modify(|(ts, old, src_ts)| {
                                     if old != &pv.value {
                                         *old = pv.value.clone();
                                         *ts = now_ms;
                                     }
+                                    *src_ts = pv.ts.map(|t| t.timestamp_millis());
                                 })
-                                .or_insert_with(|| (now_ms, pv.value.clone()));
+                                .or_insert_with(|| make_entry(now_ms, pv));
                             Self::upsert_point_key_by_id(
                                 &mut snapshot.point_key_by_id,
                                 pv.point_id,
@@ -200,13 +200,14 @@ impl NGSouthwardManager {
                             snapshot
                                 .shared_attributes
                                 .entry(pv.point_id)
-                                .and_modify(|(ts, old)| {
+                                .and_modify(|(ts, old, src_ts)| {
                                     if old != &pv.value {
                                         *old = pv.value.clone();
                                         *ts = now_ms;
                                     }
+                                    *src_ts = pv.ts.map(|t| t.timestamp_millis());
                                 })
-                                .or_insert_with(|| (now_ms, pv.value.clone()));
+                                .or_insert_with(|| make_entry(now_ms, pv));
                             Self::upsert_point_key_by_id(
                                 &mut snapshot.point_key_by_id,
                                 pv.point_id,
@@ -217,13 +218,14 @@ impl NGSouthwardManager {
                             snapshot
                                 .server_attributes
                                 .entry(pv.point_id)
-                                .and_modify(|(ts, old)| {
+                                .and_modify(|(ts, old, src_ts)| {
                                     if old != &pv.value {
                                         *old = pv.value.clone();
                                         *ts = now_ms;
                                     }
+                                    *src_ts = pv.ts.map(|t| t.timestamp_millis());
                                 })
-                                .or_insert_with(|| (now_ms, pv.value.clone()));
+                                .or_insert_with(|| make_entry(now_ms, pv));
                             Self::upsert_point_key_by_id(
                                 &mut snapshot.point_key_by_id,
                                 pv.point_id,
@@ -243,15 +245,15 @@ impl NGSouthwardManager {
                             .saturating_mul(2),
                         );
                         for pv in attributes.client_attributes.iter() {
-                            client.insert(pv.point_id, (now_ms, pv.value.clone()));
+                            client.insert(pv.point_id, make_entry(now_ms, pv));
                             point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                         }
                         for pv in attributes.shared_attributes.iter() {
-                            shared.insert(pv.point_id, (now_ms, pv.value.clone()));
+                            shared.insert(pv.point_id, make_entry(now_ms, pv));
                             point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                         }
                         for pv in attributes.server_attributes.iter() {
-                            server.insert(pv.point_id, (now_ms, pv.value.clone()));
+                            server.insert(pv.point_id, make_entry(now_ms, pv));
                             point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                         }
                         DeviceDataSnapshot {
@@ -266,9 +268,7 @@ impl NGSouthwardManager {
                         }
                     });
             }
-            _ => {
-                // Other data types don't update snapshots.
-            }
+            _ => {}
         }
     }
 
@@ -288,8 +288,6 @@ impl NGSouthwardManager {
                 v.insert(Arc::clone(point_key));
             }
             Entry::Occupied(mut o) => {
-                // Point keys are expected to be stable, but may change due to reconfiguration.
-                // Only replace when the string differs.
                 if o.get().as_ref() != point_key.as_ref() {
                     o.insert(Arc::clone(point_key));
                 }
@@ -308,25 +306,22 @@ impl NGSouthwardManager {
         now: DateTime<Utc>,
         now_ms: u64,
     ) -> bool {
-        // First pass: detect changes using a single read guard (early return if no changes).
         let existing_snapshot = self.runtime.device_snapshots.get(&device_id);
         let existing_telemetry = existing_snapshot.as_ref().map(|s| &s.telemetry);
         telemetry.values.retain(|pv| match existing_telemetry {
             Some(existing) => existing
                 .get(&pv.point_id)
-                .map(|(_ts, old_value)| old_value != &pv.value)
-                .unwrap_or(true), // First time seeing this point_id
-            None => true, // No snapshot exists
+                .map(|(_ts, old_value, _src_ts)| old_value != &pv.value)
+                .unwrap_or(true),
+            None => true,
         });
 
         if telemetry.values.is_empty() {
             return false;
         }
 
-        // Release read guard before write path.
         drop(existing_snapshot);
 
-        // Update snapshot: only write changed points to minimize hash ops on hot path.
         self.runtime
             .device_snapshots
             .entry(device_id)
@@ -334,7 +329,7 @@ impl NGSouthwardManager {
                 for pv in telemetry.values.iter() {
                     snapshot
                         .telemetry
-                        .insert(pv.point_id, (now_ms, pv.value.clone()));
+                        .insert(pv.point_id, make_entry(now_ms, pv));
                     Self::upsert_point_key_by_id(
                         &mut snapshot.point_key_by_id,
                         pv.point_id,
@@ -349,7 +344,7 @@ impl NGSouthwardManager {
                 let mut point_key_by_id =
                     HashMap::with_capacity(telemetry.values.len().saturating_mul(2));
                 for pv in telemetry.values.iter() {
-                    telemetry_map.insert(pv.point_id, (now_ms, pv.value.clone()));
+                    telemetry_map.insert(pv.point_id, make_entry(now_ms, pv));
                     point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                 }
                 DeviceDataSnapshot {
@@ -386,7 +381,7 @@ impl NGSouthwardManager {
                 Some(snapshot) => snapshot
                     .client_attributes
                     .get(&pv.point_id)
-                    .map(|(_ts, old_value)| old_value != &pv.value)
+                    .map(|(_ts, old_value, _src_ts)| old_value != &pv.value)
                     .unwrap_or(true),
                 None => true,
             });
@@ -396,7 +391,7 @@ impl NGSouthwardManager {
                 Some(snapshot) => snapshot
                     .shared_attributes
                     .get(&pv.point_id)
-                    .map(|(_ts, old_value)| old_value != &pv.value)
+                    .map(|(_ts, old_value, _src_ts)| old_value != &pv.value)
                     .unwrap_or(true),
                 None => true,
             });
@@ -406,7 +401,7 @@ impl NGSouthwardManager {
                 Some(snapshot) => snapshot
                     .server_attributes
                     .get(&pv.point_id)
-                    .map(|(_ts, old_value)| old_value != &pv.value)
+                    .map(|(_ts, old_value, _src_ts)| old_value != &pv.value)
                     .unwrap_or(true),
                 None => true,
             });
@@ -420,7 +415,6 @@ impl NGSouthwardManager {
 
         drop(existing_snapshot);
 
-        // Update snapshot with only changed attributes.
         self.runtime
             .device_snapshots
             .entry(device_id)
@@ -428,7 +422,7 @@ impl NGSouthwardManager {
                 for pv in attributes.client_attributes.iter() {
                     snapshot
                         .client_attributes
-                        .insert(pv.point_id, (now_ms, pv.value.clone()));
+                        .insert(pv.point_id, make_entry(now_ms, pv));
                     Self::upsert_point_key_by_id(
                         &mut snapshot.point_key_by_id,
                         pv.point_id,
@@ -438,7 +432,7 @@ impl NGSouthwardManager {
                 for pv in attributes.shared_attributes.iter() {
                     snapshot
                         .shared_attributes
-                        .insert(pv.point_id, (now_ms, pv.value.clone()));
+                        .insert(pv.point_id, make_entry(now_ms, pv));
                     Self::upsert_point_key_by_id(
                         &mut snapshot.point_key_by_id,
                         pv.point_id,
@@ -448,7 +442,7 @@ impl NGSouthwardManager {
                 for pv in attributes.server_attributes.iter() {
                     snapshot
                         .server_attributes
-                        .insert(pv.point_id, (now_ms, pv.value.clone()));
+                        .insert(pv.point_id, make_entry(now_ms, pv));
                     Self::upsert_point_key_by_id(
                         &mut snapshot.point_key_by_id,
                         pv.point_id,
@@ -458,7 +452,6 @@ impl NGSouthwardManager {
                 snapshot.last_update = now;
             })
             .or_insert_with(|| {
-                // No existing snapshot: seed from incoming values so subsequent Change reports work.
                 let mut client = HashMap::with_capacity(attributes.client_attributes.len());
                 let mut shared = HashMap::with_capacity(attributes.shared_attributes.len());
                 let mut server = HashMap::with_capacity(attributes.server_attributes.len());
@@ -469,15 +462,15 @@ impl NGSouthwardManager {
                     .saturating_mul(2),
                 );
                 for pv in attributes.client_attributes.iter() {
-                    client.insert(pv.point_id, (now_ms, pv.value.clone()));
+                    client.insert(pv.point_id, make_entry(now_ms, pv));
                     point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                 }
                 for pv in attributes.shared_attributes.iter() {
-                    shared.insert(pv.point_id, (now_ms, pv.value.clone()));
+                    shared.insert(pv.point_id, make_entry(now_ms, pv));
                     point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                 }
                 for pv in attributes.server_attributes.iter() {
-                    server.insert(pv.point_id, (now_ms, pv.value.clone()));
+                    server.insert(pv.point_id, make_entry(now_ms, pv));
                     point_key_by_id.insert(pv.point_id, Arc::clone(&pv.point_key));
                 }
                 DeviceDataSnapshot {

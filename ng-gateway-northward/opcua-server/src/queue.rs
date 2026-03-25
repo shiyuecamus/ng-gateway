@@ -1,21 +1,13 @@
 use crate::config::DropPolicy;
-use chrono::{DateTime, Utc};
 use ng_gateway_sdk::PointValue;
 use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::{Mutex, Notify};
 
-#[derive(Debug, Clone)]
-pub enum UpdateKind {
-    Telemetry,
-    Attributes,
-}
-
+/// Batch of point value updates to apply to the OPC UA address space.
+///
+/// Per-point source timestamps are carried inside each `PointValue.ts`.
 #[derive(Debug, Clone)]
 pub struct UpdateBatch {
-    #[allow(dead_code)]
-    pub timestamp: DateTime<Utc>,
-    #[allow(dead_code)]
-    pub kind: UpdateKind,
     pub values: Arc<[PointValue]>,
 }
 

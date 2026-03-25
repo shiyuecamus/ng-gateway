@@ -45,6 +45,7 @@ fn test_uplink_mapped_json() {
             point_id: 101,
             point_key: "temp".into(),
             value: NGValue::Float64(23.5),
+            ts: None,
         }],
     ));
 

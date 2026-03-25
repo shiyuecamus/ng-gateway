@@ -300,6 +300,7 @@ impl SouthwardHandle for EthernetIpHandle {
                                                 point_id: point.id,
                                                 point_key: Arc::from(point.key.as_str()),
                                                 value: val,
+                                                ts: None,
                                             },
                                         );
                                     }
