@@ -9,7 +9,7 @@ use clap::{Parser, ValueEnum};
 use metrics::{sample_for, MetricsSummary};
 use ng_gateway_sdk::{NGValue, NorthwardData};
 use protocol::ChannelRuntime;
-use rand::Rng;
+use rand::RngExt;
 use scenarios::{Scenario, ScenarioKind, MAX_SCENARIO_ID};
 use stats::{fmt_duration_ms, DurationStats};
 use std::{

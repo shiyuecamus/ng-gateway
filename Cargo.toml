@@ -145,7 +145,7 @@ version = "2.0"
 
 # System Information
 [workspace.dependencies.sysinfo]
-version = "0.37"
+version = "0.38"
 
 [workspace.dependencies.libc]
 version = "0.2"
@@ -228,11 +228,11 @@ version = "1.1"
 
 # WebSockets over Actix (for HTTP upgrade handling in ng-gateway-web)
 [workspace.dependencies.actix-ws]
-version = "0.3"
+version = "0.4"
 
 # WebSockets over Tokio
 [workspace.dependencies.tokio-tungstenite]
-version = "0.28"
+version = "0.29"
 
 # gRPC Framework
 [workspace.dependencies.tonic]
@@ -310,7 +310,7 @@ version = "0.5"
 
 # hashing
 [workspace.dependencies.bcrypt]
-version = "0.18"
+version = "0.19"
 [workspace.dependencies.md-5]
 version = "0.10"
 [workspace.dependencies.hex]
@@ -318,7 +318,7 @@ version = "0.4"
 
 # Random
 [workspace.dependencies.rand]
-version = "0.9"
+version = "0.10"
 
 # Lock
 [workspace.dependencies.parking_lot]
