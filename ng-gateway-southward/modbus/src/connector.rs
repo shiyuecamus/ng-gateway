@@ -40,9 +40,8 @@ impl ModbusConnector {
                     .map_err(|e| {
                         DriverError::ConfigurationError(format!("Invalid socket address: {e}"))
                     })?;
-                let size = cfg.tcp_pool_size.clamp(1, 32) as usize;
-                let mut contexts = Vec::with_capacity(size);
-                for _ in 0..size {
+                let mut contexts = Vec::with_capacity(1);
+                for _ in 0..1usize {
                     let fut = connect_tcp_metered_with_timeout(
                         addr,
                         Arc::clone(&self.transport_meter),
@@ -111,11 +110,10 @@ impl Connector for ModbusConnector {
 
     #[inline]
     fn collector_concurrency_profile_hint(&self) -> CollectorConcurrencyProfile {
-        let n = match &self.channel.config.connection {
-            ModbusConnection::Tcp { .. } => self.channel.config.tcp_pool_size.clamp(1, 32) as usize,
-            ModbusConnection::Rtu { .. } => 1usize,
-        };
-        CollectorConcurrencyProfile::concurrent(n)
+        match &self.channel.config.connection {
+            ModbusConnection::Tcp { .. } => CollectorConcurrencyProfile::concurrent(8),
+            ModbusConnection::Rtu { .. } => CollectorConcurrencyProfile::serial(),
+        }
     }
 
     async fn connect(

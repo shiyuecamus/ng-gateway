@@ -80,6 +80,27 @@ pub struct Iec104ChannelConfig {
     /// Startup Counter Interrogation QCC (default 5)
     #[serde(default = "Iec104ChannelConfig::default_startup_qcc")]
     pub startup_qcc: u8,
+    /// Periodic General Interrogation interval in seconds (0 = disabled).
+    ///
+    /// Many RTU/PLC implementations stop spontaneous reporting after prolonged
+    /// idle periods.  Sending GI periodically ensures fresh telemetry data.
+    /// Typical production values: 300–900 s (5–15 min). Default: 600 (10 min).
+    #[serde(default = "Iec104ChannelConfig::default_periodic_gi_interval_secs")]
+    pub periodic_gi_interval_secs: u64,
+    /// Periodic Counter Interrogation interval in seconds (0 = disabled).
+    ///
+    /// Used to refresh accumulated/integrated totals (M_IT_*) that do not
+    /// generate spontaneous events.  Typical: 900–3600 s. Default: 1800 (30 min).
+    #[serde(default = "Iec104ChannelConfig::default_periodic_ci_interval_secs")]
+    pub periodic_ci_interval_secs: u64,
+    /// Data silence timeout in seconds (0 = disabled).
+    ///
+    /// If no ASDU carrying process information is received within this window,
+    /// the session is considered stale and a reconnect is requested.
+    /// This catches the "link alive but application-layer dead" condition.
+    /// Recommended: 2–3× the periodic GI interval. Default: 1800 (≈3× default GI).
+    #[serde(default = "Iec104ChannelConfig::default_data_silence_timeout_secs")]
+    pub data_silence_timeout_secs: u64,
 }
 
 impl Iec104ChannelConfig {
@@ -133,6 +154,21 @@ impl Iec104ChannelConfig {
 
     fn default_startup_qcc() -> u8 {
         5
+    }
+
+    /// Default periodic GI: 600 s (10 min), within the common 300–900 s range.
+    fn default_periodic_gi_interval_secs() -> u64 {
+        600
+    }
+
+    /// Default periodic CI: 1800 s (30 min), between typical 900–3600 s.
+    fn default_periodic_ci_interval_secs() -> u64 {
+        1800
+    }
+
+    /// Default data silence before reconnect: 1800 s (≈3× default GI).
+    fn default_data_silence_timeout_secs() -> u64 {
+        1800
     }
 }
 

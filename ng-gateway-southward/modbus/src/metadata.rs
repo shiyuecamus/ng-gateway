@@ -115,39 +115,6 @@ fn build_channel_nodes() -> Vec<Node> {
                                 ui: None,
                                 when: None,
                             })),
-                            Node::Field(Box::new(Field {
-                                path: "tcpPoolSize".into(),
-                                label: ui_text!(en = "TCP Pool Size", zh = "TCP 连接池大小"),
-                                data_type: UiDataType::Integer,
-                                rules: Some(Rules {
-                                    required: Some(RuleValue::WithMessage {
-                                        value: true,
-                                        message: Some(ui_text!(
-                                            en = "TCP Pool Size is required",
-                                            zh = "TCP 连接池大小是必填项"
-                                        )),
-                                    }),
-                                    min: Some(RuleValue::WithMessage {
-                                        value: 1.0,
-                                        message: Some(ui_text!(
-                                            en = "TCP Pool Size must be at least 1",
-                                            zh = "TCP 连接池大小必须至少为 1"
-                                        )),
-                                    }),
-                                    max: Some(RuleValue::WithMessage {
-                                        value: 32.0,
-                                        message: Some(ui_text!(
-                                            en = "TCP Pool Size should not exceed 32",
-                                            zh = "TCP 连接池大小建议不超过 32"
-                                        )),
-                                    }),
-                                    ..Default::default()
-                                }),
-                                default_value: Some(json!(8)),
-                                order: Some(2),
-                                ui: None,
-                                when: None,
-                            })),
                         ],
                     },
                     UnionCase {

@@ -46,14 +46,6 @@ pub struct ModbusChannelConfig {
     /// Maximum address gap for coalescing bit reads (0x01/0x02).
     #[serde(default = "ModbusChannelConfig::default_max_gap_bits")]
     pub max_gap_bits: u16,
-    /// TCP connection pool size (best practice: default 1, recommended max 32).
-    ///
-    /// # Notes
-    /// - This only applies to `connection.kind = tcp`.
-    /// - For RTU, the driver will clamp the effective pool size to `1` to preserve
-    ///   the required single-flight semantics on a serial bus.
-    #[serde(default = "ModbusChannelConfig::default_tcp_pool_size")]
-    pub tcp_pool_size: u16,
     /// Number of consecutive operation timeouts before requesting a reconnect.
     ///
     /// Prevents reconnect churn from transient PLC slowness. Transport errors
@@ -82,11 +74,6 @@ impl ModbusChannelConfig {
     /// Default value for bit merge gap (best practice: 16).
     fn default_max_gap_bits() -> u16 {
         500
-    }
-
-    /// Default TCP pool size (best practice: 1).
-    fn default_tcp_pool_size() -> u16 {
-        1
     }
 
     fn default_max_timeouts() -> u32 {

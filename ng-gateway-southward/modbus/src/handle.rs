@@ -126,14 +126,6 @@ impl ModbusHandle {
     }
 
     #[inline]
-    fn effective_pool_size(&self) -> usize {
-        match &self.inner.config.connection {
-            ModbusConnection::Tcp { .. } => self.inner.config.tcp_pool_size.clamp(1, 32) as usize,
-            ModbusConnection::Rtu { .. } => 1,
-        }
-    }
-
-    #[inline]
     fn pick_ctx(&self) -> DriverResult<Arc<Mutex<Context>>> {
         let pool = self.pool.load_full();
         let Some(pool) = pool else {
@@ -274,7 +266,7 @@ impl ModbusHandle {
         // Concurrency limit per slave: use full pool size (Mutex already serializes
         // per-connection). Removing the old `.clamp(1, 8)` hard cap so that all
         // pool connections can be utilised simultaneously.
-        let batch_concurrency = self.effective_pool_size().max(1);
+        let batch_concurrency = 1usize;
 
         // Execute ALL read batches through a single `buffer_unordered` stream.
         //
@@ -439,7 +431,14 @@ impl SouthwardHandle for ModbusHandle {
 
     #[inline]
     fn collector_concurrency_profile(&self) -> CollectorConcurrencyProfile {
-        CollectorConcurrencyProfile::concurrent(self.effective_pool_size())
+        match &self.inner.config.connection {
+            // TCP: allow up to 8 slave-groups in-flight simultaneously.
+            // The Mutex<Context> serialises actual wire I/O; cross-group
+            // concurrency only eliminates scheduling gaps between groups.
+            ModbusConnection::Tcp { .. } => CollectorConcurrencyProfile::concurrent(8),
+            // RTU: strictly serial (shared half-duplex serial bus).
+            ModbusConnection::Rtu { .. } => CollectorConcurrencyProfile::serial(),
+        }
     }
 
     async fn collect_data(&self, items: &[CollectItem]) -> DriverResult<Vec<NorthwardData>> {

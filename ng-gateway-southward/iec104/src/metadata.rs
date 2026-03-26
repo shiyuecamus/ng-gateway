@@ -349,6 +349,84 @@ fn build_channel_nodes() -> Vec<Node> {
                     }),
                     when: None,
                 })),
+                Node::Field(Box::new(Field {
+                    path: "periodicGiIntervalSecs".into(),
+                    label: ui_text!(
+                        en = "Periodic GI Interval",
+                        zh = "定期总召间隔"
+                    ),
+                    data_type: UiDataType::Integer,
+                    default_value: Some(json!(600)),
+                    order: Some(19),
+                    ui: Some(UiProps {
+                        col_span: Some(1),
+                        help: Some(ui_text!(
+                            en = "Unit: seconds. 0 = disabled. Default 600 (10 min). Typical: 300–900",
+                            zh = "单位：秒。0 = 禁用。默认 600（10 分钟）。常用：300–900"
+                        )),
+                        ..Default::default()
+                    }),
+                    rules: Some(Rules {
+                        min: Some(RuleValue::WithMessage {
+                            value: 0.0,
+                            message: Some(ui_text!(en = "Min 0", zh = "最小为 0")),
+                        }),
+                        ..Default::default()
+                    }),
+                    when: None,
+                })),
+                Node::Field(Box::new(Field {
+                    path: "periodicCiIntervalSecs".into(),
+                    label: ui_text!(
+                        en = "Periodic CI Interval",
+                        zh = "定期计数量召唤间隔"
+                    ),
+                    data_type: UiDataType::Integer,
+                    default_value: Some(json!(1800)),
+                    order: Some(20),
+                    ui: Some(UiProps {
+                        col_span: Some(1),
+                        help: Some(ui_text!(
+                            en = "Unit: seconds. 0 = disabled. Default 1800 (30 min). Typical: 900–3600",
+                            zh = "单位：秒。0 = 禁用。默认 1800（30 分钟）。常用：900–3600"
+                        )),
+                        ..Default::default()
+                    }),
+                    rules: Some(Rules {
+                        min: Some(RuleValue::WithMessage {
+                            value: 0.0,
+                            message: Some(ui_text!(en = "Min 0", zh = "最小为 0")),
+                        }),
+                        ..Default::default()
+                    }),
+                    when: None,
+                })),
+                Node::Field(Box::new(Field {
+                    path: "dataSilenceTimeoutSecs".into(),
+                    label: ui_text!(
+                        en = "Data Silence Timeout",
+                        zh = "数据静默超时"
+                    ),
+                    data_type: UiDataType::Integer,
+                    default_value: Some(json!(1800)),
+                    order: Some(21),
+                    ui: Some(UiProps {
+                        col_span: Some(1),
+                        help: Some(ui_text!(
+                            en = "Unit: seconds. 0 = disabled. Default 1800 (≈3× default GI). Triggers reconnect when no ASDU",
+                            zh = "单位：秒。0 = 禁用。默认 1800（约 3 倍默认 GI）。超时无 ASDU 将重连"
+                        )),
+                        ..Default::default()
+                    }),
+                    rules: Some(Rules {
+                        min: Some(RuleValue::WithMessage {
+                            value: 0.0,
+                            message: Some(ui_text!(en = "Min 0", zh = "最小为 0")),
+                        }),
+                        ..Default::default()
+                    }),
+                    when: None,
+                })),
             ],
         }),
     ]

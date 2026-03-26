@@ -90,7 +90,6 @@ pub fn build_modbus_tcp_topology(
         max_gap_registers: 1,
         max_batch_bits: 512,
         max_gap_bits: 16,
-        tcp_pool_size: 1,
         max_timeouts: 3,
     };
 

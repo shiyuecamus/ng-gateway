@@ -266,8 +266,15 @@ impl Driver for RuntimeAwareDriver {
     }
 
     #[inline]
+    fn collection_group_key(
+        &self,
+        device: &dyn RuntimeDevice,
+    ) -> Option<crate::CollectionGroupKey> {
+        self.inner.collection_group_key(device)
+    }
+
+    #[inline]
     fn collector_concurrency_profile(&self) -> crate::CollectorConcurrencyProfile {
-        // Forward the inner driver's capability profile to the host.
         self.inner.collector_concurrency_profile()
     }
 
