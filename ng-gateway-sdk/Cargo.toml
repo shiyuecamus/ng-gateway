@@ -7,6 +7,8 @@ edition = "2021"
 authors = ["shiyuecamus <shiyuecamus@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/shiyuecamus/ng-gateway"
+# MSRV inherited from workspace; cargo inlines this on publish.
+rust-version = { workspace = true }
 readme = "README.md"
 homepage = "https://github.com/shiyuecamus/ng-gateway"
 documentation = "https://docs.rs/ng-gateway-sdk"

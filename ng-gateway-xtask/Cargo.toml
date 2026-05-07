@@ -3,6 +3,7 @@ name = "ng-gateway-xtask"
 version = "0.1.0"
 edition = "2021"
 publish = false
+rust-version = { workspace = true }
 
 # xtask is a helper binary, not a library
 [[bin]]

@@ -3,6 +3,7 @@ edition = { workspace = true }
 name = "ng-gateway-models"
 publish = { workspace = true }
 version = { workspace = true }
+rust-version = { workspace = true }
 
 # Local
 [dependencies.ng-gateway-utils]

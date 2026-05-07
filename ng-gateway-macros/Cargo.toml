@@ -3,6 +3,7 @@ name = "ng-gateway-macros"
 edition = { workspace = true }
 publish = { workspace = true }
 version = { workspace = true }
+rust-version = { workspace = true }
 
 # macros
 [dependencies.proc-macro2]

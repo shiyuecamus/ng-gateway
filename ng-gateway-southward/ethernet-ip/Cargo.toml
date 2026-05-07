@@ -3,12 +3,13 @@ name = "ng-driver-ethernet-ip"
 version = "0.1.0"
 edition = "2021"
 publish = false
+rust-version = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rust-ethernet-ip = { version = "0.6" }
+rust-ethernet-ip = { version = "0.7" }
 tokio = { version = "1.47", features = ["full", "tracing"] }
 tracing = { version = "0.1" }
 async-trait = { version = "0.1" }

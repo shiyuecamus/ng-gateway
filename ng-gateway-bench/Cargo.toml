@@ -3,6 +3,7 @@ name = "ng-gateway-bench"
 version = "0.1.0"
 edition = "2021"
 publish = false
+rust-version = { workspace = true }
 default-run = "ng-gateway-bench"
 
 [features]

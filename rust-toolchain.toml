@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Rust Toolchain Pin — Single Source of Truth
+#
+# Why this file exists:
+#   - rustup honors this file automatically: local dev, CI, and the official
+#     `rust:<version>-bookworm` Docker image will all converge on the SAME
+#     compiler version, eliminating "works on my machine" / MSRV drift.
+#   - Some workspace dependencies (e.g. sysinfo >= 0.39) require rustc >= 1.95.
+#     Pinning here guarantees those deps build everywhere consistently.
+#
+# Bumping policy:
+#   - Bump together with `[workspace.package].rust-version` in Cargo.toml and
+#     `ARG RUST_VERSION` in `deploy/docker/gateway.Dockerfile`.
+#   - Prefer specific patch-major (e.g. "1.95") over "stable" for reproducibility.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[toolchain]
+channel = "1.95"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

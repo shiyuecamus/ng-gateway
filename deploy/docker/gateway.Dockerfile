@@ -1,7 +1,11 @@
 # Dockerfile for NG Gateway using XTask pattern
 # This Dockerfile leverages the xtask automation tool for building and deploying drivers
 
-ARG RUST_VERSION=1.91-bookworm
+# Pin the Rust toolchain version used by the build stages.
+# Must stay in sync with `rust-toolchain.toml` and `[workspace.package].rust-version`
+# in the repository root `Cargo.toml`. Some upstream crates (e.g. sysinfo >= 0.39)
+# require rustc >= 1.95, so anything older will fail at `cargo chef cook`.
+ARG RUST_VERSION=1.95-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
 ARG PNPM_VERSION=10.28.2
 

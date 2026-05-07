@@ -3,6 +3,7 @@ name = "ng-driver-opcua"
 version = "0.1.1"
 edition = "2021"
 publish = false
+rust-version = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

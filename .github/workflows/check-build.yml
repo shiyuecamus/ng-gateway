@@ -34,10 +34,14 @@ jobs:
           fetch-depth: 5
           submodules: false
 
-      - name: Install Rust stable and components
-        uses: dtolnay/rust-toolchain@stable
+      # Read the channel from `rust-toolchain.toml` (single source of truth).
+      # Disable the action's built-in cache because we manage it explicitly below
+      # (cirruslabs/cache for ~/.cargo/registry + ~/.cargo/git).
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy, rustfmt
+          cache: false
 
       - name: Install protoc (protobuf compiler)
         uses: arduino/setup-protoc@v3

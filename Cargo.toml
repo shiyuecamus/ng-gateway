@@ -36,6 +36,12 @@ license = "Apache-2.0"
 publish = false
 repository = "https://github.com/shiyuecamus/ng-gateway"
 version = "0.1.0"
+# Minimum Supported Rust Version (MSRV).
+# Keep in sync with `rust-toolchain.toml` and the Dockerfile `ARG RUST_VERSION`.
+# Declaring this enables Cargo's MSRV-aware dependency resolver (Rust >= 1.84),
+# which automatically avoids picking transitive dependency versions whose
+# `rust-version` exceeds ours — preventing future MSRV-drift breakages.
+rust-version = "1.95"
 
 [patch.crates-io]
 # Force all workspace crates (including drivers) to use the local SDK during development.

@@ -105,10 +105,13 @@ jobs:
           test -f "ng-gateway-web/ui-dist.zip"
           echo "[ok] ui-dist.zip ready: $(pwd)/ng-gateway-web/ui-dist.zip"
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Read the channel from `rust-toolchain.toml` (single source of truth).
+      # Disable built-in cache; Swatinem/rust-cache handles caching below.
+      - name: Setup Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+          cache: false
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -261,8 +264,12 @@ jobs:
           test -f "ng-gateway-web/ui-dist.zip"
           echo "[ok] ui-dist.zip ready: $(pwd)/ng-gateway-web/ui-dist.zip"
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Read the channel from `rust-toolchain.toml` (single source of truth).
+      # Disable built-in cache; Swatinem/rust-cache handles caching below.
+      - name: Setup Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -345,8 +352,12 @@ jobs:
           test -f "ng-gateway-web/ui-dist.zip"
           echo "[ok] ui-dist.zip ready: $(pwd)/ng-gateway-web/ui-dist.zip"
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Read the channel from `rust-toolchain.toml` (single source of truth).
+      # Disable built-in cache; Swatinem/rust-cache handles caching below.
+      - name: Setup Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
