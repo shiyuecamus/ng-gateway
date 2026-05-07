@@ -6,6 +6,7 @@ pub mod extension;
 pub mod log;
 pub mod mapping;
 pub(crate) mod model;
+pub mod opcua_server;
 pub mod payload;
 pub mod probe;
 pub mod runtime_api;
@@ -15,7 +16,7 @@ pub(crate) mod types;
 
 use crate::{
     supervision::{NoopObserverFactory, ObserverFactory},
-    ConnectionState, ExtensionStore, NorthwardResult,
+    ConnectionState, ExtensionStore, NorthwardError, NorthwardResult,
 };
 use async_trait::async_trait;
 use downcast_rs::{impl_downcast, DowncastSync};
@@ -164,8 +165,9 @@ macro_rules! ng_plugin_factory {
             }
         }
 
+        #[$crate::export::async_trait::async_trait]
         impl $crate::PluginFactory for __NgComponentPluginFactory {
-            fn create_plugin(
+            async fn create_plugin(
                 &self,
                 ctx: $crate::NorthwardInitContext,
             ) -> $crate::NorthwardResult<Box<dyn $crate::Plugin>> {
@@ -189,7 +191,6 @@ macro_rules! ng_plugin_factory {
                     plugin_type = $plugin_type
                 );
 
-                // NOTE: `new(ctx)` MUST be sync and MUST NOT perform I/O.
                 let observer = ctx.observer_factory.create_northward(
                     $crate::supervision::NorthwardObserverLabels {
                         app_id: ctx.app_id,
@@ -198,7 +199,12 @@ macro_rules! ng_plugin_factory {
                 );
 
                 let retry_policy = ctx.retry_policy;
-                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+                // SAFETY: this future is polled on the plugin's own NG_RUNTIME
+                // (the FFI wrapper guarantees the runtime hop), so the
+                // connector is free to use any tokio primitive during
+                // construction (`tokio::spawn`, `tokio::time`, `tokio::fs`,
+                // `tokio::task::spawn_blocking`).
+                let connector = <$component as $crate::supervision::Connector>::new(ctx).await?;
 
                 let params = $crate::supervision::SupervisorParams {
                     retry_policy,
@@ -259,8 +265,9 @@ macro_rules! ng_plugin_factory {
             }
         }
 
+        #[$crate::export::async_trait::async_trait]
         impl $crate::PluginFactory for __NgComponentPluginFactory {
-            fn create_plugin(
+            async fn create_plugin(
                 &self,
                 ctx: $crate::NorthwardInitContext,
             ) -> $crate::NorthwardResult<Box<dyn $crate::Plugin>> {
@@ -291,7 +298,9 @@ macro_rules! ng_plugin_factory {
                 );
 
                 let retry_policy = ctx.retry_policy;
-                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+                // SAFETY: this future is polled on the plugin's own NG_RUNTIME
+                // (the FFI wrapper guarantees the runtime hop).
+                let connector = <$component as $crate::supervision::Connector>::new(ctx).await?;
 
                 let params = $crate::supervision::SupervisorParams {
                     retry_policy,
@@ -312,7 +321,7 @@ macro_rules! ng_plugin_factory {
                 &self,
                 config: $crate::export::serde_json::Value,
             ) -> $crate::NorthwardResult<std::sync::Arc<dyn $crate::PluginConfig>> {
-                <$model_convert as $crate::supervision::model_convert::NorthwardModelConverter>::convert_plugin_config(
+                <$model_convert as $crate::supervision::converter::NorthwardModelConverter>::convert_plugin_config(
                     &self.model_convert,
                     config,
                 )
@@ -427,8 +436,11 @@ macro_rules! ng_plugin_factory {
 
         #[no_mangle]
         pub extern "C" fn create_plugin_factory() -> *mut dyn $crate::PluginFactory {
-            let inner: Box<dyn $crate::PluginFactory> =
-                Box::new(<$factory as ::core::default::Default>::default());
+            // The runtime-aware wrapper needs to clone its `inner` factory
+            // into the spawned construction task, so we hold the inner as
+            // an `Arc` and pass that into the wrapper.
+            let inner: ::std::sync::Arc<dyn $crate::PluginFactory> =
+                ::std::sync::Arc::new(<$factory as ::core::default::Default>::default());
             let rt_handle = NG_RUNTIME.as_ref().map(|rt| rt.handle().clone());
             let wrapper: Box<dyn $crate::PluginFactory> =
                 Box::new($crate::ffi::RuntimeAwarePluginFactory::new(inner, $cap, rt_handle));
@@ -474,19 +486,42 @@ pub trait NorthwardPublisher: DowncastSync + Send + Sync + Debug {
     fn try_publish(&self, data: Arc<NorthwardData>) -> NorthwardResult<()>;
 }
 
-/// Factory trait for creating northward plugin instances
+/// Factory trait for creating northward plugin instances.
+///
+/// # Async runtime semantics
+///
+/// `create_plugin` is asynchronous. When the host loads a `cdylib` plugin,
+/// the macro-generated entrypoint (`create_plugin_factory`) wraps the
+/// concrete factory in [`crate::ffi::RuntimeAwarePluginFactory`], which:
+///
+/// - spawns the inner construction future onto the plugin's own
+///   `NG_RUNTIME` (so plugin authors see plugin tokio TLS for the entire
+///   duration of construction), and
+/// - guards the spawned [`tokio::task::JoinHandle`] with
+///   [`tokio_util::task::AbortOnDropHandle`] so host-side cancellation
+///   (API timeout, parent task drop) aborts the inner construction at the
+///   next `.await` point.
+///
+/// Implementors MUST NOT assume their construction future runs on the
+/// caller's runtime; they MUST treat the future as cancel-safe and clean
+/// up partial state via `Drop`.
+#[async_trait]
 pub trait PluginFactory: DowncastSync + Send + Sync {
-    /// Create a new northward plugin instance with initialization context (synchronous, no I/O)
+    /// Create a new northward plugin instance with initialization context.
     ///
-    /// Implementations must:
-    /// - Validate and capture all required dependencies from `ctx`
-    /// - Construct internal state and channels
-    /// - NOT perform any blocking or network I/O (that belongs in `Plugin::start`)
+    /// Implementations should perform any one-shot bootstrap that lives
+    /// for the entire plugin lifetime — credential loading, PKI material,
+    /// schema registries, internal background mailboxes — here, so the
+    /// supervision `connect()` window stays tight.
     ///
-    /// Returns a plugin that is "ready but not connected".
-    fn create_plugin(&self, ctx: NorthwardInitContext) -> NorthwardResult<Box<dyn Plugin>>;
+    /// Returns a plugin that is "ready but not connected" (the supervision
+    /// loop will start the data plane via [`Plugin::start`]).
+    async fn create_plugin(&self, ctx: NorthwardInitContext) -> NorthwardResult<Box<dyn Plugin>>;
 
-    /// Convert a channel model to a runtime channel
+    /// Convert raw plugin configuration JSON into a typed runtime config.
+    ///
+    /// This is a pure, low-frequency, allocation-bounded conversion;
+    /// implementations MUST NOT perform any network or blocking I/O here.
     fn convert_plugin_config(
         &self,
         config: serde_json::Value,
@@ -497,17 +532,20 @@ pub trait PluginConfig: DowncastSync + Send + Sync + Debug {}
 
 /// Northward plugin trait (host-facing ABI contract).
 ///
-/// # Final architecture (recommended)
-/// In the final supervision architecture, **external plugin crates do NOT implement**
-/// this trait directly. Instead, plugin authors implement `supervision::Connector/Session/Handle`
-/// plus an inherent `fn new(ctx: NorthwardInitContext)`, and the SDK macro generates a
-/// `PluginFactory` that returns `SupervisedPlugin<C>`, which implements this `Plugin` trait.
+/// # Intended implementation path
 ///
-/// This keeps connection governance (retry/budget/state publication/handle publication)
-/// inside the SDK supervision loop and makes behavior consistent across plugins.
+/// External plugin crates should **not** implement this trait directly. Plugin authors
+/// implement [`crate::supervision::Connector`], [`crate::supervision::Session`], and
+/// [`crate::NorthwardHandle`] for their component type, provide `async fn new(ctx:
+/// NorthwardInitContext)` on the connector (via the trait impl), and use
+/// `ng_plugin_factory!`, which builds a [`crate::SupervisedPlugin`] implementing this
+/// `Plugin` trait.
 ///
-/// # Transitional notes
-/// The trait remains public for ABI compatibility during migration.
+/// That keeps retry/budget/state publication/handle publication inside the SDK
+/// supervision loop so all northward plugins behave consistently.
+///
+/// The trait stays public because the host and loaders type-erase loaded libraries as
+/// `Box<dyn Plugin>` / `Arc<dyn PluginFactory>` at the FFI seam.
 #[async_trait]
 pub trait Plugin: DowncastSync + Send + Sync {
     /// Start the plugin (asynchronous). Spawn supervisors and establish connections.
@@ -577,6 +615,28 @@ pub trait Plugin: DowncastSync + Send + Sync {
     /// }
     /// ```
     async fn process_data(&self, data: Arc<NorthwardData>) -> NorthwardResult<()>;
+
+    /// Invoke a plugin-specific control-plane capability.
+    ///
+    /// # Design
+    /// This is a JSON-RPC style extension point for plugin-specific runtime
+    /// introspection or management operations that do not belong to the hot
+    /// telemetry path. Capability identifiers should be stable, versioned,
+    /// URI-like strings such as `ng:northward:opcua-server:inspector:v1`.
+    ///
+    /// # Performance
+    /// This API is intentionally for low-frequency control-plane operations.
+    /// Plugins must not use it for telemetry forwarding, polling loops, or
+    /// other hot-path work.
+    async fn invoke_capability(
+        &self,
+        capability_id: &str,
+        _request: serde_json::Value,
+    ) -> NorthwardResult<serde_json::Value> {
+        Err(NorthwardError::CapabilityNotSupported {
+            capability_id: capability_id.to_string(),
+        })
+    }
 
     /// Stop the plugin and cancel connection supervisor
     ///

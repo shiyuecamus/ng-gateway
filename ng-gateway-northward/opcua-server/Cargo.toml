@@ -23,3 +23,6 @@ thiserror = { version = "2.0" }
 async-opcua = { version = "0.18", features = ["server"] }
 base64 = { version = "0.22" }
 uuid = { version = "1.11", features = ["v4"] }
+url = { version = "2.5", features = ["serde"] }
+sha2 = { version = "0.11" }
+hex = { version = "0.4" }

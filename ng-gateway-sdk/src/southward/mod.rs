@@ -100,8 +100,9 @@ macro_rules! ng_driver_factory {
             }
         }
 
+        #[$crate::export::async_trait::async_trait]
         impl $crate::DriverFactory for __NgComponentDriverFactory {
-            fn create_driver(
+            async fn create_driver(
                 &self,
                 ctx: $crate::SouthwardInitContext,
             ) -> $crate::DriverResult<Box<dyn $crate::Driver>> {
@@ -125,7 +126,6 @@ macro_rules! ng_driver_factory {
                     driver_type = $driver_type
                 );
 
-                // NOTE: `Connector::new(ctx)` MUST be sync and MUST NOT perform I/O.
                 let observer = ctx.observer_factory.create_southward(
                     $crate::supervision::SouthwardObserverLabels {
                         channel_id: ctx.channel_id,
@@ -141,7 +141,12 @@ macro_rules! ng_driver_factory {
                 // like `maxAttempts` would be ignored and drivers would retry forever.
                 let retry_policy = ctx.runtime_channel.connection_policy().backoff.clone();
 
-                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+                // SAFETY: this future is polled on the driver's own NG_RUNTIME
+                // (the FFI wrapper guarantees the runtime hop), so the
+                // connector is free to use any tokio primitive during
+                // construction (`tokio::spawn`, `tokio::time`, `tokio::fs`,
+                // `tokio::task::spawn_blocking`).
+                let connector = <$component as $crate::supervision::Connector>::new(ctx).await?;
                 // Best-effort concurrency profile BEFORE handle is published.
                 let concurrency_profile: $crate::CollectorConcurrencyProfile =
                     <$component as $crate::supervision::Connector>::collector_concurrency_profile_hint(&connector);
@@ -235,8 +240,9 @@ macro_rules! ng_driver_factory {
             }
         }
 
+        #[$crate::export::async_trait::async_trait]
         impl $crate::DriverFactory for __NgComponentDriverFactory {
-            fn create_driver(
+            async fn create_driver(
                 &self,
                 ctx: $crate::SouthwardInitContext,
             ) -> $crate::DriverResult<Box<dyn $crate::Driver>> {
@@ -269,7 +275,9 @@ macro_rules! ng_driver_factory {
                 // IMPORTANT: honor per-channel retry policy from `ConnectionPolicy`.
                 let retry_policy = ctx.runtime_channel.connection_policy().backoff.clone();
 
-                let connector = <$component as $crate::supervision::Connector>::new(ctx)?;
+                // SAFETY: this future is polled on the driver's own NG_RUNTIME
+                // (the FFI wrapper guarantees the runtime hop).
+                let connector = <$component as $crate::supervision::Connector>::new(ctx).await?;
                 // Best-effort concurrency profile BEFORE handle is published.
                 let concurrency_profile: $crate::CollectorConcurrencyProfile =
                     <$component as $crate::supervision::Connector>::collector_concurrency_profile_hint(&connector);
@@ -293,7 +301,7 @@ macro_rules! ng_driver_factory {
                 &self,
                 channel: $crate::ChannelModel,
             ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeChannel>> {
-                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_channel(
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_channel(
                     &self.model_convert,
                     channel,
                 )
@@ -303,7 +311,7 @@ macro_rules! ng_driver_factory {
                 &self,
                 device: $crate::DeviceModel,
             ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeDevice>> {
-                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_device(
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_device(
                     &self.model_convert,
                     device,
                 )
@@ -313,7 +321,7 @@ macro_rules! ng_driver_factory {
                 &self,
                 point: $crate::PointModel,
             ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimePoint>> {
-                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_point(
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_point(
                     &self.model_convert,
                     point,
                 )
@@ -323,7 +331,7 @@ macro_rules! ng_driver_factory {
                 &self,
                 action: $crate::ActionModel,
             ) -> $crate::DriverResult<std::sync::Arc<dyn $crate::RuntimeAction>> {
-                <$model_convert as $crate::supervision::model_convert::SouthwardModelConverter>::convert_runtime_action(
+                <$model_convert as $crate::supervision::converter::SouthwardModelConverter>::convert_runtime_action(
                     &self.model_convert,
                     action,
                 )
@@ -447,8 +455,11 @@ macro_rules! ng_driver_factory {
 
         #[no_mangle]
         pub extern "C" fn create_driver_factory() -> *mut dyn $crate::DriverFactory {
-            let inner: Box<dyn $crate::DriverFactory> =
-                Box::new(<$factory as ::core::default::Default>::default());
+            // The runtime-aware wrapper needs to clone its `inner` factory
+            // into the spawned construction task, so we hold the inner as
+            // an `Arc` and pass that into the wrapper.
+            let inner: ::std::sync::Arc<dyn $crate::DriverFactory> =
+                ::std::sync::Arc::new(<$factory as ::core::default::Default>::default());
             let rt_handle = NG_RUNTIME.as_ref().map(|rt| rt.handle().clone());
             let wrapper: Box<dyn $crate::DriverFactory> =
                 Box::new($crate::ffi::RuntimeAwareDriverFactory::new(inner, $cap, rt_handle));
@@ -519,32 +530,51 @@ pub enum RuntimeDelta {
     },
 }
 
-/// Factory trait for creating driver instances
+/// Factory trait for creating driver instances.
+///
+/// # Async runtime semantics
+///
+/// `create_driver` is asynchronous. When the host loads a `cdylib` driver,
+/// the macro-generated entrypoint (`create_driver_factory`) wraps the
+/// concrete factory in [`crate::ffi::RuntimeAwareDriverFactory`], which:
+///
+/// - spawns the inner construction future onto the driver's own
+///   `NG_RUNTIME` (so driver authors see driver tokio TLS for the entire
+///   duration of construction), and
+/// - guards the spawned [`tokio::task::JoinHandle`] with
+///   [`tokio_util::task::AbortOnDropHandle`] so host-side cancellation
+///   (API timeout, parent task drop) aborts the inner construction at the
+///   next `.await` point.
+///
+/// Implementors MUST NOT assume their construction future runs on the
+/// caller's runtime; they MUST treat the future as cancel-safe and clean
+/// up partial state via `Drop`.
 #[async_trait]
 pub trait DriverFactory: DowncastSync + Send + Sync {
-    /// Create a new driver instance with initialization context (synchronous, no I/O).
+    /// Create a new driver instance with initialization context.
     ///
-    /// Implementations must:
-    /// - Validate and capture all required dependencies from `ctx`
-    /// - Construct internal state and channels
-    /// - NOT perform any blocking or network I/O (that belongs in `Driver::start`)
+    /// Implementations should perform any one-shot bootstrap that lives
+    /// for the entire driver lifetime — credential loading, PKI material,
+    /// schema registries, internal background mailboxes — here, so the
+    /// supervision `connect()` window stays tight.
     ///
-    /// Returns a driver that is "ready but not connected".
-    fn create_driver(&self, ctx: SouthwardInitContext) -> DriverResult<Box<dyn Driver>>;
+    /// Returns a driver that is "ready but not connected" (the supervision
+    /// loop will start the data plane via [`Driver::start`]).
+    async fn create_driver(&self, ctx: SouthwardInitContext) -> DriverResult<Box<dyn Driver>>;
 
-    /// Convert a channel model to a runtime channel
+    /// Convert a channel model to a runtime channel.
     fn convert_runtime_channel(
         &self,
         channel: ChannelModel,
     ) -> DriverResult<Arc<dyn RuntimeChannel>>;
 
-    /// Convert a device model to a runtime device
+    /// Convert a device model to a runtime device.
     fn convert_runtime_device(&self, device: DeviceModel) -> DriverResult<Arc<dyn RuntimeDevice>>;
 
-    /// Convert a point model to a runtime point
+    /// Convert a point model to a runtime point.
     fn convert_runtime_point(&self, point: PointModel) -> DriverResult<Arc<dyn RuntimePoint>>;
 
-    /// Convert an action model to a runtime action
+    /// Convert an action model to a runtime action.
     fn convert_runtime_action(&self, action: ActionModel) -> DriverResult<Arc<dyn RuntimeAction>>;
 }
 

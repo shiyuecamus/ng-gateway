@@ -164,13 +164,13 @@ impl NorthwardAppMetricHandles {
     pub fn snapshot(&self) -> NorthwardAppMetricsSnapshot {
         let sent = self.messages_total[dir_idx(NorthwardDirection::Uplink)]
             [res_idx(NorthwardResult::Success)]
-        .get() as u64;
+        .get();
         let dropped = self.messages_total[dir_idx(NorthwardDirection::Uplink)]
             [res_idx(NorthwardResult::Dropped)]
-        .get() as u64;
+        .get();
         let errors = self.messages_total[dir_idx(NorthwardDirection::Uplink)]
             [res_idx(NorthwardResult::Fail)]
-        .get() as u64;
+        .get();
 
         let (last_sent, last_error, avg_latency_ms) = self.snapshot_state.snapshot();
 

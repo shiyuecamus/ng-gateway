@@ -92,10 +92,8 @@ impl Encoder<S7Message> for Codec {
 
         // Append S7 layer if present
         match (item.cotp, item.app) {
-            (Cotp::D(_), Some(S7AppBody::Segmented(b))) => {
-                if !b.is_empty() {
-                    dst.put_slice(&b);
-                }
+            (Cotp::D(_), Some(S7AppBody::Segmented(b))) if !b.is_empty() => {
+                dst.put_slice(&b);
             }
             (Cotp::D(_), Some(S7AppBody::Parsed(p))) => {
                 let _ = p.encode_to(dst, &());

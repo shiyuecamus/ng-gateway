@@ -95,7 +95,7 @@ impl Connector for Dl645Connector {
     type Session = Dl645Session;
 
     #[inline]
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

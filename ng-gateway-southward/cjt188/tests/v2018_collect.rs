@@ -38,6 +38,7 @@ async fn reconnect_and_collect() {
     let (ctx, device_arc, runtime_points) = build_init_context(channel, device, points);
 
     let connector = <Cjt188Connector as Connector>::new(ctx)
+        .await
         .unwrap_or_else(|e| panic!("create connector failed: {e}"));
     let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
         connector,

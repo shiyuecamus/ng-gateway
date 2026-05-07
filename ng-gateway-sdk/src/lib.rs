@@ -12,8 +12,18 @@ mod transform;
 mod ui_schema;
 mod value;
 
-/// Internal re-exports for use in generated symbols/macros to avoid version drift
+/// Internal re-exports for use in generated symbols/macros to avoid version drift.
+///
+/// These crates are pinned by the SDK and forwarded to plugin authors via
+/// the `ng_plugin_factory!` / `ng_driver_factory!` macros so that:
+///
+/// - macro expansions never need to leak transitive crate versions into
+///   plugin `Cargo.toml`s, and
+/// - the host and the plugin share a single, SDK-owned version of every
+///   piece of cross-runtime glue (tracing layers, async-trait derivations,
+///   tokio task wrappers, …).
 pub mod export {
+    pub use async_trait;
     pub use once_cell;
     pub use serde_json;
     pub use tokio_util;
@@ -41,6 +51,7 @@ pub use northward::{
         TelemetryData, WritePoint, WritePointError, WritePointErrorKind, WritePointResponse,
         WritePointStatus,
     },
+    opcua_server,
     probe::{discover_north_libraries_in_dir, probe_north_library, NorthwardProbeInfo},
     runtime_api::NorthwardRuntimeApi,
     supervised::{NorthwardHandle, SupervisedPlugin},

@@ -93,7 +93,7 @@ impl Connector for EthernetIpConnector {
     type Handle = EthernetIpHandle;
     type Session = EthernetIpSession;
 
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

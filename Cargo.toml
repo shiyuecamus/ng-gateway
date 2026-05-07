@@ -145,7 +145,7 @@ version = "2.0"
 
 # System Information
 [workspace.dependencies.sysinfo]
-version = "0.38"
+version = "0.39"
 
 [workspace.dependencies.libc]
 version = "0.2"
@@ -312,7 +312,7 @@ version = "0.5"
 [workspace.dependencies.bcrypt]
 version = "0.19"
 [workspace.dependencies.md-5]
-version = "0.10"
+version = "0.11"
 [workspace.dependencies.hex]
 version = "0.4"
 
@@ -328,9 +328,9 @@ version = "0.12"
 [workspace.dependencies.base64]
 version = "0.22"
 [workspace.dependencies.hmac]
-version = "0.12"
+version = "0.13"
 [workspace.dependencies.sha2]
-version = "0.10"
+version = "0.11"
 
 # Protocols
 [workspace.dependencies.rumqttc]

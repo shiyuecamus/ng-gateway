@@ -1,11 +1,23 @@
 //! OPC UA server runtime facade.
 //!
-//! We run an in-process OPC UA server (async-opcua-server) and expose a thin handle
-//! to:
-//! - build/update AddressSpace (Objects/NG-Gateway/{channel}/{device}/{point})
-//! - write variable values efficiently
+//! We run an in-process OPC UA server (async-opcua-server) and expose a thin
+//! handle to:
+//! - reconcile + (re-)generate the application instance certificate before
+//!   the server reads its PKI files, with a fully operator-controlled SAN list
+//!   (see [`crate::pki`])
+//! - bind a TCP listener on `bind_addr` (allowed to be wildcard) while the
+//!   advertised endpoint URLs (`advertised_endpoints`) come from a separate
+//!   field — this is what fixes KepServer's `Bad_TcpEndpointUrlInvalid` when
+//!   the historical `host = "0.0.0.0"` leaked into endpoint discovery
+//! - build / update AddressSpace (Objects/NG-Gateway/{channel}/{device}/{point})
+//!   with full UTF-8 (CJK preserved) `NodeId`s, no string round-trip on the
+//!   hot path
 //! - dispatch OPC UA Write requests to gateway southward actions
-use crate::{config::OpcuaServerPluginConfig, write_dispatch::WriteDispatcher};
+
+use crate::{
+    config::OpcuaServerPluginConfig, node_cache::NodeCache, pki::CertSummary,
+    protocol::validate_advertised_endpoints, write_dispatch::WriteDispatcher,
+};
 use base64::Engine;
 use ng_gateway_sdk::{
     log::fields as log_fields, AccessMode, DataType, NorthwardError, NorthwardResult,
@@ -29,7 +41,14 @@ use opcua::{
         Variant,
     },
 };
-use std::{fs, net::IpAddr, path::PathBuf, str::FromStr, sync::Arc, time::Instant};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Instrument};
 
@@ -72,12 +91,10 @@ impl InMemoryNodeManagerImpl for NgGatewayNodeManagerImpl {
                 continue;
             };
 
-            // Dispatch to gateway (no node_id string allocation on hot path)
-            let status = match self
-                .write_dispatch
-                .dispatch_write(&node_id.to_string(), &variant)
-                .await
-            {
+            // Dispatch to gateway directly with the typed `NodeId` — no
+            // `to_string()` hot-path allocation; reverse-lookup uses the
+            // NodeId's native `Hash + Eq`.
+            let status = match self.write_dispatch.dispatch_write(&node_id, &variant).await {
                 Ok(()) => StatusCode::Good,
                 Err(e) => {
                     warn!(node_id = %node_id, error = ?e, "Gateway write failed");
@@ -148,12 +165,50 @@ fn map_write_error(err: &NorthwardError) -> StatusCode {
     }
 }
 
+/// Live runtime metadata produced once during `OpcuaServerRuntime::start`.
+///
+/// Captured here so `OpcuaServerSession` can publish it without re-deriving
+/// any protocol-specific details.
+#[derive(Debug, Clone)]
+pub struct ServerRuntimeMetadata {
+    /// Local socket bind address (verbatim from config).
+    pub bind_addr: String,
+    /// Validated advertised endpoint URLs (canonicalised).
+    pub advertised_endpoints: Vec<String>,
+    /// Live application instance certificate summary at runtime start.
+    pub cert_summary: CertSummary,
+}
+
 #[derive(Clone)]
 pub struct OpcuaServerRuntime {
     handle: opcua::server::ServerHandle,
     node_manager: Arc<NgGatewayNodeManager>,
     namespace_index: u16,
     root_id: NodeId,
+    metadata: ServerRuntimeMetadata,
+}
+
+/// Inputs required by [`OpcuaServerRuntime::start`] to bind and bootstrap the OPC UA listener.
+///
+/// Grouped as a single parameter so callers can evolve the startup surface without
+/// tripping readability or API limits (fewer positional arguments at callsites).
+pub(crate) struct OpcuaServerRuntimeStartParams {
+    /// Gateway-owned application identifier for diagnostics and tracing.
+    pub(crate) app_id: i32,
+    /// Canonical plugin configuration snapshot (immutable for the lifetime of the runtime).
+    pub(crate) config: Arc<OpcuaServerPluginConfig>,
+    /// Gateway northward runtime API (currently unused here; reserved for future hooks).
+    pub(crate) runtime: Arc<dyn NorthwardRuntimeApi>,
+    /// Live node-id cache backing address-space materialisation.
+    pub(crate) node_cache: Arc<NodeCache>,
+    /// Dispatcher that bridges OPC UA writes into gateway southward actions.
+    pub(crate) write_dispatch: Arc<WriteDispatcher>,
+    /// Fingerprint/metadata for the reconciled server certificate on disk.
+    pub(crate) cert_summary: Arc<CertSummary>,
+    /// Root directory housing server PKI material (trusted issuers/client certs).
+    pub(crate) pki_dir: PathBuf,
+    /// Cooperative shutdown signal propagated from the supervised northward lifecycle.
+    pub(crate) shutdown: CancellationToken,
 }
 
 impl OpcuaServerRuntime {
@@ -161,20 +216,53 @@ impl OpcuaServerRuntime {
         self.namespace_index
     }
 
-    pub async fn start(
-        app_id: i32,
-        config: Arc<OpcuaServerPluginConfig>,
-        _runtime: Arc<dyn NorthwardRuntimeApi>,
-        _node_cache: Arc<crate::node_cache::NodeCache>,
-        write_dispatch: Arc<WriteDispatcher>,
-        shutdown: CancellationToken,
-    ) -> NorthwardResult<Self> {
+    pub fn metadata(&self) -> &ServerRuntimeMetadata {
+        &self.metadata
+    }
+
+    /// Build, bind and spawn the OPC UA server task.
+    ///
+    /// # Lifecycle ownership
+    /// PKI bootstrap (reconcile / generate / load / summary) **lives at
+    /// connector scope**, not here. By the time this is called, the
+    /// connector has already produced a valid `cert_summary` referring to
+    /// the on-disk artefacts under `pki_dir`. This function therefore only
+    /// performs cheap, deterministic work: validating endpoints, parsing
+    /// the bind socket, materialising trusted client certs, building and
+    /// binding the server. That keeps the connect-timeout budget tight even on
+    /// weak hardware / debug builds where RSA keypair generation would
+    /// otherwise dominate.
+    pub async fn start(params: OpcuaServerRuntimeStartParams) -> NorthwardResult<Self> {
+        let OpcuaServerRuntimeStartParams {
+            app_id,
+            config,
+            runtime: _runtime,
+            node_cache: _node_cache,
+            write_dispatch,
+            cert_summary,
+            pki_dir,
+            shutdown,
+        } = params;
+
         let t0 = Instant::now();
-        if config.port == 0 {
-            return Err(NorthwardError::ConfigurationError {
-                message: "invalid port: must be in range 1..=65535".to_string(),
-            });
-        }
+
+        // Validate advertised endpoints up-front — cheaper to fail here than
+        // halfway through PKI generation.
+        let advertised = validate_advertised_endpoints(&config.advertised_endpoints)?;
+        let primary = advertised[0].clone();
+
+        // Parse bind address eagerly. Wildcards are explicitly allowed; the
+        // advertised hostname is decoupled from this socket address.
+        let bind_socket: SocketAddr =
+            config
+                .bind_addr
+                .parse()
+                .map_err(|e| NorthwardError::ConfigurationError {
+                    message: format!(
+                        "invalid bind_addr '{}': {e}; expected host:port (e.g. 0.0.0.0:4840)",
+                        config.bind_addr
+                    ),
+                })?;
 
         // Root span for the whole runtime start sequence.
         //
@@ -191,24 +279,24 @@ impl OpcuaServerRuntime {
         );
         let _enter = runtime_span.enter();
 
-        // Build server
-        // PKI directory is not user-configurable by design:
-        // use a stable, per-installed-plugin layout.
-        let pki_dir = format!("./pki/plugin/{app_id}");
         info!(
             target: log_fields::TARGET_PLUGIN,
             source = log_fields::SOURCE_PLUGIN,
             plugin_type = "opcua-server",
             app_id = app_id,
-            host = %config.host,
-            port = config.port,
+            bind_addr = %config.bind_addr,
+            advertised_count = advertised.len(),
+            primary_advertised = %primary.canonical(),
             namespace_uri = %config.namespace_uri,
-            pki_dir = %pki_dir,
+            pki_dir = %pki_dir.display(),
+            cert_thumbprint = %cert_summary.thumbprint_hex,
             "opcua-server runtime: building server"
         );
 
-        // Materialize configured trusted client certificates into PKI trust store
-        // so native `CertificateStore` validation can pick them up.
+        // ---- Trusted client cert provisioning -----------------------------
+        // Cheap, deterministic disk I/O (decode + write). The heavy PKI work
+        // (RSA keypair generation, X509 self-sign) has already been done at
+        // connector construction time — see `OpcuaServerConnector::from_init`.
         let t_pki = Instant::now();
         materialize_trusted_client_certs(&pki_dir, &config.trusted_client_certs)?;
         info!(
@@ -218,10 +306,11 @@ impl OpcuaServerRuntime {
             app_id = app_id,
             pki_prepare_ms = t_pki.elapsed().as_millis() as u64,
             trusted_client_certs = config.trusted_client_certs.len(),
-            "opcua-server runtime: PKI prepared"
+            "opcua-server runtime: PKI prepared (reusing connector-owned cert)"
         );
 
-        let endpoint_path = "/";
+        // ---- Server build -------------------------------------------------
+        let endpoint_path = primary.path.as_str();
         let config_for_nm = Arc::clone(&config);
         let write_dispatch_for_nm = Arc::clone(&write_dispatch);
         let user_token_ids: &[&str] = &[ANONYMOUS_USER_TOKEN_ID];
@@ -229,20 +318,18 @@ impl OpcuaServerRuntime {
             .application_name("NG-Gateway OPC UA Server")
             .application_uri(config.application_uri.clone())
             .product_uri(config.product_uri.clone())
-            // Production note: this makes first-run easier by generating a self-signed cert
-            // into the PKI dir when missing. You can turn this off and provide your own certs
-            // by pre-provisioning files under `pki/plugin/{app_id}`.
-            .create_sample_keypair(true)
+            // PKI is now plugin-managed via `crate::pki`; we never let
+            // async-opcua auto-generate because its SAN list is non-extensible.
+            .create_sample_keypair(false)
             .certificate_path("own/cert.der")
             .private_key_path("private/private.pem")
-            .pki_dir(pki_dir)
-            .host(config.host.clone())
-            .port(config.port)
-            .discovery_urls(default_discovery_urls(
-                &config.host,
-                config.port,
-                endpoint_path,
-            ))
+            .pki_dir(pki_dir.clone())
+            // `host()` and `port()` here only feed the advertised endpoint
+            // URL composer in `info::base_endpoint()`; the actual TCP bind is
+            // controlled by `Server::run_with(listener)` below.
+            .host(primary.host.clone())
+            .port(primary.port)
+            .discovery_urls(config.advertised_endpoints.clone())
             .add_endpoint(
                 "no_security",
                 (
@@ -293,8 +380,9 @@ impl OpcuaServerRuntime {
             .token(shutdown.clone());
 
         // IMPORTANT:
-        // `async-opcua-server` uses `tokio::spawn` in a few sync helpers (e.g. SyncSampler),
-        // so we must ensure we are inside *our* Tokio runtime context here.
+        // `async-opcua-server` uses `tokio::spawn` in a few sync helpers
+        // (e.g. SyncSampler), so we must ensure we are inside *our* Tokio
+        // runtime context here.
         let t_build = Instant::now();
         let (server, handle) = builder
             .build()
@@ -319,14 +407,28 @@ impl OpcuaServerRuntime {
         let namespace_index = handle
             .get_namespace_index(&config.namespace_uri)
             .unwrap_or(1);
-        // Intentionally no info/debug logs here (can be very chatty in production).
         let root_id = NodeId::new(namespace_index, "NG-Gateway");
 
-        // Run server in background
-        // Ensure the long-running server task always carries `app_id` span context so:
-        // - host-side per-app log filtering works
-        // - third-party crates that use `tokio::spawn` internally inherit this context
-        //   (when Tokio `tracing` feature is enabled).
+        // ---- Bind dedicated listener (decoupled from advertised hostname) -
+        let t_bind = Instant::now();
+        let listener =
+            TcpListener::bind(bind_socket)
+                .await
+                .map_err(|e| NorthwardError::GatewayError {
+                    reason: format!("failed to bind {bind_socket}: {e}"),
+                })?;
+        info!(
+            target: log_fields::TARGET_PLUGIN,
+            source = log_fields::SOURCE_PLUGIN,
+            plugin_type = "opcua-server",
+            app_id = app_id,
+            bind_addr = %bind_socket,
+            bind_ms = t_bind.elapsed().as_millis() as u64,
+            "opcua-server runtime: TCP listener bound"
+        );
+
+        // Run server in background using OUR listener so the bind address can
+        // be a wildcard (multi-NIC / Docker) without polluting the endpoint URL.
         let server_span = tracing::info_span!(
             target: log_fields::TARGET_PLUGIN,
             "opcua-server-run",
@@ -336,7 +438,7 @@ impl OpcuaServerRuntime {
         );
         tokio::spawn(
             async move {
-                let _ = server.run().await;
+                let _ = server.run_with(listener).await;
             }
             .instrument(server_span),
         );
@@ -350,19 +452,28 @@ impl OpcuaServerRuntime {
             "opcua-server runtime: server task spawned"
         );
 
+        let metadata = ServerRuntimeMetadata {
+            bind_addr: config.bind_addr.clone(),
+            advertised_endpoints: advertised.iter().map(|e| e.canonical()).collect(),
+            // Reuse the connector-owned summary so all attempts/sessions
+            // observe a stable, single source of truth for the live cert.
+            cert_summary: cert_summary.as_ref().clone(),
+        };
+
         Ok(Self {
             handle,
             node_manager,
             namespace_index,
             root_id,
+            metadata,
         })
     }
 
-    pub fn upsert_point_node(&self, meta: &PointMeta, node_id: &str) {
-        let node_id = match NodeId::from_str(node_id) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+    /// Create / update a `Variable` node for a given point.
+    ///
+    /// Accepts a typed `&NodeId` to avoid the `from_str` round-trip that the
+    /// previous string-centric implementation paid on every materialisation.
+    pub fn upsert_point_node(&self, meta: &PointMeta, node_id: &NodeId) {
         let channel_obj = NodeId::new(
             self.namespace_index,
             format!("ch.{}", meta.channel_name.as_ref()),
@@ -398,11 +509,11 @@ impl OpcuaServerRuntime {
         }
 
         // Create variable if missing
-        if !as_write.node_exists(&node_id) {
+        if !as_write.node_exists(node_id) {
             let dt = map_data_type(meta.data_type);
             let access = map_access_level(meta.access_mode);
             let mut vb =
-                VariableBuilder::new(&node_id, meta.point_key.as_ref(), meta.point_name.as_ref())
+                VariableBuilder::new(node_id, meta.point_key.as_ref(), meta.point_name.as_ref())
                     .data_type(dt)
                     .value(Variant::Empty)
                     .access_level(access)
@@ -415,34 +526,29 @@ impl OpcuaServerRuntime {
         }
     }
 
-    pub fn remove_node(&self, node_id: &str) {
-        let Ok(id) = NodeId::from_str(node_id) else {
-            return;
-        };
+    /// Delete a previously-materialised variable node.
+    pub fn remove_node(&self, node_id: &NodeId) {
         let mut as_write = self.node_manager.address_space().write();
-        let _ = as_write.delete(&id, true);
+        let _ = as_write.delete(node_id, true);
     }
 
     /// Update a variable node's value in the address space.
     ///
     /// Accepts a fully-formed `DataValue` so the caller can control
     /// `source_timestamp` / `server_timestamp` semantics.
-    pub fn set_value(&self, node_id: &str, dv: DataValue) {
-        let Ok(id) = NodeId::from_str(node_id) else {
-            return;
-        };
+    pub fn set_value(&self, node_id: &NodeId, dv: DataValue) {
         let _ = self
             .node_manager
-            .set_value(self.handle.subscriptions(), &id, None, dv);
+            .set_value(self.handle.subscriptions(), node_id, None, dv);
     }
 }
 
-fn materialize_trusted_client_certs(pki_dir: &str, certs: &[String]) -> NorthwardResult<()> {
+fn materialize_trusted_client_certs(pki_dir: &Path, certs: &[String]) -> NorthwardResult<()> {
     if certs.is_empty() {
         return Ok(());
     }
 
-    let trusted_dir = PathBuf::from(pki_dir).join("trusted");
+    let trusted_dir = pki_dir.join("trusted");
     fs::create_dir_all(&trusted_dir).map_err(|e| NorthwardError::ConfigurationError {
         message: format!(
             "failed to create PKI trusted directory {}: {e}",
@@ -558,57 +664,5 @@ fn map_data_type(dt: DataType) -> DataTypeId {
         DataType::String => DataTypeId::String,
         DataType::Binary => DataTypeId::ByteString,
         DataType::Timestamp => DataTypeId::DateTime,
-    }
-}
-
-fn default_discovery_urls(host: &str, port: u16, endpoint_path: &str) -> Vec<String> {
-    // `async-opcua-server` requires discovery_urls to be non-empty.
-    // For bind-all addresses, advertise loopback by default (clients cannot connect to 0.0.0.0).
-    let is_wildcard = matches!(host, "0.0.0.0" | "::" | "0:0:0:0:0:0:0:0");
-    let path = if endpoint_path.starts_with('/') {
-        endpoint_path
-    } else {
-        "/"
-    };
-
-    if is_wildcard {
-        return vec![
-            format!("opc.tcp://localhost:{port}{path}"),
-            format!("opc.tcp://127.0.0.1:{port}{path}"),
-            format!("opc.tcp://[::1]:{port}{path}"),
-        ];
-    }
-
-    // If host is an IPv6 literal, make sure it is bracketed for URL authority.
-    let host_for_url = match host.parse::<IpAddr>() {
-        Ok(IpAddr::V6(_)) => format!("[{host}]"),
-        _ => host.to_string(),
-    };
-
-    vec![format!("opc.tcp://{host_for_url}:{port}{path}")]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::default_discovery_urls;
-
-    #[test]
-    fn default_discovery_urls_is_non_empty_for_wildcard_hosts() {
-        let urls = default_discovery_urls("0.0.0.0", 4840, "/");
-        assert!(!urls.is_empty());
-        assert!(urls.iter().any(|u| u.contains("localhost:4840")));
-    }
-
-    #[test]
-    fn default_discovery_urls_uses_given_host_for_normal_host() {
-        let urls = default_discovery_urls("192.168.1.10", 4840, "/");
-        assert_eq!(urls, vec!["opc.tcp://192.168.1.10:4840/".to_string()]);
-    }
-
-    #[test]
-    fn default_discovery_urls_brackets_ipv6() {
-        let urls = default_discovery_urls("::1", 4840, "/");
-        // NOTE: ::1 is not treated as wildcard; it should be directly usable by clients.
-        assert_eq!(urls, vec!["opc.tcp://[::1]:4840/".to_string()]);
     }
 }

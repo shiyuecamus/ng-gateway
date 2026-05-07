@@ -21,7 +21,7 @@ use ng_gateway_models::{
     entities::prelude::{AppModel, AppSubModel},
     enums::common::Status,
 };
-use ng_gateway_sdk::NorthwardInitContext;
+use ng_gateway_sdk::{NorthwardInitContext, PluginFactory};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -142,10 +142,17 @@ impl NGNorthwardManager {
         app: &AppModel,
         shutdown_token: CancellationToken,
     ) -> NGResult<Arc<AppActor>> {
-        // Get plugin factory
-        let factory = self
+        // Get plugin factory.
+        //
+        // We deliberately clone the `Arc` out of the registry instead of
+        // holding the `dashmap::Ref` guard across the `await` boundary
+        // below — the guard is `!Send` and would also keep the shard
+        // locked for the duration of plugin creation, blocking unrelated
+        // factory lookups.
+        let factory: Arc<dyn PluginFactory + Send + Sync> = self
             .plugin_registry
             .get(&app.plugin_id)
+            .map(|r| Arc::clone(r.value()))
             .ok_or(NGError::Error(format!(
                 "Plugin {} not found in registry",
                 app.plugin_id
@@ -187,9 +194,30 @@ impl NGNorthwardManager {
             observer_factory,
         };
 
-        // Create plugin instance with context (no I/O)
+        // Create the plugin instance.
+        //
+        // # Async runtime semantics
+        //
+        // `PluginFactory::create_plugin` is now `async` and runs entirely
+        // on the plugin's own `NG_RUNTIME`. The `cdylib`-side
+        // `RuntimeAwarePluginFactory` wrapper:
+        //
+        // - spawns the inner construction future onto the plugin runtime
+        //   via `Handle::spawn(...)` (so plugin authors see plugin tokio
+        //   TLS — `tokio::spawn`, `tokio::time`, `tokio::fs`,
+        //   `tokio::task::spawn_blocking` all work as usual), and
+        // - guards the resulting `JoinHandle` with `AbortOnDropHandle`,
+        //   so dropping this `await` (e.g. on host-side timeout) aborts
+        //   the inner construction at its next `.await` point.
+        //
+        // CPU-bound bootstrap work (notably OPC UA Server's RSA-2048 keygen
+        // inside `OpcuaServerConnector::from_init`) is off-loaded by the
+        // connector itself onto the plugin's blocking pool via
+        // `tokio::task::spawn_blocking`, so this `await` never blocks a
+        // host worker even on a fresh app.
         let plugin = factory
             .create_plugin(init_ctx)
+            .await
             .map_err(|e| NGError::Error(format!("Plugin creation failed: {}", e)))?;
 
         info!(

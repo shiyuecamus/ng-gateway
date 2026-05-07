@@ -11,7 +11,7 @@ use super::{
     ConnectionState, FailureKind, FailurePhase, FailureReport, HandleCell, NoopObserver, Observer,
     Phase, RetryBudgetSnapshot,
 };
-use crate::{RetryController, RetryDecision, RetryPolicy};
+use crate::{NorthwardResult, RetryController, RetryDecision, RetryPolicy};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -133,6 +133,22 @@ where
     #[inline]
     pub fn load_handle(&self) -> Option<Arc<C::Handle>> {
         self.handle_cell.load()
+    }
+
+    /// Invoke a connector-defined low-frequency capability.
+    ///
+    /// This intentionally does not require a published data-plane handle so
+    /// callers can inspect connector-owned state even before the session reaches
+    /// the Ready phase.
+    #[inline]
+    pub async fn invoke_capability(
+        &self,
+        capability_id: &str,
+        request: serde_json::Value,
+    ) -> NorthwardResult<serde_json::Value> {
+        self.connector
+            .invoke_capability(capability_id, request)
+            .await
     }
 
     /// Start the background supervision task.

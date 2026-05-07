@@ -84,7 +84,7 @@ impl Connector for Iec104Connector {
     type Session = Iec104Session;
 
     #[inline]
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

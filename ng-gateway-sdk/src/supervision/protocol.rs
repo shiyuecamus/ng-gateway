@@ -9,6 +9,7 @@
 //! - `Session::run()` drives the session until disconnect/cancel/reconnect request.
 
 use super::{super::CollectorConcurrencyProfile, FailureKind, FailurePhase, FailureReport};
+use crate::{NorthwardError, NorthwardResult};
 use std::{error, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -87,20 +88,60 @@ impl SessionContext {
 #[async_trait::async_trait]
 pub trait Connector: Send + Sync + 'static {
     /// Initialization context type for constructing this connector.
-    ///
-    /// # Contract
-    /// - MUST be synchronous (no async).
-    /// - MUST NOT perform any network or blocking I/O.
     type InitContext: Send + 'static;
     /// Data-plane handle type to publish when Ready.
     type Handle: Send + Sync + 'static;
     /// Session type that drives the connection lifecycle.
     type Session: Session<Handle = Self::Handle>;
 
-    /// Construct the connector from initialization context (no I/O).
+    /// Construct the connector from initialization context.
     ///
-    /// This is invoked by `ng_driver_factory! / ng_plugin_factory!` macro expansions.
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    /// This is invoked by `ng_driver_factory!` / `ng_plugin_factory!` macro
+    /// expansions on behalf of the host.
+    ///
+    /// # Async runtime semantics
+    ///
+    /// The returned future is **always polled on the plugin/driver's own
+    /// `NG_RUNTIME`**. The macro-generated factory wraps the host call in
+    /// `RuntimeAware{Plugin,Driver}Factory`, which:
+    ///
+    /// - spawns the inner future onto the plugin's runtime via
+    ///   [`tokio::runtime::Handle::spawn`] (so the plugin's tokio TLS is
+    ///   available throughout this future), and
+    /// - guards the resulting [`tokio::task::JoinHandle`] with
+    ///   [`tokio_util::task::AbortOnDropHandle`] so a host-side drop
+    ///   (API timeout, request abort, parent cancellation) immediately
+    ///   aborts this construction at its next `.await` point.
+    ///
+    /// Concretely, implementations may freely use any tokio primitive
+    /// without manual runtime hops:
+    ///
+    /// - [`tokio::spawn`] for connector-scoped background tasks (cert
+    ///   monitors, periodic refreshers, internal mailboxes, …),
+    /// - [`tokio::time`] / [`tokio::fs`] / [`tokio::sync::*`] freely,
+    /// - [`tokio::task::spawn_blocking`] (`.await` it) for CPU-bound
+    ///   bootstrap such as RSA keygen, large config decoding, etc.
+    ///
+    /// # Cancellation contract
+    ///
+    /// This future MUST be cancel-safe. Any partial state created before
+    /// an `.await` (temporary files, spawned tasks, allocated channels,
+    /// background mailboxes) MUST be reclaimed via `Drop`. The recommended
+    /// pattern is to bind such state to RAII guards (e.g. a struct that
+    /// cancels a [`tokio_util::sync::CancellationToken`] in its `Drop`
+    /// implementation) and only commit them into `Self` once construction
+    /// is fully successful.
+    ///
+    /// # Where to do heavy work
+    ///
+    /// Heavy or one-shot bootstrap work belongs **here**, not in
+    /// [`Connector::connect`]. The supervision `connect()` window is
+    /// constrained by the host's `start_app_with_policy` timeout; anything
+    /// that lives for the entire connector lifetime (PKI bootstrap,
+    /// long-lived monitors, schema registries, persistent caches) should
+    /// be initialised here so the supervision retry/backoff cycle stays
+    /// tight and predictable.
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized;
 
@@ -119,6 +160,22 @@ pub trait Connector: Send + Sync + 'static {
         &self,
         ctx: SessionContext,
     ) -> Result<Self::Session, <Self::Session as Session>::Error>;
+
+    /// Invoke a plugin/driver-specific low-frequency capability.
+    ///
+    /// # Notes
+    /// This method is control-plane only and defaults to a stable "not
+    /// supported" error so SDK-supervised components can expose optional
+    /// runtime introspection without changing the hot-path data contracts.
+    async fn invoke_capability(
+        &self,
+        capability_id: &str,
+        _request: serde_json::Value,
+    ) -> NorthwardResult<serde_json::Value> {
+        Err(NorthwardError::CapabilityNotSupported {
+            capability_id: capability_id.to_string(),
+        })
+    }
 
     /// Classify an error as retryable/fatal/stop depending on the phase.
     ///

@@ -42,7 +42,9 @@ pub struct OpcuaChannelRuntimeArgs {
 /// # Assumptions
 /// - Node ids are `ns=3;i={start..start+count}` (inclusive of start, exclusive of end).
 /// - All points are Float32.
-pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResult<ChannelRuntime> {
+pub async fn build_opcua_channel_runtime(
+    args: OpcuaChannelRuntimeArgs,
+) -> DriverResult<ChannelRuntime> {
     let runtime_channel: Arc<OpcUaChannel> = Arc::new(OpcUaChannel {
         id: (2000 + args.channel_idx) as i32,
         name: format!("bench-opcua-ch-{}", args.channel_idx),
@@ -144,7 +146,7 @@ pub fn build_opcua_channel_runtime(args: OpcuaChannelRuntimeArgs) -> DriverResul
         observer_factory: Arc::new(NoopObserverFactory),
     };
 
-    let connector = <OpcUaConnector as Connector>::new(ctx)?;
+    let connector = <OpcUaConnector as Connector>::new(ctx).await?;
     let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
         connector,
         SupervisorParams::default(),

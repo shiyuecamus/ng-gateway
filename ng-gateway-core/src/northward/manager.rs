@@ -26,8 +26,8 @@ use ng_gateway_models::{
     NorthwardManager,
 };
 use ng_gateway_sdk::{
-    AttributeData, ConnectionState, DeviceConnectedData, DeviceDisconnectedData, NorthwardData,
-    PointValue, TelemetryData,
+    AttributeData, ConnectionState, DataPointType, DeviceConnectedData, DeviceDisconnectedData,
+    NorthwardData, PointMeta, PointValue, TelemetryData,
 };
 use sea_orm::DatabaseConnection;
 use std::{collections::HashMap, sync::Arc};
@@ -609,6 +609,23 @@ impl NGNorthwardManager {
         self.app_actors.get(&app_id).map(|e| e.value().clone())
     }
 
+    /// Return the current point metadata and point kind from the runtime index.
+    ///
+    /// # Notes
+    /// This is a low-frequency control-plane helper used by export/reporting
+    /// endpoints. It clones cheap `Arc<PointMeta>` values and avoids exposing
+    /// the internal runtime index shape to web handlers.
+    pub fn get_point_meta_and_type(
+        &self,
+        point_id: i32,
+    ) -> Option<(Arc<PointMeta>, DataPointType)> {
+        let index = self.southward_manager.runtime_index();
+        index.point_entries_by_id.get(&point_id).map(|entry| {
+            let value = entry.value();
+            (Arc::clone(&value.meta), value.point.r#type())
+        })
+    }
+
     /// Get manager status
     pub async fn get_status(&self) -> NorthwardManagerMetricsSnapshot {
         self.metrics_hub.snapshot_northward_manager()
@@ -754,11 +771,26 @@ impl NGNorthwardManager {
     }
 }
 
-// Implement the trait for accessing connection states
+// Implement the trait for accessing connection states and capabilities.
+#[async_trait::async_trait]
 impl NorthwardManager for NGNorthwardManager {
     fn get_app_connection_state(&self, app_id: i32) -> Option<Arc<ConnectionState>> {
         self.app_actors
             .get(&app_id)
             .map(|actor| actor.value().get_connection_state())
+    }
+
+    async fn invoke_app_capability(
+        &self,
+        app_id: i32,
+        capability_id: &str,
+        request: serde_json::Value,
+    ) -> NGResult<serde_json::Value> {
+        let actor = self.get_app(app_id).ok_or_else(|| {
+            NGError::Error(format!(
+                "northward app {app_id} is not running; cannot invoke capability '{capability_id}'"
+            ))
+        })?;
+        actor.invoke_capability(capability_id, request).await
     }
 }

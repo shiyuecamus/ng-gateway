@@ -106,19 +106,15 @@ impl ValueCodec {
         // Note: `coerce_i64_to_value/coerce_u64_to_value` internally uses `as f64` when transform is enabled.
         if !t.is_identity_numeric() {
             match &value {
-                NGValue::UInt64(v) => {
-                    if *v > Self::F64_EXACT_INT_MAX_U64 {
-                        return Err(DriverError::ValidationError(format!(
-                            "numeric uplink value too large for safe transform (UInt64 > 2^53): {v}"
-                        )));
-                    }
+                NGValue::UInt64(v) if *v > Self::F64_EXACT_INT_MAX_U64 => {
+                    return Err(DriverError::ValidationError(format!(
+                        "numeric uplink value too large for safe transform (UInt64 > 2^53): {v}"
+                    )));
                 }
-                NGValue::Int64(v) => {
-                    if v.unsigned_abs() > Self::F64_EXACT_INT_MAX_U64 {
-                        return Err(DriverError::ValidationError(format!(
-                            "numeric uplink value too large for safe transform (Int64 magnitude > 2^53): {v}"
-                        )));
-                    }
+                NGValue::Int64(v) if v.unsigned_abs() > Self::F64_EXACT_INT_MAX_U64 => {
+                    return Err(DriverError::ValidationError(format!(
+                        "numeric uplink value too large for safe transform (Int64 magnitude > 2^53): {v}"
+                    )));
                 }
                 _ => {}
             }

@@ -71,7 +71,7 @@ impl Connector for KafkaConnector {
     type Session = KafkaSession;
 
     #[inline]
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

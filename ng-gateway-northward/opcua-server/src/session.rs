@@ -1,14 +1,20 @@
 //! OPC UA Server supervised session implementation.
 //!
-//! This module contains the per-attempt session lifecycle driven by the SDK supervisor.
-//! - `init()`: spawns background tasks (node builder, runtime delta listener, applier).
+//! This module contains the per-attempt session lifecycle driven by the SDK
+//! supervisor.
+//! - `init()`: spawns background tasks (node builder, runtime delta listener,
+//!   applier) and publishes runtime metadata for the inspector capability.
 //! - `run()`: waits until cancellation.
+//!
+//! Throughout this module we keep the `NodeId` type at every layer — no
+//! `String` round-trips on the per-update / per-node hot path.
 
 use super::{
     codec::value_to_variant,
     handle::OpcuaServerHandle,
     node_cache::NodeCache,
-    node_id::make_full_node_id,
+    protocol::make_node_id,
+    publication::{RuntimePublication, RuntimePublicationGuard, RuntimePublisher},
     queue::{UpdateBatch, UpdateQueueRx},
     server::OpcuaServerRuntime,
 };
@@ -18,18 +24,27 @@ use ng_gateway_sdk::{
     supervision::{RunOutcome, Session, SessionContext},
     NorthwardError, NorthwardRuntimeApi, RuntimeDelta,
 };
-use opcua::types::{DataValue, DateTime, StatusCode};
+use opcua::types::{DataValue, DateTime, NodeId, StatusCode};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, Instrument};
 
 /// OPC UA Server session for a single supervision attempt.
+///
+/// Owns a `RuntimePublicationGuard` so the runtime publication channel is
+/// automatically cleared when the session ends (`run()` returns, the future is
+/// cancelled, or the session is dropped during error unwind).
 pub struct OpcuaServerSession {
     handle: Arc<OpcuaServerHandle>,
     server: OpcuaServerRuntime,
     node_build_rx: Option<mpsc::Receiver<i32>>,
     update_rx: Arc<Mutex<UpdateQueueRx>>,
+    /// Held until the session ends, then `Drop` clears the runtime publication.
+    publication_guard: Option<RuntimePublicationGuard>,
+    /// Captured at construction and used during `init()` after server metadata
+    /// has been finalized.
+    publisher: RuntimePublisher,
 }
 
 impl OpcuaServerSession {
@@ -38,12 +53,15 @@ impl OpcuaServerSession {
         server: OpcuaServerRuntime,
         node_build_rx: mpsc::Receiver<i32>,
         update_rx: UpdateQueueRx,
+        publisher: RuntimePublisher,
     ) -> Self {
         Self {
             handle,
             server,
             node_build_rx: Some(node_build_rx),
             update_rx: Arc::new(Mutex::new(update_rx)),
+            publication_guard: None,
+            publisher,
         }
     }
 
@@ -65,9 +83,9 @@ impl OpcuaServerSession {
             let Some(meta) = runtime.get_point_meta(point_id) else {
                 continue;
             };
-            let node_id = make_full_node_id(namespace_index, meta.as_ref());
-            node_cache.upsert(meta.point_id, Arc::<str>::from(node_id.as_str()));
+            let node_id = make_node_id(namespace_index, meta.as_ref());
             server.upsert_point_node(meta.as_ref(), &node_id);
+            node_cache.upsert(meta.point_id, node_id);
         }
     }
 
@@ -94,14 +112,14 @@ impl OpcuaServerSession {
                                     continue;
                                 }
                                 if let Some(meta) = runtime.get_point_meta(p.id()) {
-                                    let node_id = make_full_node_id(namespace_index, meta.as_ref());
-                                    node_cache.upsert(meta.point_id, Arc::<str>::from(node_id.as_str()));
+                                    let node_id = make_node_id(namespace_index, meta.as_ref());
                                     server.upsert_point_node(meta.as_ref(), &node_id);
+                                    node_cache.upsert(meta.point_id, node_id);
                                 }
                             }
                             for p in removed.iter() {
                                 if let Some(node_id) = node_cache.remove_by_point(p.id()) {
-                                    server.remove_node(node_id.as_ref());
+                                    server.remove_node(&node_id);
                                 }
                             }
                         }
@@ -144,17 +162,16 @@ async fn apply_batch(
     batch: &UpdateBatch,
 ) {
     for pv in batch.values.iter() {
-        let node_id = match node_cache.get_node_id(pv.point_id) {
+        let node_id: NodeId = match node_cache.get_node_id(pv.point_id) {
             Some(id) => id,
             None => {
                 let Some(meta) = runtime.get_point_meta(pv.point_id) else {
                     continue;
                 };
-                let full = make_full_node_id(namespace_index, meta.as_ref());
-                let arc = Arc::<str>::from(full.as_str());
-                node_cache.upsert(meta.point_id, Arc::clone(&arc));
-                server.upsert_point_node(meta.as_ref(), &full);
-                arc
+                let id = make_node_id(namespace_index, meta.as_ref());
+                server.upsert_point_node(meta.as_ref(), &id);
+                node_cache.upsert(meta.point_id, id.clone());
+                id
             }
         };
         let variant = value_to_variant(&pv.value);
@@ -169,7 +186,7 @@ async fn apply_batch(
         } else {
             DataValue::new_now(variant)
         };
-        server.set_value(node_id.as_ref(), dv);
+        server.set_value(&node_id, dv);
     }
 }
 
@@ -186,6 +203,22 @@ impl Session for OpcuaServerSession {
         let _enter = ctx.span.enter();
         let t0 = Instant::now();
         let namespace_index = self.server.namespace_index();
+
+        // Publish the live runtime metadata for the inspector. The guard is
+        // bound to `self`; on session drop the publication slot is cleared
+        // back to `None` so late inspector calls observe "no live runtime"
+        // instead of stale data from this attempt.
+        let metadata = self.server.metadata().clone();
+        let publication = RuntimePublication {
+            namespace_index,
+            bind_addr: metadata.bind_addr,
+            advertised_endpoints: metadata.advertised_endpoints,
+            cert_summary: Some(metadata.cert_summary),
+        };
+        self.publication_guard = Some(RuntimePublicationGuard::publish(
+            Arc::clone(&self.publisher),
+            publication,
+        ));
 
         let Some(node_build_rx) = self.node_build_rx.take() else {
             return Err(NorthwardError::ConfigurationError {

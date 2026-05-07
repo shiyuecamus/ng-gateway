@@ -10,6 +10,7 @@ mod driver;
 mod menu;
 mod net_debug;
 mod network;
+mod opcua_server;
 mod plugin;
 mod point;
 mod role;
@@ -82,7 +83,11 @@ fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
             .service(web::scope(point::ROUTER_PREFIX).configure(point::configure_routes))
             .service(web::scope(action::ROUTER_PREFIX).configure(action::configure_routes))
             .service(web::scope(plugin::ROUTER_PREFIX).configure(plugin::configure_routes))
-            .service(web::scope(app::ROUTER_PREFIX).configure(app::configure_routes))
+            .service(
+                web::scope(app::ROUTER_PREFIX)
+                    .configure(app::configure_routes)
+                    .configure(opcua_server::configure_routes),
+            )
             .service(web::scope(app_sub::ROUTER_PREFIX).configure(app_sub::configure_routes))
             .service(web::scope(net_debug::ROUTER_PREFIX).configure(net_debug::configure_routes))
             .service(web::scope(network::ROUTER_PREFIX).configure(network::configure_routes))
@@ -134,6 +139,9 @@ pub async fn init_rbac_rules(
 
     // Northward app module rules
     app::init_rbac_rules(router_prefix, perm_checker).await?;
+
+    // OPC UA Server app module rules
+    opcua_server::init_rbac_rules(router_prefix, perm_checker).await?;
 
     // Northward subscription module rules
     app_sub::init_rbac_rules(router_prefix, perm_checker).await?;

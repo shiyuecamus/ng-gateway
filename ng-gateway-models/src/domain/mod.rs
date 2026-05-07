@@ -29,6 +29,8 @@ mod net_debug;
 #[allow(clippy::needless_update)]
 mod network;
 #[allow(clippy::needless_update)]
+mod opcua_server;
+#[allow(clippy::needless_update)]
 mod plugin;
 #[allow(clippy::needless_update)]
 mod point;

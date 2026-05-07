@@ -15,20 +15,32 @@ pub(super) fn build_metadata() -> PluginConfigSchemas {
             order: Some(1),
             children: vec![
                 Node::Field(Box::new(Field {
-                    path: "host".into(),
-                    label: ui_text!(en = "Host", zh = "主机"),
+                    path: "bind_addr".into(),
+                    label: ui_text!(en = "Bind Address", zh = "监听地址"),
                     data_type: UiDataType::String,
-                    default_value: Some(json!("0.0.0.0")),
+                    default_value: Some(json!("0.0.0.0:4840")),
                     order: Some(1),
-                    ui: None,
+                    ui: Some(UiProps {
+                        help: Some(ui_text!(
+                            en = "Local TCP socket bind address in 'host:port' form. Wildcards \
+                                  '0.0.0.0' / '[::]' are allowed for multi-interface listening \
+                                  (bare-metal multi-NIC, Docker bridge container internal). The \
+                                  client-facing endpoint URLs are configured separately via \
+                                  'Advertised Endpoints'.",
+                            zh = "本地 TCP 套接字绑定地址，格式 host:port。允许使用通配符 '0.0.0.0' / '[::]' \
+                                  以多接口监听（裸机多网卡 / Docker bridge 容器内部）。客户端可达的 \
+                                  endpoint URL 由 '公告 Endpoint' 字段独立配置。"
+                        )),
+                        ..Default::default()
+                    }),
                     rules: Some(Rules {
                         required: Some(RuleValue::Value(true)),
-                        // Hostname (RFC-1123 labels, no leading/trailing hyphen) OR IPv4
+                        // host:port ; host can be IPv4 / IPv6 (bracketed) / hostname / wildcard 0.0.0.0 / [::]
                         pattern: Some(RuleValue::WithMessage {
-                            value: "^(?:(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*|(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d))$".to_string(),
+                            value: "^(?:\\[[0-9A-Fa-f:]+\\]|[A-Za-z0-9._-]+):(?:[1-9][0-9]{0,4})$".to_string(),
                             message: Some(ui_text!(
-                                en = "Enter a valid IPv4 address or hostname (no schema/port)",
-                                zh = "请输入有效的 IPv4 或主机名（不含协议和端口）"
+                                en = "Bind address must be 'host:port' (e.g. 0.0.0.0:4840 or [::]:4840 or 192.168.1.10:4840)",
+                                zh = "绑定地址必须为 host:port 格式（如 0.0.0.0:4840 / [::]:4840 / 192.168.1.10:4840）"
                             )),
                         }),
                         ..Default::default()
@@ -36,23 +48,42 @@ pub(super) fn build_metadata() -> PluginConfigSchemas {
                     when: None,
                 })),
                 Node::Field(Box::new(Field {
-                    path: "port".into(),
-                    label: ui_text!(en = "Port", zh = "端口"),
-                    data_type: UiDataType::Integer,
-                    default_value: Some(json!(4840)),
+                    path: "advertised_endpoints".into(),
+                    label: ui_text!(en = "Advertised Endpoints", zh = "公告 Endpoint"),
+                    data_type: UiDataType::Any,
+                    default_value: Some(json!([])),
                     order: Some(2),
-                    ui: None,
+                    ui: Some(UiProps {
+                        help: Some(ui_text!(
+                            en = "REQUIRED non-empty list of OPC UA endpoint URLs the server publishes \
+                                  to clients via discovery. Each entry MUST be a valid \
+                                  'opc.tcp://host[:port][/path]' with a concrete host (no wildcards). \
+                                  Strict OPC UA clients (KEPServerEX, UaExpert) reject any endpoint \
+                                  whose host is 0.0.0.0 / [::]. Typical filling per deployment:\n\
+                                  - bare-metal: [\"opc.tcp://192.168.1.10:4840/\", \"opc.tcp://gateway.local:4840/\"]\n\
+                                  - Docker --network host: same as bare-metal\n\
+                                  - Docker bridge '-p 4840:4840': [\"opc.tcp://<host_ip>:4840/\"]\n\
+                                  - K8s NodePort 30840: [\"opc.tcp://<node_ip>:30840/\"]",
+                            zh = "OPC UA 公告 endpoint URL 列表（必填非空），通过 GetEndpoints 暴露给客户端。\
+                                  每项必须是合法的 'opc.tcp://host[:port][/path]'，host 必须是具体的主机名 \
+                                  / IP，不允许 0.0.0.0 / [::]。严格的 OPC UA 客户端（KEPServerEX、UaExpert）\
+                                  会拒绝公告了通配符地址的服务端。各部署形态推荐填法：\n\
+                                  - 裸机：[\"opc.tcp://192.168.1.10:4840/\", \"opc.tcp://gateway.local:4840/\"]\n\
+                                  - Docker --network host：同裸机\n\
+                                  - Docker bridge '-p 4840:4840'：[\"opc.tcp://<宿主机 IP>:4840/\"]\n\
+                                  - K8s NodePort 30840：[\"opc.tcp://<Node IP>:30840/\"]"
+                        )),
+                        ..Default::default()
+                    }),
                     rules: Some(Rules {
                         required: Some(RuleValue::Value(true)),
-                        min: Some(RuleValue::Value(1.0)),
-                        max: Some(RuleValue::Value(65535.0)),
                         ..Default::default()
                     }),
                     when: None,
                 })),
                 Node::Field(Box::new(Field {
                     path: "namespace_uri".into(),
-                    label: ui_text!(en = "Namespace URI", zh = "命名空间URI"),
+                    label: ui_text!(en = "Namespace URI", zh = "命名空间 URI"),
                     data_type: UiDataType::String,
                     default_value: Some(json!("urn:ng:ng-gateway")),
                     order: Some(3),
@@ -65,12 +96,21 @@ pub(super) fn build_metadata() -> PluginConfigSchemas {
                 })),
                 Node::Field(Box::new(Field {
                     path: "application_uri".into(),
-                    label: ui_text!(en = "Application URI", zh = "应用URI"),
+                    label: ui_text!(en = "Application URI", zh = "应用 URI"),
                     data_type: UiDataType::String,
                     // Keep distinct from namespace_uri to avoid collisions with diagnostics namespace.
                     default_value: Some(json!("urn:ng:opcua-server")),
                     order: Some(4),
-                    ui: None,
+                    ui: Some(UiProps {
+                        help: Some(ui_text!(
+                            en = "OPC UA Application URI. MUST stay distinct from Namespace URI. \
+                                  Changing this value triggers automatic certificate regeneration on \
+                                  next start (the old certificate is archived).",
+                            zh = "OPC UA Application URI，必须与 Namespace URI 不同。修改此值后下次启动 \
+                                  会自动重新生成证书（旧证书归档保留）。"
+                        )),
+                        ..Default::default()
+                    }),
                     rules: Some(Rules {
                         required: Some(RuleValue::Value(true)),
                         ..Default::default()
@@ -79,7 +119,7 @@ pub(super) fn build_metadata() -> PluginConfigSchemas {
                 })),
                 Node::Field(Box::new(Field {
                     path: "product_uri".into(),
-                    label: ui_text!(en = "Product URI", zh = "产品URI"),
+                    label: ui_text!(en = "Product URI", zh = "产品 URI"),
                     data_type: UiDataType::String,
                     default_value: Some(json!("urn:ng:opcua-server")),
                     order: Some(5),
@@ -98,12 +138,40 @@ pub(super) fn build_metadata() -> PluginConfigSchemas {
                     order: Some(6),
                     ui: Some(UiProps {
                         help: Some(ui_text!(
-                            en = "Optional. JSON array of trusted client application instance certificates. Each item can be PEM (BEGIN/END CERTIFICATE) or base64 DER. These will be written into the plugin PKI trust store (trusted/) on startup.",
-                            zh = "可选。受信客户端“应用实例证书”列表（JSON 数组）。每项可填写 PEM（含 BEGIN/END CERTIFICATE）或 base64 编码的 DER。插件启动时会写入 PKI 信任库 trusted/ 目录。"
+                            en = "Optional. JSON array of trusted client application instance \
+                                  certificates. Each item can be PEM (BEGIN/END CERTIFICATE) or \
+                                  base64 DER. Materialized into the plugin PKI trust store \
+                                  (trusted/) on startup.",
+                            zh = "可选。受信客户端「应用实例证书」列表（JSON 数组）。每项可填 PEM \
+                                  （含 BEGIN/END CERTIFICATE）或 base64 编码的 DER。插件启动时写入 \
+                                  PKI 信任库 trusted/ 目录。"
                         )),
                         ..Default::default()
                     }),
                     rules: None,
+                    when: None,
+                })),
+                Node::Field(Box::new(Field {
+                    path: "cert_expiry_warn_days".into(),
+                    label: ui_text!(en = "Certificate Expiry Warn (days)", zh = "证书到期告警阈值（天）"),
+                    data_type: UiDataType::Integer,
+                    default_value: Some(json!(30)),
+                    order: Some(7),
+                    ui: Some(UiProps {
+                        help: Some(ui_text!(
+                            en = "Days-to-expiry threshold below which the certificate-expiry \
+                                  monitor emits a Warning. Below 3 days it escalates to Critical \
+                                  and (if certificate self-management is enabled) auto-regenerates.",
+                            zh = "证书剩余有效期 ≤ 此天数时发出 Warning 日志；剩余 ≤ 3 天时升级为 Critical \
+                                  并触发自动续签（生成新证书并归档旧证书）。"
+                        )),
+                        ..Default::default()
+                    }),
+                    rules: Some(Rules {
+                        min: Some(RuleValue::Value(1.0)),
+                        max: Some(RuleValue::Value(365.0)),
+                        ..Default::default()
+                    }),
                     when: None,
                 })),
             ],

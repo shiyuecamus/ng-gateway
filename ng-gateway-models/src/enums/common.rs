@@ -507,6 +507,16 @@ impl From<AccessMode> for ng_gateway_sdk::AccessMode {
         }
     }
 }
+
+impl From<ng_gateway_sdk::AccessMode> for AccessMode {
+    fn from(value: ng_gateway_sdk::AccessMode) -> Self {
+        match value {
+            ng_gateway_sdk::AccessMode::Read => AccessMode::Read,
+            ng_gateway_sdk::AccessMode::Write => AccessMode::Write,
+            ng_gateway_sdk::AccessMode::ReadWrite => AccessMode::ReadWrite,
+        }
+    }
+}
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize_repr, Deserialize_repr,
 )]
@@ -542,6 +552,15 @@ impl From<DataPointType> for ng_gateway_sdk::DataPointType {
         match value {
             DataPointType::Attribute => ng_gateway_sdk::DataPointType::Attribute,
             DataPointType::Telemetry => ng_gateway_sdk::DataPointType::Telemetry,
+        }
+    }
+}
+
+impl From<ng_gateway_sdk::DataPointType> for DataPointType {
+    fn from(value: ng_gateway_sdk::DataPointType) -> Self {
+        match value {
+            ng_gateway_sdk::DataPointType::Attribute => DataPointType::Attribute,
+            ng_gateway_sdk::DataPointType::Telemetry => DataPointType::Telemetry,
         }
     }
 }

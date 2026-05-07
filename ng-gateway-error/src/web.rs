@@ -14,6 +14,8 @@ pub enum WebError {
     NotFound(String),
     #[error("Forbidden: `{0}`")]
     Forbidden(String),
+    #[error("UnprocessableEntity: `{0}`")]
+    UnprocessableEntity(String),
     #[error("InternalError: `{0}`")]
     InternalError(String),
     #[error("DBError: `{0}`")]
@@ -67,6 +69,10 @@ impl ResponseError for WebError {
             WebError::Forbidden(_) => {
                 body["error"] = json!("Forbidden");
                 HttpResponse::Forbidden().json(body)
+            }
+            WebError::UnprocessableEntity(_) => {
+                body["error"] = json!("Unprocessable Entity");
+                HttpResponse::UnprocessableEntity().json(body)
             }
             WebError::InternalError(_) => {
                 body["error"] = json!("Internal Server Error");

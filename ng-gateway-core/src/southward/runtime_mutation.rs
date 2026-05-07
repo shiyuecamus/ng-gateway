@@ -577,7 +577,7 @@ impl NGSouthwardManager {
                 // Atomically append all points under one entry lock to avoid lost updates.
                 self.runtime
                     .index
-                    .mutate_device_points(device_id, |v| v.extend(to_push.into_iter()));
+                    .mutate_device_points(device_id, |v| v.extend(to_push));
 
                 let added_ids = added.iter().map(|rp| rp.id()).collect::<Vec<i32>>();
                 PointsAddedRecord { added, added_ids }
@@ -792,9 +792,7 @@ impl NGSouthwardManager {
                 if !rec.removed.is_empty() {
                     self.runtime
                         .index
-                        .mutate_device_points(device_id, |current| {
-                            current.extend(rec.removed.into_iter())
-                        });
+                        .mutate_device_points(device_id, |current| current.extend(rec.removed));
                     // Restore metadata entries best-effort.
                     if let Some(points) = self.runtime.index.device_points_slice(device_id) {
                         for p in points.iter() {
@@ -869,7 +867,7 @@ impl NGSouthwardManager {
                 }
                 self.runtime
                     .index
-                    .mutate_device_actions(device_id, |v| v.extend(to_push.into_iter()));
+                    .mutate_device_actions(device_id, |v| v.extend(to_push));
                 let added_ids: Vec<i32> = added.iter().map(|a| a.id()).collect();
                 ActionsAddedRecord { added, added_ids }
             },
@@ -1041,9 +1039,7 @@ impl NGSouthwardManager {
                 if !rec.removed.is_empty() {
                     self.runtime
                         .index
-                        .mutate_device_actions(device_id, |current| {
-                            current.extend(rec.removed.into_iter())
-                        });
+                        .mutate_device_actions(device_id, |current| current.extend(rec.removed));
                 }
             },
         )

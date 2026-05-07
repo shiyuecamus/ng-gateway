@@ -26,6 +26,7 @@ async fn uplink_collect_data_once() -> anyhow::Result<()> {
     let (ctx, device_arc, runtime_points) = build_init_context(channel, device, points);
 
     let connector = <EthernetIpConnector as Connector>::new(ctx)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to create EthernetIpConnector: {e}"))?;
     let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
         connector,

@@ -373,7 +373,7 @@ impl NgConnector for OpcUaConnector {
     type Handle = OpcUaHandle;
     type Session = OpcUaSession;
 
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

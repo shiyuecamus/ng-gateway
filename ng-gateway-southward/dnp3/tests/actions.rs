@@ -38,8 +38,9 @@ async fn dnp3_execute_actions() -> anyhow::Result<()> {
 
     let (ctx, device_arc, _runtime_points) = build_init_context(channel, device, points, pub_trait);
 
-    let connector =
-        <Dnp3Connector as Connector>::new(ctx).context("Failed to create DNP3 connector")?;
+    let connector = <Dnp3Connector as Connector>::new(ctx)
+        .await
+        .context("Failed to create DNP3 connector")?;
     let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
         connector,
         SupervisorParams::default(),

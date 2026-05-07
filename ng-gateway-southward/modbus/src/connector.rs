@@ -92,7 +92,7 @@ impl Connector for ModbusConnector {
     type Handle = ModbusHandle;
     type Session = ModbusSession;
 
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

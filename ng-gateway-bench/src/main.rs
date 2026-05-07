@@ -256,7 +256,9 @@ async fn run_driver_scenario(
     let duration = Duration::from_secs(cli.duration_secs);
     let sample_interval = Duration::from_millis(cli.sample_interval_ms.max(1));
 
-    let channels = build_channels(cli, scenario, protocol).context("build_channels")?;
+    let channels = build_channels(cli, scenario, protocol)
+        .await
+        .context("build_channels")?;
     for ch in channels.iter() {
         ch.start().await.context("driver.start")?;
     }
@@ -344,7 +346,7 @@ async fn run_api_scenario(
 // Channel builder
 // ───────────────────────────────────────────────────────────────────────────
 
-fn build_channels(
+async fn build_channels(
     cli: &Cli,
     scenario: &Scenario,
     protocol: ProtocolOpt,
@@ -370,6 +372,7 @@ fn build_channels(
                             tcp_pool_size: cli.modbus_tcp_pool_size,
                         },
                     )
+                    .await
                     .map_err(|e| anyhow!(e))?
                 }
                 #[cfg(not(feature = "modbus"))]
@@ -394,6 +397,7 @@ fn build_channels(
                             node_id_start: cli.opcua_node_id_start,
                         },
                     )
+                    .await
                     .map_err(|e| anyhow!(e))?
                 }
                 #[cfg(not(feature = "opcua"))]

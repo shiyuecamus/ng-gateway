@@ -66,6 +66,7 @@ async fn test_modbus_tcp_actions() {
 
     // 3. 创建驱动实例
     let connector = <ModbusConnector as Connector>::new(ctx)
+        .await
         .unwrap_or_else(|e| panic!("Failed to create ModbusConnector: {e}"));
     let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
         connector,

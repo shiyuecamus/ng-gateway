@@ -83,7 +83,7 @@ impl ActionRepository {
                 let inserted = Action::insert_many(to_insert)
                     .exec_with_returning_many(conn)
                     .await?;
-                created.extend(inserted.into_iter());
+                created.extend(inserted);
             }
         }
 
@@ -91,7 +91,7 @@ impl ActionRepository {
             let inserted = Action::insert_many(batch)
                 .exec_with_returning_many(conn)
                 .await?;
-            created.extend(inserted.into_iter());
+            created.extend(inserted);
         }
 
         Ok(created)
@@ -110,7 +110,7 @@ impl ActionRepository {
                 .filter(ActionColumn::Id.is_in(chunk.to_vec()))
                 .exec_with_returning(conn)
                 .await?;
-            deleted.extend(removed.into_iter());
+            deleted.extend(removed);
         }
 
         Ok(deleted)

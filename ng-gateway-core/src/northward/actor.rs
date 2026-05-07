@@ -542,6 +542,24 @@ impl AppActor {
         self.data_tx.clone()
     }
 
+    /// Invoke a low-frequency plugin capability.
+    ///
+    /// # Notes
+    /// This method is intentionally a control-plane escape hatch. It delegates
+    /// to the SDK `Plugin::invoke_capability` API and must not be used on
+    /// telemetry hot paths.
+    #[inline]
+    pub async fn invoke_capability(
+        &self,
+        capability_id: &str,
+        request: serde_json::Value,
+    ) -> NGResult<serde_json::Value> {
+        self.plugin
+            .invoke_capability(capability_id, request)
+            .await
+            .map_err(|e| NGError::Error(e.to_string()))
+    }
+
     /// Wait until plugin connection reaches Connected or Failed, with timeout.
     ///
     /// This mirrors the southbound `wait_for_final` behavior and is used by

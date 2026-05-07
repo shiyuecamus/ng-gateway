@@ -37,6 +37,7 @@ pub use crate::domain::{
         WifiScanStatus, WifiSecurity, WifiStaStatus, WifiUuidPath, WiredStatus,
         WirelessInterfaceCapability,
     },
+    opcua_server::OpcuaServerExportContext,
     plugin::{NewPlugin, PluginInfo, PluginPageParams, UpdatePlugin},
     point::{
         NewPoint, PointInfo, PointPageParams, UpdatePoint, WritePointPayload, WritePointResult,

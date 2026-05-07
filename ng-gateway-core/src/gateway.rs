@@ -858,7 +858,7 @@ impl DeviceRuntimeCmd for NGGateway {
         }
 
         // Step 1: DB updates (sequential for simpler compensation)
-        let updated: Vec<DeviceModel> = tokio_stream::iter(devices.into_iter())
+        let updated: Vec<DeviceModel> = tokio_stream::iter(devices)
             .map(|u| DeviceRepository::update::<DatabaseConnection>(u.into_active_model(), None))
             .buffer_unordered(16)
             .try_collect()
@@ -903,11 +903,11 @@ impl DeviceRuntimeCmd for NGGateway {
             points_by_device
                 .entry(id)
                 .or_default()
-                .extend(deleted_points.into_iter());
+                .extend(deleted_points);
             actions_by_device
                 .entry(id)
                 .or_default()
-                .extend(deleted_actions.into_iter());
+                .extend(deleted_actions);
         }
 
         let deleted_devices =
@@ -1034,7 +1034,7 @@ impl PointRuntimeCmd for NGGateway {
         }
 
         // Step 1: DB updates (sequential for simpler compensation)
-        let updated = tokio_stream::iter(points.into_iter())
+        let updated = tokio_stream::iter(points)
             .map(|up| PointRepository::update::<DatabaseConnection>(up.into_active_model(), None))
             .buffer_unordered(16)
             .try_collect::<Vec<PointModel>>()
@@ -1050,8 +1050,8 @@ impl PointRuntimeCmd for NGGateway {
             let ids: Vec<i32> = rps.iter().map(|m| m.id).collect();
             if let Err(e) = self.southward_manager.replace_points(dev_id, rps).await {
                 for old in old_grouped
-                    .into_iter()
-                    .flat_map(|(_, olds)| olds)
+                    .into_values()
+                    .flatten()
                     .filter(|o| ids.contains(&o.id))
                 {
                     let _ = PointRepository::update::<DatabaseConnection>(
@@ -1193,7 +1193,7 @@ impl ActionRuntimeCmd for NGGateway {
         }
 
         // Step 1: DB updates (buffered)
-        let updated: Vec<ActionModel> = tokio_stream::iter(actions.into_iter())
+        let updated: Vec<ActionModel> = tokio_stream::iter(actions)
             .map(|up| ActionRepository::update::<DatabaseConnection>(up.into_active_model(), None))
             .buffer_unordered(16)
             .try_collect()
@@ -1210,8 +1210,8 @@ impl ActionRuntimeCmd for NGGateway {
             if let Err(e) = self.southward_manager.replace_actions(dev_id, ras).await {
                 // revert DB for these ids
                 for old in old_grouped
-                    .iter()
-                    .flat_map(|(_, v)| v)
+                    .values()
+                    .flatten()
                     .filter(|o| ids.contains(&o.id))
                 {
                     let _ = ActionRepository::update::<DatabaseConnection>(

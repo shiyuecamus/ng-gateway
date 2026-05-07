@@ -9,8 +9,8 @@ use ng_gateway_sdk::{
             UplinkPayloadConfig,
         },
     },
-    AccessMode, DataType, NGValue, NorthwardData, NorthwardEvent, NorthwardRuntimeApi, PointMeta,
-    PointValue, TelemetryData, Transform,
+    AccessMode, DataPointType, DataType, NGValue, NorthwardData, NorthwardEvent,
+    NorthwardRuntimeApi, PointMeta, PointValue, TelemetryData, Transform,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -30,6 +30,7 @@ fn test_uplink_mapped_json() {
         point_name: "Temperature".into(),
         point_key: "temp".into(),
         data_type: DataType::Float64,
+        point_type: DataPointType::Telemetry,
         access_mode: AccessMode::Read,
         unit: None,
         min_value: None,

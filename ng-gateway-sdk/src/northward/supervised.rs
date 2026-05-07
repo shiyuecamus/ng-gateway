@@ -97,6 +97,16 @@ where
         h.process_data(data).await
     }
 
+    async fn invoke_capability(
+        &self,
+        capability_id: &str,
+        request: serde_json::Value,
+    ) -> NorthwardResult<serde_json::Value> {
+        self.supervisor
+            .invoke_capability(capability_id, request)
+            .await
+    }
+
     async fn stop(&self) -> NorthwardResult<()> {
         if let Some(h) = self.handle.lock().await.take() {
             h.stop();

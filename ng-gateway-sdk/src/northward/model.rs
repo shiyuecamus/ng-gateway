@@ -1,5 +1,5 @@
 use super::types::{AlarmSeverity, DropPolicy, TargetType};
-use crate::{AccessMode, DataType, NGValue, PointValue, Transform};
+use crate::{AccessMode, DataPointType, DataType, NGValue, PointValue, Transform};
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::FromJsonQueryResult;
@@ -669,6 +669,13 @@ pub struct PointMeta {
     pub point_key: Arc<str>,
     /// Strong data type definition for this point.
     pub data_type: DataType,
+    /// Semantic point category (telemetry vs attribute).
+    ///
+    /// # Notes
+    /// This mirrors the southward `RuntimePoint::r#type()` discriminant so
+    /// northward plugins can reason about a point's role without performing
+    /// trait-object lookups on the hot path.
+    pub point_type: DataPointType,
     /// Access mode for read/write validation.
     pub access_mode: AccessMode,
     /// Unit of measurement (optional).

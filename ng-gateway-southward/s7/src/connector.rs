@@ -73,7 +73,7 @@ impl Connector for S7Connector {
     type Session = S7Session;
 
     #[inline]
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

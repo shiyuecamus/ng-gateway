@@ -33,6 +33,7 @@ use objc2_core_wlan::{
 };
 use objc2_foundation::{NSData, NSOrderedSet, NSSet, NSString};
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashSet},
     env,
     ffi::c_void,
@@ -494,7 +495,7 @@ impl PlatformNetworkManager for MacosNetworkManager {
                     .filter_map(|net| convert_cw_network(net, current_ssid.as_deref()))
                     .collect();
 
-                aps.sort_unstable_by(|a, b| b.signal_quality.cmp(&a.signal_quality));
+                aps.sort_unstable_by_key(|b| Reverse(b.signal_quality));
                 aps.dedup_by(|a, b| {
                     a.ssid == b.ssid && a.bssid == b.bssid && a.channel == b.channel
                 });

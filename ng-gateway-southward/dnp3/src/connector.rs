@@ -245,7 +245,7 @@ impl Connector for Dnp3Connector {
     type Handle = Dnp3Handle;
     type Session = Dnp3Session;
 
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

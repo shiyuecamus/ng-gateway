@@ -659,7 +659,7 @@ pub async fn import_action_commit(
             for a in per_row_actions.into_iter() {
                 let key = (a.name.clone(), a.command.clone());
                 if let Some(existing) = grouped.get_mut(&key) {
-                    existing.inputs.0.extend(a.inputs.0.into_iter());
+                    existing.inputs.0.extend(a.inputs.0);
                 } else {
                     grouped.insert(key, a);
                 }

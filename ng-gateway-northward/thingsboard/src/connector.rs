@@ -384,7 +384,7 @@ impl Connector for ThingsBoardConnector {
     type Session = ThingsBoardSession;
 
     #[inline]
-    fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
+    async fn new(ctx: Self::InitContext) -> Result<Self, <Self::Session as Session>::Error>
     where
         Self: Sized,
     {

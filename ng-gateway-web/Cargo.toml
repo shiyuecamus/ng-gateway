@@ -108,8 +108,14 @@ workspace = true
 [dependencies.zip]
 version = "6.0"
 
+[dependencies.rust_xlsxwriter]
+version = "0.94"
+
 [features]
 # Enable embedded UI (ui-dist.zip) support. This is intended for:
 # - Single-binary distribution (Homebrew philosophy)
 # - Offline single-file deployments
 ui-embedded = []
+
+[dev-dependencies]
+calamine = "0.34"

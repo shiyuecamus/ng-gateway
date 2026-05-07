@@ -355,12 +355,39 @@ pub trait SouthwardManager: DowncastSync + Send + Sync + 'static {
     fn get_channel_connection_state(&self, channel_id: i32) -> Option<Arc<ConnectionState>>;
 }
 
-/// Trait for accessing northward app connection states
+/// Trait for accessing northward app connection states and capabilities.
+///
+/// # Why a trait method for capability invocation?
+/// Plugins may expose plugin-specific control-plane operations (snapshots,
+/// runtime introspection, export endpoints) via the SDK
+/// `Plugin::invoke_capability` JSON-RPC surface. Surfacing this through the
+/// northward manager trait keeps the web/API layer free of any concrete
+/// runtime types (no `downcast_arc::<NGNorthwardManager>`), preserving the
+/// gateway's pluggable architecture and testability.
+#[async_trait]
 pub trait NorthwardManager: DowncastSync + Send + Sync + 'static {
-    /// Get the connection state for an app
+    /// Get the connection state for an app.
     ///
     /// Returns `None` if the app is not found in the runtime manager.
     fn get_app_connection_state(&self, app_id: i32) -> Option<Arc<ConnectionState>>;
+
+    /// Invoke a plugin-specific control-plane capability on a running app.
+    ///
+    /// # Latency
+    /// This is a low-frequency operation. Implementations MUST NOT use this on
+    /// the telemetry hot path.
+    ///
+    /// # Errors
+    /// - Returns `NGError::Error` (or storage equivalent) when no app actor
+    ///   exists for `app_id` (the app is not running).
+    /// - Any error produced by the plugin is forwarded as `NGError::Error`
+    ///   with the plugin's `Display` representation preserved.
+    async fn invoke_app_capability(
+        &self,
+        app_id: i32,
+        capability_id: &str,
+        request: serde_json::Value,
+    ) -> NGResult<serde_json::Value>;
 }
 
 /// Trait for accessing realtime monitor hub

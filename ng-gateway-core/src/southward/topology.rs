@@ -158,8 +158,17 @@ impl NGSouthwardManager {
         );
 
         // Create driver (Box) and convert to Arc.
+        //
+        // # Async runtime semantics
+        //
+        // `DriverFactory::create_driver` is now `async` and runs entirely
+        // on the driver's own `NG_RUNTIME`. The `cdylib`-side
+        // `RuntimeAwareDriverFactory` wrapper performs the runtime hop
+        // (spawn-onto-driver-runtime + `AbortOnDropHandle`-guarded await),
+        // so this call is host-side cancel-safe.
         let driver = driver_factory
             .create_driver(ctx)
+            .await
             .map_err(|e| NGError::DriverError(e.to_string()))?;
         let driver: Arc<dyn Driver> = Arc::from(driver);
 
@@ -259,8 +268,13 @@ impl NGSouthwardManager {
         };
 
         // Create driver and wrap.
+        //
+        // See `create_channel_instance` for the async runtime semantics
+        // (the wrapper performs the cross-runtime hop and host-side
+        // cancellation propagation).
         let driver = driver_factory
             .create_driver(ctx)
+            .await
             .map_err(|e| NGError::DriverError(e.to_string()))?;
         let driver: Arc<dyn Driver> = Arc::from(driver);
 

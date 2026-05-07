@@ -59,7 +59,7 @@ pub struct ModbusChannelRuntimeArgs {
 /// - `points_per_device` points are mapped to Modbus holding registers.
 /// - Float32 points use `quantity = 2` registers.
 /// - Address pattern is `base + i * address_step`.
-pub fn build_modbus_channel_runtime(
+pub async fn build_modbus_channel_runtime(
     args: ModbusChannelRuntimeArgs,
 ) -> DriverResult<ChannelRuntime> {
     let runtime_channel: Arc<ModbusChannel> = Arc::new(ModbusChannel {
@@ -180,7 +180,7 @@ pub fn build_modbus_channel_runtime(
         observer_factory: Arc::new(NoopObserverFactory),
     };
 
-    let connector = <ModbusConnector as Connector>::new(ctx)?;
+    let connector = <ModbusConnector as Connector>::new(ctx).await?;
     let (loop_, _state_rx) = SupervisorLoop::new_noop_with_span(
         connector,
         SupervisorParams::default(),

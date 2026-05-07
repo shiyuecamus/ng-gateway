@@ -1,5 +1,5 @@
 use crate::NorthwardResult;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{cmp::Reverse, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::RwLock;
 
 /// Result type for message handlers
@@ -82,7 +82,7 @@ impl MessageRouter {
         let mut routes = self.routes.write().await;
         routes.push((route, handler));
         // Sort by priority (descending) to check higher priority routes first
-        routes.sort_by(|a, b| b.0.priority.cmp(&a.0.priority));
+        routes.sort_by_key(|b| Reverse(b.0.priority));
     }
 
     /// Set default handler for unmatched messages

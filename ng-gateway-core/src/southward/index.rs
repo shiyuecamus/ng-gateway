@@ -318,6 +318,7 @@ impl RuntimeIndex {
             point_name: Arc::<str>::from(point.name()),
             point_key: Arc::<str>::from(point.key()),
             data_type: point.data_type(),
+            point_type: point.r#type(),
             access_mode: point.access_mode(),
             unit: point.unit().map(Arc::<str>::from),
             min_value: point.min_value(),

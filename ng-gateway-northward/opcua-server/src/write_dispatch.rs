@@ -5,7 +5,7 @@ use ng_gateway_sdk::{
     DataType, NGValue, NorthwardError, NorthwardEvent, NorthwardResult, NorthwardRuntimeApi,
     PointMeta, WritePoint, WritePointErrorKind, WritePointResponse, WritePointStatus,
 };
-use opcua::types::{ByteString, Variant};
+use opcua::types::{ByteString, NodeId, Variant};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
@@ -36,16 +36,18 @@ impl WriteDispatcher {
         }
     }
 
-    /// Dispatch a write for a node id (ns=1;s=...) and value.
+    /// Dispatch a write keyed on the typed `NodeId`.
     ///
-    /// NOTE: Proper OPC UA StatusCode mapping is done by server integration layer.
-    pub async fn dispatch_write(&self, node_id: &str, value: &Variant) -> NorthwardResult<()> {
-        let point_id = self
-            .node_cache
-            .get_point_id(node_id)
-            .ok_or(NorthwardError::NotFound {
-                entity: format!("node_id:{node_id}"),
-            })?;
+    /// Reverse-lookup of the gateway `point_id` happens via the `NodeCache`
+    /// `NodeId → i32` map (no string allocation on the hot path). Proper OPC
+    /// UA `StatusCode` mapping is done by the server integration layer.
+    pub async fn dispatch_write(&self, node_id: &NodeId, value: &Variant) -> NorthwardResult<()> {
+        let point_id =
+            self.node_cache
+                .get_point_id(node_id)
+                .ok_or_else(|| NorthwardError::NotFound {
+                    entity: format!("node_id:{node_id}"),
+                })?;
         let meta = self
             .runtime
             .get_point_meta(point_id)

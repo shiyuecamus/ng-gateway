@@ -120,6 +120,10 @@ pub enum NorthwardError {
     #[error("Operation not supported: {operation} for platform '{platform}'")]
     OperationNotSupported { operation: String, platform: String },
 
+    /// Plugin capability is not supported by this northward plugin.
+    #[error("Capability not supported: {capability_id}")]
+    CapabilityNotSupported { capability_id: String },
+
     /// Device provision failed
     #[error("Device provision failed for platform '{platform}': {reason}")]
     ProvisionFailed { platform: String, reason: String },
