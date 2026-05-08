@@ -68,7 +68,6 @@ impl NGWebServer {
         // Prepare UI runtime config + assets upfront (outside actix `HttpServer::new` closure).
         // This avoids blocking work in the per-worker factory and keeps request handling lock-free.
         let ui_cfg = UiRuntimeConfig {
-            api_router_prefix: router_prefix.clone(),
             ui: settings.web.ui.clone(),
         };
         let ui_enabled = ui_cfg.ui.enabled;

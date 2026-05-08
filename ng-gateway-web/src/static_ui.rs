@@ -29,7 +29,6 @@ const UI_DIST_ZIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui-dist.zip
 /// Runtime UI configuration derived from `ng-gateway-models` settings.
 #[derive(Debug, Clone)]
 pub struct UiRuntimeConfig {
-    pub api_router_prefix: String,
     pub ui: WebUi,
 }
 
@@ -73,24 +72,20 @@ impl UiAssets {
     }
 }
 
-/// Register UI routes into actix `ServiceConfig`.
+/// Register UI fallback as the application's default service.
+///
+/// By using `default_service` instead of a catch-all `/{path:.*}` resource,
+/// we ensure that all explicitly registered routes (e.g. `/health`, `/metrics`)
+/// are matched first. The UI handler is only invoked for paths that no other
+/// route has claimed.
 pub fn configure_ui_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::resource("/{path:.*}")
-            .route(web::get().to(ui_handler))
-            .route(web::head().to(ui_handler)),
-    );
+    cfg.default_service(web::to(ui_handler));
 }
 
 async fn ui_handler(
     req: HttpRequest,
     ui_cfg: Data<UiRuntimeConfig>,
 ) -> actix_web::Result<HttpResponse> {
-    // Safety guard: never serve UI for API paths
-    if req.path().starts_with(ui_cfg.api_router_prefix.as_str()) {
-        return Ok(HttpResponse::NotFound().finish());
-    }
-
     match ui_cfg.ui.mode {
         WebUiMode::EmbeddedZip => {
             let assets = req.app_data::<Data<UiAssets>>().ok_or(
