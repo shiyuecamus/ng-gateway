@@ -26,6 +26,8 @@ members = [
   "ng-gateway-northward/pulsar",
   "ng-gateway-northward/kafka",
   "ng-gateway-xtask",
+  "third-party/async-opcua-core",
+  "third-party/async-opcua-server",
 ]
 resolver = "2"
 
@@ -46,6 +48,12 @@ rust-version = "1.95"
 [patch.crates-io]
 # Force all workspace crates (including drivers) to use the local SDK during development.
 ng-gateway-sdk = { path = "./ng-gateway-sdk" }
+# Patch async-opcua-core so `SecurityMode=None` OpenSecureChannel responses
+# emit a null nonce, matching OPC UA Part 6 and strict clients such as KepServerEX.
+async-opcua-core = { path = "./third-party/async-opcua-core" }
+# Patch async-opcua-server so NodePort / reverse-proxy deployments advertise
+# external endpoint URLs instead of the container-internal listener port.
+async-opcua-server = { path = "./third-party/async-opcua-server" }
 
 # External NG common api
 [workspace.dependencies.node-grove-common-api]

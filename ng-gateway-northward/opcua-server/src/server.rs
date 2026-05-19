@@ -348,6 +348,15 @@ impl OpcuaServerRuntime {
                     user_token_ids,
                 ),
             )
+            .add_endpoint(
+                "basic256_sign_encrypt",
+                (
+                    endpoint_path,
+                    SecurityPolicy::Basic256,
+                    MessageSecurityMode::SignAndEncrypt,
+                    user_token_ids,
+                ),
+            )
             .default_endpoint("no_security")
             .with_node_manager(InMemoryNodeManagerBuilder::new(
                 move |context: ServerContext, address_space: &mut AddressSpace| {
