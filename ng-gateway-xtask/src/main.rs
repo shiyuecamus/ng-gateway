@@ -77,6 +77,13 @@ enum Commands {
         /// Build profile to deploy from (debug/release)
         #[arg(short, long, default_value = "debug")]
         profile: String,
+
+        /// Cargo target triple used for the prior build (e.g. aarch64-unknown-linux-gnu).
+        ///
+        /// Required when deploying cross-compiled artifacts from a different host OS,
+        /// so the correct shared-library extension (`.so` / `.dylib` / `.dll`) is used.
+        #[arg(long)]
+        target: Option<String>,
     },
 
     /// Clean build artifacts and deployed libraries
@@ -142,7 +149,9 @@ fn main() -> ExitCode {
             no_deploy,
             cargo_args: &cargo_args,
         }),
-        Commands::Deploy { profile } => deploy_command(&profile, None),
+        Commands::Deploy { profile, target } => {
+            deploy_command(&profile, target.as_deref())
+        }
         Commands::Clean { all } => clean_command(all),
     };
 
@@ -447,6 +456,21 @@ fn build_command(args: BuildCommandArgs<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the shared-library extension for a Cargo target triple.
+///
+/// Prefer the *build target* over the host OS: when cross-compiling from
+/// macOS to `*-linux-*`, artifacts are `.so`, not `.dylib`.
+fn library_extension_for_target(target: Option<&str>) -> &'static str {
+    match target {
+        Some(triple) if triple.contains("windows") || triple.contains("win32") => "dll",
+        Some(triple) if triple.contains("apple-darwin") || triple.contains("macos") => "dylib",
+        Some(_) => "so",
+        None if cfg!(target_os = "macos") => "dylib",
+        None if cfg!(target_os = "windows") => "dll",
+        None => "so",
+    }
+}
+
 /// Deploy built drivers and plugins
 fn deploy_command(profile: &str, target: Option<&str>) -> Result<()> {
     println!("📦 Deploying drivers and plugins...");
@@ -466,14 +490,9 @@ fn deploy_command(profile: &str, target: Option<&str>) -> Result<()> {
     println!("   Source: {}", source_dir.display());
     println!();
 
-    // Determine library extension based on platform
-    let lib_extension = if cfg!(target_os = "macos") {
-        "dylib"
-    } else if cfg!(target_os = "windows") {
-        "dll"
-    } else {
-        "so"
-    };
+    // Use the Cargo *target* triple (not the host OS) so cross-builds from
+    // macOS correctly pick up Linux `.so` driver/plugin libraries.
+    let lib_extension = library_extension_for_target(target);
 
     // Deploy drivers
     let drivers_dest = workspace_root.join("drivers").join("builtin");
